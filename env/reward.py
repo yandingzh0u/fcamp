@@ -28,11 +28,14 @@ class MimicRewardMixin:
         ).clip(min=0.0)
         joint_limit = torch.sum(out_of_limits, dim=-1)
 
-        anchor_pos_error = torch.sum(
-            torch.square(reference["anchor_pos_w"] - context["robot_anchor_pos_w"]),
-            dim=-1,
-        )
-        anchor_pos_reward = torch.exp(-anchor_pos_error / (0.3**2))
+        anchor_pos_diff = reference["anchor_pos_w"] - context["robot_anchor_pos_w"]
+        anchor_xy_error = torch.sum(torch.square(anchor_pos_diff[..., :2]), dim=-1)
+        anchor_z_error_sq = torch.square(anchor_pos_diff[..., 2])
+        # z-axis sigma 0.1 keeps the gradient meaningful across the whole survival window:
+        # 5cm drift -> reward 0.78 (gentle warning), 10cm drift -> 0.37 (strong push), 12cm
+        # death threshold -> 0.24 (clearly distinguishable from healthy). The xy term keeps
+        # 0.3 sigma so lateral tracking stays gentle.
+        anchor_pos_reward = torch.exp(-anchor_xy_error / (0.3**2)) * torch.exp(-anchor_z_error_sq / (0.1**2))
         anchor_ori_error = quat_error_magnitude(reference["anchor_quat_w"], context["robot_anchor_quat_w"]) ** 2
         anchor_ori_reward = torch.exp(-anchor_ori_error / (0.4**2))
 
@@ -68,8 +71,8 @@ class MimicRewardMixin:
             - 1.0e-5 * joint_torque
             - 1.0e-1 * action_rate
             - 10.0 * joint_limit
-            + 0.5 * anchor_pos_reward
-            + 0.5 * anchor_ori_reward
+            + 2.0 * anchor_pos_reward
+            + 2.0 * anchor_ori_reward
             + 1.0 * body_pos_reward
             + 1.0 * body_ori_reward
             + 1.0 * body_lin_vel_reward

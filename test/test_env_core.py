@@ -20,6 +20,7 @@ from env.config import (
     _match_joint_expr,
 )
 from env.motion import MimicMotionReference
+from env.mimic import G1MimicEnv
 from env.robots.g1 import G1_29DOF_ACTION_NAMES, G1_29DOF_ASSET_JOINT_NAMES, G1_LOCAL_USD_PATH, make_g1_cfg
 
 
@@ -34,8 +35,8 @@ def test_env_exports_and_config_constants_are_consistent() -> None:
     assert Path(mimic_cfg.motion_file).is_file()
     assert len(MIMIC_BODY_NAMES) == 14
     assert set(MIMIC_EE_BODY_NAMES).issubset(set(MIMIC_BODY_NAMES))
-    assert ANCHOR_Z_TERMINATION_THRESHOLD == pytest.approx(0.25)
-    assert ANCHOR_ORI_TERMINATION_THRESHOLD == pytest.approx(0.8)
+    assert ANCHOR_Z_TERMINATION_THRESHOLD == pytest.approx(0.12)
+    assert ANCHOR_ORI_TERMINATION_THRESHOLD == pytest.approx(0.4)
     assert EE_Z_TERMINATION_THRESHOLD == pytest.approx(0.25)
 
 
@@ -99,3 +100,30 @@ def test_motion_reference_clamps_and_gathers_frames(tmp_path: Path) -> None:
     assert torch.equal(frame["body_pos_w"][0, 0], motion.body_pos_full_w[0, 1])
     assert torch.equal(frame["anchor_pos_w"][1], motion.body_pos_full_w[1, 2])
     assert torch.equal(frame["root_pos_w"][2], motion.body_pos_full_w[2, 0])
+
+
+def test_sample_phase_indices_keeps_rollout_inside_motion_window() -> None:
+    class _PhaseSampleHarness(G1MimicEnv):
+        @property
+        def device(self) -> torch.device:
+            return torch.device("cpu")
+
+    env = _PhaseSampleHarness.__new__(_PhaseSampleHarness)
+    env.motion_start_phase = 10
+    env.motion_end_phase = 99
+    env.bin_count = 1
+    env.bin_failed_count = torch.zeros(1)
+    env.adaptive_uniform_ratio = 1.0
+    env.adaptive_kernel_size = 1
+    env.adaptive_kernel = torch.ones(1)
+    env.motion = type("Motion", (), {"num_frames": 100})()
+
+    torch.manual_seed(0)
+    phase_indices = env.sample_phase_indices(8192, horizon=24)
+
+    assert int(phase_indices.min().item()) >= 10
+    assert int(phase_indices.max().item()) <= 76
+
+    phase_indices = env.sample_phase_indices(8192, horizon=300)
+
+    assert torch.equal(phase_indices, torch.full((8192,), 10, dtype=torch.long))

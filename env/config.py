@@ -48,9 +48,10 @@ MIMIC_EE_BODY_NAMES = (
 )
 MIMIC_ANCHOR_BODY_NAME = "torso_link"
 OBS_DIM = 154
+CRITIC_OBS_DIM = 286
 UNDESIRED_CONTACT_THRESHOLD = 1.0
-ANCHOR_Z_TERMINATION_THRESHOLD = 0.25
-ANCHOR_ORI_TERMINATION_THRESHOLD = 0.8
+ANCHOR_Z_TERMINATION_THRESHOLD = 0.12
+ANCHOR_ORI_TERMINATION_THRESHOLD = 0.4
 EE_Z_TERMINATION_THRESHOLD = 0.25
 RESET_ROOT_POSE_RANGE = (
     (-0.05, 0.05),
@@ -151,6 +152,7 @@ class EnvConfig:
     render: bool = False
     env_spacing: float = 2.5
     fix_root_link: bool = False
+    startup_randomization: bool = True
     camera_eye: tuple[float, float, float] = (2.5, 2.5, 1.6)
     camera_target: tuple[float, float, float] = (0.0, 0.0, 0.8)
 
@@ -161,6 +163,8 @@ class MimicEnvConfig(EnvConfig):
     max_episode_steps: int = 1500
     motion_start_phase: int = 0
     motion_end_phase: int = -1
+    reset_noise: bool = True
+    interval_pushes: bool = True
     track_body_names: tuple[str, ...] = MIMIC_BODY_NAMES
     ee_body_names: tuple[str, ...] = MIMIC_EE_BODY_NAMES
     anchor_body_name: str = MIMIC_ANCHOR_BODY_NAME

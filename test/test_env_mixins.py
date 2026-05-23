@@ -37,6 +37,7 @@ class _ObservationHarness(MimicObservationMixin):
         self.robot.data.body_quat_w = _identity_quat(2, 14)
         self.robot.data.body_lin_vel_w = torch.zeros(2, 14, 3)
         self.robot.data.body_ang_vel_w = torch.zeros(2, 14, 3)
+        self.robot.data.root_lin_vel_b = torch.zeros(2, 3)
         self.robot.data.root_ang_vel_b = torch.zeros(2, 3)
         self.motion = self
 
@@ -69,6 +70,17 @@ def test_observation_builds_official_154_dim_contract() -> None:
     observation = harness.build_observation()
 
     assert observation.shape == (2, 154)
+    assert torch.allclose(observation[:, :29], torch.ones(2, 29))
+    assert torch.allclose(observation[:, 29:58], torch.ones(2, 29) * 2.0)
+    assert torch.allclose(observation[:, -29:], torch.full((2, 29), 0.25))
+
+
+def test_critic_observation_builds_official_286_dim_contract() -> None:
+    harness = _ObservationHarness()
+
+    observation = harness.build_critic_observation()
+
+    assert observation.shape == (2, 286)
     assert torch.allclose(observation[:, :29], torch.ones(2, 29))
     assert torch.allclose(observation[:, 29:58], torch.ones(2, 29) * 2.0)
     assert torch.allclose(observation[:, -29:], torch.full((2, 29), 0.25))
@@ -136,7 +148,7 @@ def test_reward_exact_value_for_perfect_tracking_without_penalties() -> None:
 
     reward, terms = harness.compute_reward(action, previous_action=action)
 
-    assert torch.allclose(reward, torch.full((2,), 5.0 * harness.dt))
+    assert torch.allclose(reward, torch.full((2,), 8.0 * harness.dt))
     assert torch.allclose(terms["anchor_pos_reward"], torch.ones(2))
     assert torch.allclose(terms["body_ang_vel_reward"], torch.ones(2))
     assert torch.allclose(terms["undesired_contacts"], torch.zeros(2))
@@ -192,8 +204,8 @@ class _StepHarness(MimicStepMixin):
         self.device = torch.device("cpu")
         self.calls = 0
 
-    def step(self, action_offsets: torch.Tensor, auto_reset: bool = False):
-        del action_offsets, auto_reset
+    def step(self, action_offsets: torch.Tensor, auto_reset: bool = False, reset_horizon: int = 1):
+        del action_offsets, auto_reset, reset_horizon
         self.calls += 1
         obs = torch.full((2, 5), float(self.calls))
         reward = torch.tensor([float(self.calls), 10.0 + self.calls])
@@ -217,25 +229,3 @@ class _StepHarness(MimicStepMixin):
     def _update_adaptive_motion_sampling(self) -> None:
         pass
 
-
-def test_chunk_step_masks_rewards_after_first_done_without_auto_reset() -> None:
-    harness = _StepHarness()
-    actions = torch.zeros(2, 3, 3)
-
-    obs_list, rewards, terminations, truncations, infos = harness.chunk_step(actions, auto_reset=False)
-
-    assert len(obs_list) == 3
-    assert len(infos) == 3
-    assert torch.equal(rewards[0], torch.tensor([1.0, 0.0, 0.0]))
-    assert torch.equal(rewards[1], torch.tensor([11.0, 12.0, 13.0]))
-    assert torch.equal(terminations[0], torch.tensor([True, False, False]))
-    assert not truncations.any()
-
-
-def test_chunk_step_rejects_bad_action_shapes() -> None:
-    harness = _StepHarness()
-
-    with pytest.raises(ValueError, match="chunk_actions must have shape"):
-        harness.chunk_step(torch.zeros(2, 3), auto_reset=False)
-    with pytest.raises(ValueError, match="Expected chunk_actions shape"):
-        harness.chunk_step(torch.zeros(3, 2, 3), auto_reset=False)

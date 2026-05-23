@@ -5,6 +5,7 @@ import torch
 from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
 
 from .config import (
+    CRITIC_OBS_DIM,
     OBS_DIM,
     PUSH_INTERVAL_STEP_RANGE,
     RESET_JOINT_POSITION_RANGE,
@@ -71,11 +72,16 @@ class G1MimicEnv(
     def observation_dim(self) -> int:
         return OBS_DIM
 
+    @property
+    def critic_observation_dim(self) -> int:
+        return CRITIC_OBS_DIM
+
     def sample_phase_indices(self, num_samples: int, horizon: int) -> torch.Tensor:
         if num_samples < 0:
             raise ValueError(f"num_samples must be >= 0, got {num_samples}")
         if num_samples == 0:
             return torch.empty(0, dtype=torch.long, device=self.device)
+        horizon = max(1, int(horizon))
         sampling_probabilities = self.bin_failed_count + self.adaptive_uniform_ratio / float(self.bin_count)
         sampling_probabilities = torch.nn.functional.pad(
             sampling_probabilities.unsqueeze(0).unsqueeze(0),
@@ -93,8 +99,10 @@ class G1MimicEnv(
             / self.bin_count
             * (self.motion.num_frames - 1)
         ).long()
-        del horizon
-        max_phase = min(self.motion_end_phase, self.motion.num_frames - 1)
+        max_phase = min(
+            self.motion_end_phase,
+            max(0, self.motion.num_frames - horizon),
+        )
         if max_phase < self.motion_start_phase:
             return torch.full((num_samples,), self.motion_start_phase, dtype=torch.long, device=self.device)
         return torch.clamp(phase_indices, min=self.motion_start_phase, max=max_phase)
@@ -136,7 +144,8 @@ class G1MimicEnv(
         root_ang_vel = reference["root_ang_vel_w"].clone()
         joint_pos = reference["joint_pos"].clone()
         joint_vel = reference["joint_vel"].clone()
-        self._apply_official_reset_noise(env_ids, root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos)
+        if self.task_cfg.reset_noise:
+            self._apply_official_reset_noise(env_ids, root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos)
         self._write_robot_state(
             root_pos=root_pos,
             root_quat=root_quat,
@@ -229,7 +238,8 @@ class G1MimicEnv(
         root_ang_vel = reference["root_ang_vel_w"].clone()
         joint_pos = reference["joint_pos"].clone()
         joint_vel = reference["joint_vel"].clone()
-        self._apply_official_reset_noise(env_ids, root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos)
+        if self.task_cfg.reset_noise:
+            self._apply_official_reset_noise(env_ids, root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos)
         self._write_robot_state(
             root_pos=root_pos,
             root_quat=root_quat,

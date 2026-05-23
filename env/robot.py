@@ -42,7 +42,8 @@ class G1Env:
 
         self.sim.set_camera_view(cfg.camera_eye, cfg.camera_target)
         self.sim.reset()
-        self._apply_official_startup_events()
+        if cfg.startup_randomization:
+            self._apply_official_startup_events()
 
         action_joint_ids = self.robot.find_joints(G1_29DOF_ACTION_NAMES, preserve_order=True)[0]
         self.action_joint_ids = torch.tensor(action_joint_ids, dtype=torch.long, device=self.sim.device)

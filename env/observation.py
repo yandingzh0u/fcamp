@@ -11,7 +11,7 @@ from isaaclab.utils.math import (
     yaw_quat,
 )
 
-from .config import OBS_DIM
+from .config import CRITIC_OBS_DIM, OBS_DIM
 
 
 class MimicObservationMixin:
@@ -90,6 +90,9 @@ class MimicObservationMixin:
     def get_observation(self) -> torch.Tensor:
         return self.build_observation()
 
+    def get_critic_observation(self) -> torch.Tensor:
+        return self.build_critic_observation()
+
     def build_observation(self) -> torch.Tensor:
         context = self.get_tracking_context()
         reference = context["reference"]
@@ -118,6 +121,46 @@ class MimicObservationMixin:
         )
         if observation.shape[-1] != OBS_DIM:
             raise RuntimeError(f"Expected observation dim {OBS_DIM}, got {observation.shape[-1]}")
+        return observation
+
+    def build_critic_observation(self) -> torch.Tensor:
+        context = self.get_tracking_context()
+        reference = context["reference"]
+        reference_joint_state = torch.cat([reference["joint_pos"], reference["joint_vel"]], dim=-1)
+        motion_anchor_pos_b, motion_anchor_ori_b = self._motion_anchor_observation_terms(
+            context["robot_anchor_pos_w"],
+            context["robot_anchor_quat_w"],
+            reference,
+        )
+        num_bodies = len(self.track_body_names)
+        robot_anchor_pos_repeat = context["robot_anchor_pos_w"][:, None, :].repeat(1, num_bodies, 1)
+        robot_anchor_quat_repeat = context["robot_anchor_quat_w"][:, None, :].repeat(1, num_bodies, 1)
+        robot_body_pos_b, robot_body_ori_b = subtract_frame_transforms(
+            robot_anchor_pos_repeat,
+            robot_anchor_quat_repeat,
+            context["robot_body_pos_w"],
+            context["robot_body_quat_w"],
+        )
+        robot_body_ori_b = matrix_from_quat(robot_body_ori_b)[..., :2].reshape(self.num_envs, -1)
+        joint_pos_rel = context["robot_joint_pos"] - self.default_action_joint_pos
+        joint_vel_rel = context["robot_joint_vel"] - self.default_action_joint_vel
+        observation = torch.cat(
+            [
+                reference_joint_state,
+                motion_anchor_pos_b,
+                motion_anchor_ori_b,
+                robot_body_pos_b.reshape(self.num_envs, -1),
+                robot_body_ori_b,
+                self.robot.data.root_lin_vel_b,
+                self.robot.data.root_ang_vel_b,
+                joint_pos_rel,
+                joint_vel_rel,
+                self.last_action,
+            ],
+            dim=-1,
+        )
+        if observation.shape[-1] != CRITIC_OBS_DIM:
+            raise RuntimeError(f"Expected critic observation dim {CRITIC_OBS_DIM}, got {observation.shape[-1]}")
         return observation
 
     def _add_uniform_noise(self, value: torch.Tensor, n_min: float, n_max: float) -> torch.Tensor:

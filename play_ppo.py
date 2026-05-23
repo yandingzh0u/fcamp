@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import time
 
@@ -9,25 +10,13 @@ import torch
 from isaaclab.app import AppLauncher
 
 
-parser = argparse.ArgumentParser(description="Play a trained MixGRPO checkpoint in IsaacLab.")
-parser.add_argument("--checkpoint", type=str, default="", help="Path to a saved MixGRPO checkpoint (.pt).")
+parser = argparse.ArgumentParser(description="Play a trained PPO checkpoint in IsaacLab.")
+parser.add_argument("--checkpoint", type=str, default="", help="Path to a saved PPO checkpoint (.pt).")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to play.")
 parser.add_argument("--max_steps", type=int, default=0, help="Optional hard stop. 0 means run until the app closes.")
 parser.add_argument("--start_phase", type=int, default=-1, help="Motion phase index used for reset. Negative uses motion_start_phase.")
-parser.add_argument("--flow_steps", type=int, default=-1, help="Override checkpoint flow_steps. -1 keeps checkpoint value.")
-parser.add_argument(
-    "--action_squash_scale",
-    type=float,
-    default=-1.0,
-    help="Override checkpoint action squash scale. Negative keeps checkpoint value; old checkpoints without this field use a near-identity scale.",
-)
-parser.add_argument(
-    "--eval_initial_noise",
-    choices=("random", "zero"),
-    default="",
-    help="Initial flow latent for playback. Empty keeps checkpoint/default setting.",
-)
 parser.add_argument("--seed", type=int, default=0, help="Random seed.")
+parser.add_argument("--stochastic", action="store_true", default=False, help="Sample from the PPO Gaussian instead of using the mean action.")
 parser.add_argument("--motion_file", type=str, default="", help="Optional override for the motion npz path.")
 parser.add_argument("--sim_dt", type=float, default=-1.0, help="Override checkpoint sim_dt. Negative keeps checkpoint value.")
 parser.add_argument("--fix_root_link", action="store_true", default=False, help="Lock the robot base in place.")
@@ -63,8 +52,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 from env import DEFAULT_MOTION_FILE, G1MimicEnv, MimicEnvConfig
-from engine.mixgrpo.inference import deterministic_sde_ode_actions
-from net.mixgrpo import FlowMatchingPolicy
+from net.ppo import GaussianActorCritic
 
 
 def _load_checkpoint_payload(checkpoint_path: Path, device: torch.device) -> dict:
@@ -92,7 +80,6 @@ def main() -> None:
     train_cfg = payload["config"]
 
     sim_dt = train_cfg["sim_dt"] if args_cli.sim_dt < 0.0 else args_cli.sim_dt
-    flow_steps = train_cfg["flow_steps"] if args_cli.flow_steps < 0 else args_cli.flow_steps
     motion_file = args_cli.motion_file if args_cli.motion_file else train_cfg.get("motion_file", str(DEFAULT_MOTION_FILE))
     motion_start_phase = (
         train_cfg.get("motion_start_phase", 0)
@@ -104,10 +91,6 @@ def main() -> None:
         if args_cli.motion_end_phase < 0
         else args_cli.motion_end_phase
     )
-    if args_cli.action_squash_scale > 0.0:
-        action_squash_scale = float(args_cli.action_squash_scale)
-    else:
-        action_squash_scale = float(train_cfg.get("action_squash_scale", 1.0e6))
     startup_randomization = (
         bool(train_cfg.get("startup_randomization", True))
         if args_cli.startup_randomization is None
@@ -143,13 +126,14 @@ def main() -> None:
         )
     )
 
-    policy = FlowMatchingPolicy(
+    policy = GaussianActorCritic(
         obs_dim=train_cfg.get("policy_obs_dim", 0) or env.observation_dim,
+        critic_obs_dim=train_cfg.get("critic_obs_dim", 0) or env.critic_observation_dim,
         action_dim=train_cfg["action_dim"],
-        horizon=train_cfg["horizon"],
-        hidden_dims=tuple(train_cfg.get("actor_hidden_dims", (512, 256, 128))),
+        actor_hidden_dims=tuple(train_cfg.get("actor_hidden_dims", (512, 256, 128))),
+        critic_hidden_dims=tuple(train_cfg.get("critic_hidden_dims", (512, 256, 128))),
         activation=train_cfg.get("activation", "elu"),
-        action_squash_scale=action_squash_scale,
+        init_noise_std=float(train_cfg.get("init_noise_std", 1.0)),
     ).to(env.device)
     policy.load_state_dict(payload["policy"])
     policy.eval()
@@ -157,19 +141,16 @@ def main() -> None:
     reset_start_phase = motion_start_phase if args_cli.start_phase < 0 else args_cli.start_phase
     reset_phases = _make_reset_phases(env.num_envs, reset_start_phase, env.device)
     current_obs = env.reset(phase_indices=reset_phases)
-    cached_chunk: torch.Tensor | None = None
-    chunk_index = train_cfg["horizon"]
     total_steps = 0
 
     use_real_time = (args_cli.real_time or not args_cli.headless) and not args_cli.no_real_time
     next_frame_time = time.perf_counter()
 
-    print("[INFO] Playing trained MixGRPO checkpoint", flush=True)
+    print("[INFO] Playing trained PPO checkpoint", flush=True)
     print(f"[INFO] checkpoint={checkpoint_path}", flush=True)
     print(f"[INFO] motion_file={motion_file}", flush=True)
     print(
-        f"[INFO] horizon={train_cfg['horizon']} action_dim={train_cfg['action_dim']} "
-        f"flow_steps={flow_steps} action_squash_scale={action_squash_scale}",
+        f"[INFO] action_dim={train_cfg['action_dim']} stochastic={args_cli.stochastic}",
         flush=True,
     )
     print(
@@ -177,31 +158,14 @@ def main() -> None:
         f"reset_noise={reset_noise} interval_pushes={interval_pushes}",
         flush=True,
     )
-    eval_initial_noise = args_cli.eval_initial_noise or train_cfg.get("eval_initial_noise", "random")
-    print(f"[INFO] eval_initial_noise={eval_initial_noise}", flush=True)
 
     while simulation_app.is_running():
-        if cached_chunk is None or chunk_index >= train_cfg["horizon"]:
-            with torch.inference_mode():
-                initial_noise = None
-                if eval_initial_noise == "random":
-                    initial_noise = torch.randn(
-                        current_obs.shape[0],
-                        policy.chunk_dim,
-                        device=current_obs.device,
-                        dtype=current_obs.dtype,
-                    )
-                cached_chunk = deterministic_sde_ode_actions(
-                    policy,
-                    current_obs,
-                    steps=flow_steps,
-                    sde_eta=train_cfg.get("sde_eta", 0.7),
-                    initial_noise=initial_noise,
-                )
-            chunk_index = 0
-
-        action = cached_chunk[:, chunk_index, :]
-        chunk_index += 1
+        with torch.inference_mode():
+            if args_cli.stochastic:
+                critic_obs = env.get_critic_observation()
+                action = policy.act(current_obs, critic_obs)["actions"]
+            else:
+                action = policy.act_inference(current_obs)
         current_obs, reward, done, info = env.step(action, auto_reset=False)
 
         total_steps += 1
@@ -250,10 +214,9 @@ def main() -> None:
                 flush=True,
             )
             current_obs = env.reset(phase_indices=reset_phases)
-            cached_chunk = None
-            chunk_index = train_cfg["horizon"]
     print(f"[INFO] Playback finished after {total_steps} simulation steps.", flush=True)
+
+
 if __name__ == "__main__":
     main()
-    import os
     os._exit(0)
