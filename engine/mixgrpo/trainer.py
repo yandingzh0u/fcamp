@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-from net.mixgrpo import FlowMatchingPolicy
+from net.mixgrpo.flow_policy import FlowMatchingPolicy
 from ..checkpoint import CheckpointMixin
 from .config import MixGRPOConfig
 from ..env_factory import make_mimic_env

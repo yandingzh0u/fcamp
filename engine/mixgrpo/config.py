@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from env import DEFAULT_MOTION_FILE
+from env.config import DEFAULT_MOTION_FILE
 
 
 @dataclass(slots=True)

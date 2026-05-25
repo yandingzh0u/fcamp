@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from env import G1MimicEnv, MimicEnvConfig
+from env.config import MimicEnvConfig
+from env.mimic import G1MimicEnv
 
 
 def make_mimic_env(cfg) -> G1MimicEnv:

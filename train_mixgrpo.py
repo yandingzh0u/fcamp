@@ -211,8 +211,9 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-from env import DEFAULT_MOTION_FILE
-from engine.mixgrpo import MixGRPOConfig, MixGRPOTrainer
+from env.config import DEFAULT_MOTION_FILE
+from engine.mixgrpo.config import MixGRPOConfig
+from engine.mixgrpo.trainer import MixGRPOTrainer
 
 
 class _TeeStream:

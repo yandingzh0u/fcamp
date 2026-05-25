@@ -62,9 +62,10 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-from env import DEFAULT_MOTION_FILE, G1MimicEnv, MimicEnvConfig
+from env.config import DEFAULT_MOTION_FILE, MimicEnvConfig
+from env.mimic import G1MimicEnv
 from engine.mixgrpo.inference import deterministic_sde_ode_actions
-from net.mixgrpo import FlowMatchingPolicy
+from net.mixgrpo.flow_policy import FlowMatchingPolicy
 
 
 def _load_checkpoint_payload(checkpoint_path: Path, device: torch.device) -> dict:

@@ -15,7 +15,7 @@ from .config import (
     STARTUP_BASE_COM_RANGE,
     STARTUP_JOINT_DEFAULT_POS_RANGE,
 )
-from .robots import G1_29DOF_ACTION_NAMES, make_g1_cfg
+from .robots.g1 import G1_29DOF_ACTION_NAMES, make_g1_cfg
 
 
 class G1Env:

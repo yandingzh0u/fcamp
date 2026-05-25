@@ -11,7 +11,7 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
-from .robots import G1_29DOF_ACTION_NAMES, G1_BASE_CFG, make_g1_cfg
+from .robots.g1 import G1_29DOF_ACTION_NAMES, G1_BASE_CFG, make_g1_cfg
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
