@@ -59,6 +59,16 @@ class MimicRewardMixin:
             dim=-1,
         )
         body_ang_vel_reward = torch.exp(-body_ang_vel_error.mean(-1) / (3.14**2))
+        joint_pos_error = torch.sum(
+            torch.square(reference["joint_pos"] - context["robot_joint_pos"]),
+            dim=-1,
+        )
+        joint_pos_reward = torch.exp(-joint_pos_error / (0.5**2))
+        joint_vel_error = torch.sum(
+            torch.square(reference["joint_vel"] - context["robot_joint_vel"]),
+            dim=-1,
+        )
+        joint_vel_reward = torch.exp(-joint_vel_error / (10.0**2))
         net_contact_forces = self.contact_sensor.data.net_forces_w_history
         undesired_contact_mask = (
             torch.max(torch.norm(net_contact_forces[:, :, self.undesired_contact_body_ids], dim=-1), dim=1)[0]
@@ -77,6 +87,8 @@ class MimicRewardMixin:
             + 1.0 * body_ori_reward
             + 1.0 * body_lin_vel_reward
             + 1.0 * body_ang_vel_reward
+            + 1.0 * joint_pos_reward
+            + 0.5 * joint_vel_reward
             - 0.1 * undesired_contacts
         ) * self.dt
         return reward, {
@@ -90,6 +102,8 @@ class MimicRewardMixin:
             "body_ori_reward": body_ori_reward,
             "body_lin_vel_reward": body_lin_vel_reward,
             "body_ang_vel_reward": body_ang_vel_reward,
+            "joint_pos_reward": joint_pos_reward,
+            "joint_vel_reward": joint_vel_reward,
             "undesired_contacts": undesired_contacts,
             "diag_torso_ori_deg": body_ori_error[:, 7].sqrt() * (180.0 / 3.14159),
             "diag_left_wrist_ori_deg": body_ori_error[:, 10].sqrt() * (180.0 / 3.14159),

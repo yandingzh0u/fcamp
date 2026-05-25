@@ -49,6 +49,12 @@ class G1MimicEnv(
             dtype=torch.long,
             device=self.device,
         )
+        self.foot_body_names = list(cfg.foot_body_names)
+        self.foot_contact_body_ids = torch.tensor(
+            [self.contact_sensor.body_names.index(name) for name in self.foot_body_names],
+            dtype=torch.long,
+            device=self.device,
+        )
         self.motion = MimicMotionReference(
             cfg.motion_file,
             self.track_body_ids,
@@ -193,7 +199,9 @@ class G1MimicEnv(
         if action_offsets.shape != (self.num_envs, self.action_dim):
             raise ValueError(f"Expected action shape {(self.num_envs, self.action_dim)}, got {tuple(action_offsets.shape)}")
 
-        action_targets = self.default_action_joint_pos + self.action_scale * action_offsets
+        next_phase = self.motion.clamp_time_steps(self.phase_steps + 1)
+        ref_joint_pos = self.motion.joint_pos.index_select(0, next_phase)
+        action_targets = ref_joint_pos + self.action_scale * action_offsets
         self.robot.set_joint_position_target(action_targets, joint_ids=self.action_joint_ids)
 
     def _init_adaptive_motion_sampling(self) -> None:

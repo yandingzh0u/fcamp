@@ -43,16 +43,19 @@ MIMIC_BODY_NAMES = (
 MIMIC_EE_BODY_NAMES = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
-    "left_wrist_yaw_link",
-    "right_wrist_yaw_link",
+)
+MIMIC_FOOT_BODY_NAMES = (
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
 )
 MIMIC_ANCHOR_BODY_NAME = "torso_link"
-OBS_DIM = 154
+OBS_DIM = 163
 CRITIC_OBS_DIM = 286
 UNDESIRED_CONTACT_THRESHOLD = 1.0
 ANCHOR_Z_TERMINATION_THRESHOLD = 0.12
 ANCHOR_ORI_TERMINATION_THRESHOLD = 0.4
 EE_Z_TERMINATION_THRESHOLD = 0.25
+BODY_ORI_TERMINATION_THRESHOLD = 1.0  # rad on the worst-tracked body
 RESET_ROOT_POSE_RANGE = (
     (-0.05, 0.05),
     (-0.05, 0.05),
@@ -167,4 +170,5 @@ class MimicEnvConfig(EnvConfig):
     interval_pushes: bool = True
     track_body_names: tuple[str, ...] = MIMIC_BODY_NAMES
     ee_body_names: tuple[str, ...] = MIMIC_EE_BODY_NAMES
+    foot_body_names: tuple[str, ...] = MIMIC_FOOT_BODY_NAMES
     anchor_body_name: str = MIMIC_ANCHOR_BODY_NAME

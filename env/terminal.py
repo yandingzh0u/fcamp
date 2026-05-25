@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import torch
 
-from isaaclab.utils.math import quat_apply_inverse
+from isaaclab.utils.math import quat_apply_inverse, quat_error_magnitude
 
 from .config import (
     ANCHOR_ORI_TERMINATION_THRESHOLD,
     ANCHOR_Z_TERMINATION_THRESHOLD,
+    BODY_ORI_TERMINATION_THRESHOLD,
     EE_Z_TERMINATION_THRESHOLD,
 )
 
@@ -34,17 +35,23 @@ class MimicTerminationMixin:
             - context["robot_body_pos_w"][:, self.termination_body_indices, 2]
         )
         ee_body_bad = torch.any(termination_z_error > EE_Z_TERMINATION_THRESHOLD, dim=-1)
+        body_ori_error_max = quat_error_magnitude(
+            context["body_quat_relative_w"],
+            context["robot_body_quat_w"],
+        ).max(dim=-1).values
+        body_ori_bad = body_ori_error_max > BODY_ORI_TERMINATION_THRESHOLD
         ee_z_error_max = ee_z_error.max(dim=-1).values
         ee_z_error_mean = ee_z_error.mean(dim=-1)
         termination_z_error_max = termination_z_error.max(dim=-1).values
         termination_z_error_mean = termination_z_error.mean(dim=-1)
         time_out = self.episode_steps >= self.task_cfg.max_episode_steps
-        done = time_out | anchor_pos_bad | anchor_ori_bad | ee_body_bad
+        done = time_out | anchor_pos_bad | anchor_ori_bad | ee_body_bad | body_ori_bad
         return done, {
             "time_out": time_out,
             "anchor_pos_bad": anchor_pos_bad,
             "anchor_ori_bad": anchor_ori_bad,
             "ee_body_bad": ee_body_bad,
+            "body_ori_bad": body_ori_bad,
         }, {
             "anchor_z_error": anchor_z_error,
             "anchor_gravity_z_error": anchor_gravity_z_error,
@@ -55,4 +62,5 @@ class MimicTerminationMixin:
             "ee_z_error_by_body": ee_z_error,
             "termination_z_error_max": termination_z_error_max,
             "termination_z_error_mean": termination_z_error_mean,
+            "body_ori_error_max": body_ori_error_max,
         }
