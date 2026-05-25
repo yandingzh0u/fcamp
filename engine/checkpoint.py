@@ -32,7 +32,6 @@ class CheckpointMixin:
             "update_idx": update_idx,
             "config": asdict(self.cfg),
             "policy": self.policy.state_dict(),
-            "critic": self.critic.state_dict() if hasattr(self, "critic") else None,
             "optimizer": self.optimizer.state_dict(),
             "metrics": metrics,
         }
@@ -48,10 +47,6 @@ class CheckpointMixin:
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
         payload = torch.load(checkpoint_path, map_location=self.env.device)
         self.policy.load_state_dict(payload["policy"])
-        if hasattr(self, "critic"):
-            if payload.get("critic") is None:
-                raise KeyError(f"Checkpoint {checkpoint_path} has no critic state.")
-            self.critic.load_state_dict(payload["critic"])
         if bool(getattr(self.cfg, "reset_optimizer_on_resume", False)):
             print(
                 f"[CHECKPOINT] loaded policy from {checkpoint_path}; starting a fresh optimizer by request.",
@@ -61,12 +56,8 @@ class CheckpointMixin:
             self.optimizer.load_state_dict(payload["optimizer"])
         else:
             raise KeyError(f"Checkpoint {checkpoint_path} has no optimizer state.")
-        if hasattr(self.cfg, "policy_lr") and len(self.optimizer.param_groups) > 1:
-            self.optimizer.param_groups[0]["lr"] = float(self.cfg.policy_lr)
-            self.optimizer.param_groups[1]["lr"] = float(self.cfg.lr)
-        else:
-            for param_group in self.optimizer.param_groups:
-                param_group["lr"] = self.cfg.lr
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = self.cfg.lr
         self.start_update = int(payload.get("update_idx", 0)) + 1
         print(
             f"[CHECKPOINT] loaded {checkpoint_path}, resuming from update {self.start_update}.",

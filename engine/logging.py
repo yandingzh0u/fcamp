@@ -5,17 +5,10 @@ from .validation import _short_body_name
 
 class LoggingMixin:
     def _log_update(self, update_idx: int, metrics: dict[str, float]) -> None:
-        algo_name = str(metrics.get("algo/name", getattr(self.cfg, "algo_name", "mixgrpo"))).lower()
-        if algo_name == "ppo":
-            self._log_ppo_update(update_idx, metrics)
-            self._log_ppo_policy(metrics)
-            self._log_shared_update_diagnostics(metrics, failure_label="PPO_FIRST_FAILURE", index_name="step")
-            self._log_shared_tracking(metrics)
-        else:
-            self._log_mixgrpo_update(update_idx, metrics)
-            self._log_mixgrpo_policy(metrics)
-            self._log_shared_update_diagnostics(metrics, failure_label="FIRST_FAILURE", index_name="chunk")
-            self._log_shared_tracking(metrics)
+        self._log_mixgrpo_update(update_idx, metrics)
+        self._log_mixgrpo_policy(metrics)
+        self._log_shared_update_diagnostics(metrics, failure_label="FIRST_FAILURE", index_name="chunk")
+        self._log_shared_tracking(metrics)
         self._log_validation_metrics(metrics)
 
     def _log_mixgrpo_update(self, update_idx: int, metrics: dict[str, float]) -> None:
@@ -47,32 +40,6 @@ class LoggingMixin:
             flush=True,
         )
         self._log_phase_and_step_rewards("PHASE", "CHUNK_REWARD", metrics)
-
-    def _log_ppo_update(self, update_idx: int, metrics: dict[str, float]) -> None:
-        print(
-            f"[PPO_UPDATE] {update_idx}/{self.cfg.max_updates} "
-            f"episode_projection={metrics.get('rollout/max_episode_return_projection', float('nan')):.5f} "
-            f"first_life_ret={metrics.get('rollout/return_mean', float('nan')):.5f} "
-            f"raw_rollout_ret={metrics.get('rollout/raw_return_mean', float('nan')):.5f} "
-            f"chunk0_ret={metrics.get('rollout/chunk_return_first_mean', metrics.get('rollout/chunk_return_mean', float('nan'))):.5f} "
-            f"chunk_last_ret={metrics.get('rollout/chunk_return_last_mean', float('nan')):.5f}",
-            flush=True,
-        )
-        self._log_reward_scale("PPO_REWARD_SCALE", metrics)
-        print(
-            f"[PPO_OBJECTIVE] "
-            f"first_life_mean={metrics.get('group/objective_reward_raw_mean', float('nan')):.5f} "
-            f"first_life_std={metrics.get('group/objective_reward_raw_std', float('nan')):.5f} "
-            f"first_life_min={metrics.get('group/objective_reward_raw_min', float('nan')):.5f} "
-            f"first_life_max={metrics.get('group/objective_reward_raw_max', float('nan')):.5f} "
-            f"raw_mean={metrics.get('group/reward_raw_mean', float('nan')):.5f} "
-            f"raw_std={metrics.get('group/reward_raw_std', float('nan')):.5f} "
-            f"raw_min={metrics.get('group/reward_raw_min', float('nan')):.5f} "
-            f"raw_max={metrics.get('group/reward_raw_max', float('nan')):.5f} "
-            f"score_mean={metrics.get('group/score_reward_mean', float('nan')):.5f}",
-            flush=True,
-        )
-        self._log_phase_and_step_rewards("PPO_PHASE", "PPO_STEP_REWARD", metrics)
 
     def _log_reward_scale(self, label: str, metrics: dict[str, float]) -> None:
         print(
@@ -128,24 +95,6 @@ class LoggingMixin:
             flush=True,
         )
         self._log_policy_detail("POLICY_DETAIL", metrics, include_grpo=True)
-
-    def _log_ppo_policy(self, metrics: dict[str, float]) -> None:
-        print(
-            f"[PPO_POLICY] loss={metrics['policy/loss']:.5f} "
-            f"surrogate={metrics['policy/policy_loss']:.5f} "
-            f"value_loss={metrics.get('policy/value_loss', float('nan')):.5f} "
-            f"entropy={metrics.get('policy/entropy', float('nan')):.5f} "
-            f"kl={metrics.get('policy/kl_loss', float('nan')):.5f} "
-            f"ratio={metrics.get('policy/ratio', float('nan')):.4f} "
-            f"clip={metrics.get('policy/clip_frac', float('nan')):.4f} "
-            f"post_ratio={metrics.get('policy/post_ratio', metrics.get('policy/ratio', float('nan'))):.4f} "
-            f"post_clip={metrics.get('policy/post_clip_frac', metrics.get('policy/clip_frac', float('nan'))):.4f} "
-            f"grad={metrics['policy/grad_norm']:.5f} "
-            f"lr={metrics.get('policy/lr', float('nan')):.6f} "
-            f"opt_steps={metrics.get('policy/optimizer_steps', float('nan')):.0f}",
-            flush=True,
-        )
-        self._log_policy_detail("PPO_POLICY_DETAIL", metrics, include_grpo=False)
 
     def _log_policy_detail(self, label: str, metrics: dict[str, float], *, include_grpo: bool) -> None:
         grpo_suffix = (
