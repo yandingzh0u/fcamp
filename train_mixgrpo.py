@@ -68,13 +68,7 @@ parser.add_argument(
     default=4,
     help="Number of same-state SDE samples per GRPO group.",
 )
-parser.add_argument("--chunks_per_rollout", type=int, default=4, help="Number of env steps per MixGRPO rollout.")
-parser.add_argument(
-    "--rollout_segments_per_update",
-    type=int,
-    default=32,
-    help="Number of consecutive chunks accumulated before one GRPO update.",
-)
+parser.add_argument("--chunks_per_rollout", type=int, default=24, help="Number of SDE-explored env steps per GRPO update (also called the rollout horizon).")
 parser.add_argument(
     "--tail_bootstrap_steps",
     type=int,
@@ -282,7 +276,6 @@ def main() -> None:
         sde_eta=args_cli.sde_eta,
         num_generations=args_cli.num_generations,
         chunks_per_rollout=args_cli.chunks_per_rollout,
-        rollout_segments_per_update=args_cli.rollout_segments_per_update,
         tail_bootstrap_steps=args_cli.tail_bootstrap_steps,
         terminal_penalty=args_cli.terminal_penalty,
         discount_gamma=args_cli.discount_gamma,

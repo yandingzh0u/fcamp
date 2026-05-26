@@ -1244,13 +1244,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         return max(1, min(batch_size, int(self.cfg.micro_batch_size)))
 
     def _training_rollout_horizon(self) -> int:
-        return max(1, self.cfg.horizon * self._chunks_per_grpo_update())
-
-    def _rollout_segments_per_update(self) -> int:
-        return max(1, int(getattr(self.cfg, "rollout_segments_per_update", 1)))
+        return max(1, self.cfg.horizon * int(self.cfg.chunks_per_rollout))
 
     def _chunks_per_grpo_update(self) -> int:
-        return max(1, int(self.cfg.chunks_per_rollout) * self._rollout_segments_per_update())
+        return max(1, int(self.cfg.chunks_per_rollout))
 
     def _training_anchor_phases(self) -> torch.Tensor:
         sample_phase_indices = getattr(self.env, "sample_phase_indices", None)
@@ -1300,8 +1297,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 f"reset_noise={self.cfg.reset_noise} interval_pushes={self.cfg.interval_pushes} "
                 f"num_envs={self.cfg.num_envs} "
                 f"chunks_per_rollout={self.cfg.chunks_per_rollout} "
-                f"rollout_segments_per_update={self._rollout_segments_per_update()} "
-                f"grpo_update_steps={self._chunks_per_grpo_update()} "
                 f"tail_bootstrap_steps={int(getattr(self.cfg, 'tail_bootstrap_steps', 0))} "
                 f"terminal_penalty={self.cfg.terminal_penalty} "
                 f"num_generations={self.cfg.num_generations} "

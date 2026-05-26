@@ -34,8 +34,7 @@ class MixGRPOConfig:
     eval_initial_noise: str = "zero"
     sde_eta: float = 0.7
     num_generations: int = 4
-    chunks_per_rollout: int = 4
-    rollout_segments_per_update: int = 32
+    chunks_per_rollout: int = 24
     # Number of extra deterministic-policy steps rolled out *after* the main GRPO window
     # to estimate a Monte-Carlo tail bootstrap value. 0 disables (legacy behavior). The
     # tail_return is injected as `last_values` for GAE and as the terminal RTG seed for
