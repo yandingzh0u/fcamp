@@ -22,6 +22,12 @@ class MimicStepMixin:
             self.sim.render()
 
         self.episode_steps += 1
+        # Advance phase BEFORE reward/termination so robot(t+1) is compared against ref(t+1).
+        # _apply_action_targets uses phase+1 to set the PD target, and after the sim step the
+        # robot state corresponds to that next frame. Keeping phase at t (the old behaviour)
+        # introduced a 1-frame mismatch in the reward/termination signal.
+        self.phase_steps += 1
+        self._resample_finished_motions()
 
         termination_phase_steps = self.phase_steps.clone()
         reward, reward_terms = self.compute_reward(action_offsets, previous_action)
@@ -42,8 +48,6 @@ class MimicStepMixin:
         self.last_action = action_offsets.clone()
         if auto_reset and bool(done.any()):
             self.last_action[done] = 0.0
-        self.phase_steps += 1
-        self._resample_finished_motions()
         self._update_adaptive_motion_sampling()
         self._apply_interval_pushes()
         observation = self.get_observation()
