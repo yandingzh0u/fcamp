@@ -595,6 +595,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         metric_actions_last = None
         horizon = int(self.cfg.horizon)
         gamma = float(self.cfg.discount_gamma)
+        # Reset on the final frame of every chunk so dead branches restart fresh for the
+        # next chunk (matching the horizon=1 behaviour). Do not reset mid-chunk because
+        # the remaining h-1 actions in the chunk were already computed from the original
+        # chunk-start observation.
+        auto_reset_at_chunk_end = True
 
         for chunk_index in range(chunks_per_rollout):
             active_before_step = ~ever_done
@@ -637,9 +642,14 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             last_info = None
             for frame_idx in range(horizon):
                 action_t = action_chunk[:, frame_idx, :]
+                # In-chunk frames must NOT auto_reset: the next frame's action was already
+                # computed from the chunk-start obs and is meaningless on a freshly-reset env.
+                # We reset only after the final frame of each chunk (auto_reset=True) so
+                # GRPO sees a valid single-state SDE chunk per (obs, action_chunk) pair.
+                in_chunk_auto_reset = auto_reset_at_chunk_end if frame_idx == horizon - 1 else False
                 next_obs_t, reward_t, done_t, info_t = self.env.step(
                     action_t,
-                    auto_reset=True,
+                    auto_reset=in_chunk_auto_reset,
                     reset_horizon=max(1, (chunks_per_rollout - chunk_index - 1) * horizon + (horizon - frame_idx)),
                 )
                 # Only frames where the env was alive before this frame contribute to chunk reward.
