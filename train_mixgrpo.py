@@ -69,6 +69,7 @@ parser.add_argument(
     help="Number of same-state SDE samples per GRPO group.",
 )
 parser.add_argument("--chunks_per_rollout", type=int, default=24, help="Number of SDE-explored env steps per GRPO update (also called the rollout horizon).")
+parser.add_argument("--horizon", type=int, default=1, help="Number of env-frames each policy chunk advances; chunk reward = discounted sum across these frames.")
 parser.add_argument(
     "--tail_bootstrap_steps",
     type=int,
@@ -264,7 +265,7 @@ def main() -> None:
         action_dim=args_cli.action_dim,
         policy_obs_dim=args_cli.policy_obs_dim,
         critic_obs_dim=args_cli.critic_obs_dim,
-        horizon=1,
+        horizon=args_cli.horizon,
         actor_hidden_dims=tuple(args_cli.actor_hidden_dims),
         critic_hidden_dims=tuple(args_cli.critic_hidden_dims),
         activation=args_cli.activation,
