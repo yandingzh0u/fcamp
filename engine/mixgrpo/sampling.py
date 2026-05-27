@@ -39,8 +39,15 @@ def flow_grpo_step(
     deterministic: bool = False,
     sample_noise: torch.Tensor | None = None,
     sample_noise_std: float = 1.0,
+    horizon: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One MixGRPO SDE-ODE transition."""
+    """One MixGRPO SDE-ODE transition.
+
+    The returned log_prob is **per-frame** with shape (B, horizon). The chunk_dim
+    direction (= horizon * action_dim) is split into the per-frame action_dim and
+    summed; horizons are kept separate so the downstream PPO ratio / KL stay
+    horizon-invariant. For horizon=1 the result has shape (B, 1).
+    """
     sigma = sigmas[index].to(model_output.device)
     sigma_prev = sigmas[index + 1].to(model_output.device)
     dt = sigma_prev - sigma
@@ -60,5 +67,15 @@ def flow_grpo_step(
     std = torch.as_tensor(std, device=model_output.device, dtype=torch.float32).clamp(min=1.0e-6)
     log_prob = -residual.square() / (2.0 * std.square())
     log_prob = log_prob - torch.log(std) - 0.5 * math.log(2.0 * math.pi)
-    log_prob = log_prob.sum(dim=tuple(range(1, log_prob.ndim)))
+    if log_prob.ndim == 2:
+        # (B, chunk_dim) -> (B, horizon, action_dim) -> (B, horizon)
+        batch_size, chunk_dim = log_prob.shape
+        if chunk_dim % max(1, horizon) != 0:
+            raise ValueError(
+                f"chunk_dim {chunk_dim} not divisible by horizon {horizon}; cannot split per-frame log_prob"
+            )
+        action_dim = chunk_dim // max(1, horizon)
+        log_prob = log_prob.view(batch_size, horizon, action_dim).sum(dim=-1)
+    else:
+        log_prob = log_prob.sum(dim=tuple(range(1, log_prob.ndim)))
     return prev_sample, log_prob

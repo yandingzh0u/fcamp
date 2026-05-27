@@ -381,6 +381,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 eta=float(self.cfg.sde_eta),
                 deterministic=False,
                 sample_noise=zero_step_noise,
+                horizon=int(self.cfg.horizon),
             )
             all_latents.append(latent.detach())
         mean_actions = self.policy._action_transform(latent)
@@ -426,6 +427,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 eta=float(self.cfg.sde_eta),
                 deterministic=False,
                 sample_noise=sde_noise[:, step_index],
+                horizon=int(self.cfg.horizon),
             )
             all_latents.append(latent.detach())
             step_log_probs.append(log_prob)
@@ -433,6 +435,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         if not step_log_probs:
             raise RuntimeError("SDE-ODE rollout produced no trainable transition log-probs.")
         actions = self.policy._action_transform(latent)
+        # step_log_probs is a list of (B, horizon) -> stack to (B, num_sde_steps, horizon)
         return actions, torch.stack(all_latents, dim=1), torch.stack(step_log_probs, dim=1)
 
     def _mean_actions(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -494,8 +497,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 eta=float(self.cfg.sde_eta),
                 prev_sample=next_latent,
                 deterministic=False,
+                horizon=int(self.cfg.horizon),
             )
             log_probs.append(log_prob)
+        # log_probs is a list of (B, horizon) -> stack to (B, num_sde_steps, horizon)
         return torch.stack(log_probs, dim=1)
 
     def _record_first_done(
@@ -640,6 +645,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             chunk_timeout = torch.zeros(total_envs, dtype=torch.bool, device=self.env.device)
             alive_in_chunk = active_before_step.clone()
             last_info = None
+            # Save the chunk-start obs because it's the obs the policy used to generate
+            # the action_chunk; downstream PPO update needs to recompute log-probs from
+            # exactly this obs, not the post-step one.
+            chunk_start_obs = obs_t
             for frame_idx in range(horizon):
                 action_t = action_chunk[:, frame_idx, :]
                 # In-chunk frames must NOT auto_reset: the next frame's action was already
@@ -689,7 +698,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 metric_chunk_return_last = reward_t.detach()
                 metric_actions_last = action_chunk.detach().clone()
 
-            rollout_obs.append(obs_t)
+            rollout_obs.append(chunk_start_obs)
             rollout_critic_obs.append(critic_obs_t)
             rollout_latents.append(sample["all_latents"])
             rollout_old_log_probs.append(sample["log_probs"].detach())
@@ -772,7 +781,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 group_count,
                 generation_count,
                 chunks_per_rollout,
-                -1,
+                old_log_probs.shape[-2],
+                old_log_probs.shape[-1],
             ),
             "train_step_indices": rollout_train_step_indices,
             "actions": actions.view(group_count, generation_count, chunks_per_rollout, horizon, self.cfg.action_dim),
@@ -918,11 +928,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             raise ValueError("MixGRPO PPO update expects one action sample per env step.")
         if latent_path.ndim != 3:
             raise ValueError("MixGRPO PPO update expects one SDE-ODE latent path per env step.")
-        if old_log_probs.ndim != 2:
-            raise ValueError("old_log_probs must contain per-SDE-step transition scores.")
-        if old_log_probs.shape != (sample_count, train_step_indices.numel()):
+        if old_log_probs.ndim != 3:
+            raise ValueError("old_log_probs must have shape (samples, num_sde_steps, horizon).")
+        if old_log_probs.shape[:2] != (sample_count, train_step_indices.numel()):
             raise ValueError(
-                f"old_log_probs must have shape {(sample_count, train_step_indices.numel())}, got {tuple(old_log_probs.shape)}"
+                f"old_log_probs must have shape {(sample_count, train_step_indices.numel(), int(self.cfg.horizon))}, got {tuple(old_log_probs.shape)}"
             )
         if critic_obs.shape[0] != sample_count or returns.shape != (sample_count,) or old_values.shape != (sample_count,):
             raise ValueError("critic_obs, returns, and old_values must match the flattened sample count.")
@@ -1046,13 +1056,18 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                         micro_latent_path,
                         train_step_indices,
                     )
+                    # log_ratio / ratio shape: (B, num_sde_steps, horizon). Splitting per
+                    # frame keeps the PPO clip / KL semantics scale-invariant to horizon
+                    # (h=1 reduces to the (B, K, 1) tensor that mean()s identically to the
+                    # old (B, K) tensor).
                     log_ratio = new_log_probs - micro_old_log_probs
                     ratio = torch.exp(log_ratio)
+                    # Advantage broadcasts to every (sde_step, frame) cell within a sample.
                     micro_adv_steps = torch.clamp(
                         micro_adv,
                         -float(self.cfg.adv_clip_max),
                         float(self.cfg.adv_clip_max),
-                    ).unsqueeze(-1)
+                    ).view(-1, 1, 1)
                     unclipped_loss = -micro_adv_steps * ratio
                     clipped_loss = -micro_adv_steps * torch.clamp(
                         ratio,
@@ -1082,6 +1097,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                         micro_policy_loss
                         + float(self.cfg.value_loss_coef) * micro_value_loss
                         - float(self.cfg.entropy_coef) * micro_entropy
+                        + float(self.cfg.kl_penalty_coef) * micro_kl_loss
                     )
                     (micro_loss * weight).backward()
 
@@ -1479,6 +1495,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 )[update_flat],
                 group_data["old_log_probs"].reshape(
                     env_count * rollout_branch_count * chunks,
+                    group_data["old_log_probs"].shape[-2],
                     group_data["old_log_probs"].shape[-1],
                 )[update_flat],
                 group_data["train_step_indices"],

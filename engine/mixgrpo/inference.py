@@ -51,6 +51,7 @@ def deterministic_sde_ode_actions(
             eta=sde_eta,
             deterministic=False,
             sample_noise=zero_step_noise,
+            horizon=policy.horizon,
         )
 
     return policy._action_transform(latent).view(

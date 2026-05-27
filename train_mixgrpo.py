@@ -102,6 +102,7 @@ parser.add_argument(
 )
 parser.add_argument("--adv_clip_max", type=float, default=5.0, help="Clamp absolute advantages in the MixGRPO policy loss.")
 parser.add_argument("--desired_kl", type=float, default=0.03, help="Adaptive learning-rate KL target.")
+parser.add_argument("--kl_penalty_coef", type=float, default=0.0, help="KL penalty coefficient added to the policy loss. 0 disables (standard PPO clip only).")
 parser.add_argument("--entropy_coef", type=float, default=0.005, help="Entropy coefficient. Default matches Unitree PPO.")
 parser.add_argument(
     "--value_loss_coef",
@@ -284,6 +285,7 @@ def main() -> None:
         clip_range=args_cli.clip_range,
         adv_clip_max=args_cli.adv_clip_max,
         desired_kl=args_cli.desired_kl,
+        kl_penalty_coef=args_cli.kl_penalty_coef,
         entropy_coef=args_cli.entropy_coef,
         value_loss_coef=args_cli.value_loss_coef,
         use_clipped_value_loss=args_cli.use_clipped_value_loss,

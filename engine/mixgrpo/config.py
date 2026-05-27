@@ -47,6 +47,11 @@ class MixGRPOConfig:
     clip_range: float = 0.3
     adv_clip_max: float = 5.0
     desired_kl: float = 0.03
+    # If > 0, add a KL-penalty term `kl_penalty_coef * KL(old || new)` to the policy loss.
+    # Useful as an alternative to clip when the chunk-level ratio is high-dimensional and
+    # exp(log_ratio) blows up; with kl_penalty_coef > 0 you typically want clip_range very
+    # large so it does not dominate.
+    kl_penalty_coef: float = 0.0
     entropy_coef: float = 0.005
     value_loss_coef: float = 0.0
     use_clipped_value_loss: bool = True
