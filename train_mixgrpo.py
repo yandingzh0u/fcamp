@@ -68,8 +68,21 @@ parser.add_argument(
     default=4,
     help="Number of same-state SDE samples per GRPO group.",
 )
-parser.add_argument("--chunks_per_rollout", type=int, default=24, help="Number of SDE-explored env steps per GRPO update (also called the rollout horizon).")
-parser.add_argument("--horizon", type=int, default=1, help="Number of env-frames each policy chunk advances; chunk reward = discounted sum across these frames.")
+parser.add_argument(
+    "--chunks_per_rollout",
+    type=int,
+    default=24,
+    help=(
+        "Target number of SDE-explored env frames per GRPO update. "
+        "For horizon > 1 this is converted to ceil(frames / horizon) action chunks."
+    ),
+)
+parser.add_argument(
+    "--horizon",
+    type=int,
+    default=1,
+    help="Number of env-frames each policy chunk advances; chunk reward = discounted sum across these frames.",
+)
 parser.add_argument(
     "--tail_bootstrap_steps",
     type=int,

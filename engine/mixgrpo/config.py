@@ -34,6 +34,8 @@ class MixGRPOConfig:
     eval_initial_noise: str = "zero"
     sde_eta: float = 0.7
     num_generations: int = 4
+    # Target number of environment frames per GRPO update. For horizon > 1 the
+    # trainer uses ceil(chunks_per_rollout / horizon) action chunks.
     chunks_per_rollout: int = 24
     # Number of extra deterministic-policy steps rolled out *after* the main GRPO window
     # to estimate a Monte-Carlo tail bootstrap value. 0 disables (legacy behavior). The

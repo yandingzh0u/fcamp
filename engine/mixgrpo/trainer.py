@@ -1317,10 +1317,12 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         return max(1, min(batch_size, int(self.cfg.micro_batch_size)))
 
     def _training_rollout_horizon(self) -> int:
-        return max(1, self.cfg.horizon * int(self.cfg.chunks_per_rollout))
+        return max(1, self.cfg.horizon * self._chunks_per_grpo_update())
 
     def _chunks_per_grpo_update(self) -> int:
-        return max(1, int(self.cfg.chunks_per_rollout))
+        target_env_steps = max(1, int(self.cfg.chunks_per_rollout))
+        horizon = max(1, int(self.cfg.horizon))
+        return max(1, math.ceil(target_env_steps / horizon))
 
     def _training_anchor_phases(self) -> torch.Tensor:
         sample_phase_indices = getattr(self.env, "sample_phase_indices", None)
@@ -1366,22 +1368,23 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             f"policy_horizon={self.cfg.horizon} "
             f"action_dim={self.cfg.action_dim} "
             f"single_action_mode=True "
-            f"rollout_steps={self._chunks_per_grpo_update()} "
-                f"reset_noise={self.cfg.reset_noise} interval_pushes={self.cfg.interval_pushes} "
-                f"num_envs={self.cfg.num_envs} "
-                f"chunks_per_rollout={self.cfg.chunks_per_rollout} "
-                f"tail_bootstrap_steps={int(getattr(self.cfg, 'tail_bootstrap_steps', 0))} "
-                f"terminal_penalty={self.cfg.terminal_penalty} "
-                f"num_generations={self.cfg.num_generations} "
-                f"grpo_groups={self.num_grpo_groups} "
-                f"init_noise_std={self.cfg.init_noise_std} "
-                f"init_same_noise={self.cfg.init_same_noise} "
-                f"eval_initial_noise={self.cfg.eval_initial_noise} "
-                f"sde_eta={self.cfg.sde_eta} "
-                f"flow_steps={self.cfg.flow_steps} "
-                f"actor_hidden_dims={list(self.cfg.actor_hidden_dims)} "
-                f"activation={self.cfg.activation} "
-                f"action_squash_scale={self.cfg.action_squash_scale}",
+            f"rollout_chunks={self._chunks_per_grpo_update()} "
+            f"rollout_env_steps={self._training_rollout_horizon()} "
+            f"reset_noise={self.cfg.reset_noise} interval_pushes={self.cfg.interval_pushes} "
+            f"num_envs={self.cfg.num_envs} "
+            f"target_rollout_env_steps={self.cfg.chunks_per_rollout} "
+            f"tail_bootstrap_steps={int(getattr(self.cfg, 'tail_bootstrap_steps', 0))} "
+            f"terminal_penalty={self.cfg.terminal_penalty} "
+            f"num_generations={self.cfg.num_generations} "
+            f"grpo_groups={self.num_grpo_groups} "
+            f"init_noise_std={self.cfg.init_noise_std} "
+            f"init_same_noise={self.cfg.init_same_noise} "
+            f"eval_initial_noise={self.cfg.eval_initial_noise} "
+            f"sde_eta={self.cfg.sde_eta} "
+            f"flow_steps={self.cfg.flow_steps} "
+            f"actor_hidden_dims={list(self.cfg.actor_hidden_dims)} "
+            f"activation={self.cfg.activation} "
+            f"action_squash_scale={self.cfg.action_squash_scale}",
             flush=True,
         )
         print(
