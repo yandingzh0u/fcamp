@@ -664,6 +664,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             for frame_idx in range(horizon):
                 alive_before_frame = alive_in_chunk.clone()
                 action_t = action_chunk[:, frame_idx, :]
+                if bool((~alive_before_frame).any()):
+                    action_t = torch.where(alive_before_frame.unsqueeze(-1), action_t, torch.zeros_like(action_t))
                 # In-chunk frames must NOT auto_reset: the next frame's action was already
                 # computed from the chunk-start obs and is meaningless on a freshly-reset env.
                 # We reset only after the final frame of each chunk (auto_reset=True) so
@@ -1320,9 +1322,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         return max(1, self.cfg.horizon * self._chunks_per_grpo_update())
 
     def _chunks_per_grpo_update(self) -> int:
-        target_env_steps = max(1, int(self.cfg.chunks_per_rollout))
-        horizon = max(1, int(self.cfg.horizon))
-        return max(1, math.ceil(target_env_steps / horizon))
+        return max(1, int(self.cfg.chunks_per_rollout))
 
     def _training_anchor_phases(self) -> torch.Tensor:
         sample_phase_indices = getattr(self.env, "sample_phase_indices", None)
@@ -1372,7 +1372,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             f"rollout_env_steps={self._training_rollout_horizon()} "
             f"reset_noise={self.cfg.reset_noise} interval_pushes={self.cfg.interval_pushes} "
             f"num_envs={self.cfg.num_envs} "
-            f"target_rollout_env_steps={self.cfg.chunks_per_rollout} "
+            f"chunks_per_rollout={self.cfg.chunks_per_rollout} "
             f"tail_bootstrap_steps={int(getattr(self.cfg, 'tail_bootstrap_steps', 0))} "
             f"terminal_penalty={self.cfg.terminal_penalty} "
             f"num_generations={self.cfg.num_generations} "

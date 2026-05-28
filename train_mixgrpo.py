@@ -73,8 +73,8 @@ parser.add_argument(
     type=int,
     default=24,
     help=(
-        "Target number of SDE-explored env frames per GRPO update. "
-        "For horizon > 1 this is converted to ceil(frames / horizon) action chunks."
+        "Number of SDE-explored policy chunks per GRPO update. "
+        "Environment frames per update are chunks_per_rollout * horizon."
     ),
 )
 parser.add_argument(
