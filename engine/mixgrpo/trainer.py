@@ -296,11 +296,19 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         self._train_length_buffer: deque[float] = deque(maxlen=100)
         self._train_completed_episodes = 0
 
-    def _record_train_episode_stats(self, rewards: torch.Tensor, dones: torch.Tensor) -> None:
+    def _record_train_episode_stats(
+        self,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+        step_counts: torch.Tensor | None = None,
+    ) -> None:
         if not hasattr(self, "_train_reward_sum"):
             self._init_train_episode_stats()
         self._train_reward_sum += rewards.to(dtype=torch.float32)
-        self._train_episode_length += 1.0
+        if step_counts is None:
+            self._train_episode_length += 1.0
+        else:
+            self._train_episode_length += step_counts.to(dtype=torch.float32)
         done_ids = dones.nonzero(as_tuple=False).squeeze(-1)
         if done_ids.numel() == 0:
             return
@@ -435,7 +443,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         if not step_log_probs:
             raise RuntimeError("SDE-ODE rollout produced no trainable transition log-probs.")
         actions = self.policy._action_transform(latent)
-        # step_log_probs is a list of (B, horizon) -> stack to (B, num_sde_steps, horizon)
+        # step_log_probs is a list of (B,) joint chunk scores -> (B, num_sde_steps)
         return actions, torch.stack(all_latents, dim=1), torch.stack(step_log_probs, dim=1)
 
     def _mean_actions(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -500,7 +508,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 horizon=int(self.cfg.horizon),
             )
             log_probs.append(log_prob)
-        # log_probs is a list of (B, horizon) -> stack to (B, num_sde_steps, horizon)
+        # log_probs is a list of (B,) joint chunk scores -> (B, num_sde_steps)
         return torch.stack(log_probs, dim=1)
 
     def _record_first_done(
@@ -578,6 +586,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         first_done_anchor_ori = torch.zeros(total_envs, dtype=torch.bool, device=self.env.device)
         first_done_ee_body = torch.zeros(total_envs, dtype=torch.bool, device=self.env.device)
         first_done_timeout = torch.zeros(total_envs, dtype=torch.bool, device=self.env.device)
+        first_done_frame = torch.full((total_envs,), -1, dtype=torch.long, device=self.env.device)
         ever_done = torch.zeros(total_envs, dtype=torch.bool, device=self.env.device)
 
         rollout_obs = []
@@ -590,8 +599,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         rollout_dones = []
         rollout_timeouts = []
         rollout_valid = []
+        rollout_live_frames = []
         rollout_values = []
         rollout_infos = []
+        metric_first_chunk_infos: list[dict[str, torch.Tensor]] = []
         metric_rollout_info_items: list[tuple[dict[str, torch.Tensor], torch.Tensor]] = []
 
         metric_chunk_return_first = None
@@ -643,6 +654,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             chunk_reward = torch.zeros(total_envs, device=self.env.device, dtype=obs_t.dtype)
             chunk_done = torch.zeros(total_envs, dtype=torch.bool, device=self.env.device)
             chunk_timeout = torch.zeros(total_envs, dtype=torch.bool, device=self.env.device)
+            chunk_live_frames = torch.zeros(total_envs, device=self.env.device, dtype=obs_t.dtype)
             alive_in_chunk = active_before_step.clone()
             last_info = None
             # Save the chunk-start obs because it's the obs the policy used to generate
@@ -650,6 +662,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             # exactly this obs, not the post-step one.
             chunk_start_obs = obs_t
             for frame_idx in range(horizon):
+                alive_before_frame = alive_in_chunk.clone()
                 action_t = action_chunk[:, frame_idx, :]
                 # In-chunk frames must NOT auto_reset: the next frame's action was already
                 # computed from the chunk-start obs and is meaningless on a freshly-reset env.
@@ -661,14 +674,18 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                     auto_reset=in_chunk_auto_reset,
                     reset_horizon=max(1, (chunks_per_rollout - chunk_index - 1) * horizon + (horizon - frame_idx)),
                 )
+                if chunk_index == 0:
+                    metric_first_chunk_infos.append(info_t)
                 # Only frames where the env was alive before this frame contribute to chunk reward.
-                contrib = alive_in_chunk.to(dtype=chunk_reward.dtype)
+                contrib = alive_before_frame.to(dtype=chunk_reward.dtype)
                 chunk_reward = chunk_reward + (gamma ** frame_idx) * reward_t.to(dtype=chunk_reward.dtype) * contrib
+                chunk_live_frames = chunk_live_frames + contrib
                 timeout_frame = info_t["done_terms"]["time_out"].bool()
-                new_done_in_chunk = alive_in_chunk & done_t
+                new_done_in_chunk = alive_before_frame & done_t
                 if bool(new_done_in_chunk.any()):
                     chunk_done = chunk_done | new_done_in_chunk
                     chunk_timeout = chunk_timeout | (new_done_in_chunk & timeout_frame)
+                    first_done_frame[new_done_in_chunk] = int(frame_idx)
                     self._record_first_done(
                         done_mask=ever_done,
                         terminations=(new_done_in_chunk & ~timeout_frame)[:, None],
@@ -682,7 +699,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                         first_done_ee_body=first_done_ee_body,
                         first_done_timeout=first_done_timeout,
                     )
-                alive_in_chunk = alive_in_chunk & ~done_t
+                metric_rollout_info_items.append((info_t, alive_before_frame.detach()))
+                alive_in_chunk = alive_before_frame & ~done_t
                 ever_done = ever_done | done_t
                 obs_t = next_obs_t
                 last_info = info_t
@@ -707,10 +725,14 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             rollout_dones.append(done_t.detach())
             rollout_timeouts.append(timeout_t.detach())
             rollout_valid.append(active_before_step.detach())
+            rollout_live_frames.append(chunk_live_frames.detach())
             rollout_values.append(value_t.detach())
             rollout_infos.append(info_t)
-            metric_rollout_info_items.append((info_t, active_before_step.detach()))
-            self._record_train_episode_stats(reward_t.detach(), done_t.detach())
+            self._record_train_episode_stats(
+                reward_t.detach(),
+                done_t.detach(),
+                step_counts=chunk_live_frames.detach(),
+            )
 
             critic_obs_t = torch.zeros(total_envs, 0, device=self.env.device)
 
@@ -728,8 +750,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
 
         chunk_rewards = torch.stack(rollout_rewards, dim=1)
         valid_steps = torch.stack(rollout_valid, dim=1)
+        live_frame_counts = torch.stack(rollout_live_frames, dim=1)
         objective_chunk_rewards = chunk_rewards * valid_steps.to(dtype=chunk_rewards.dtype)
-        score_denominator = valid_steps.to(dtype=chunk_rewards.dtype).sum(dim=1).clamp(min=1.0)
+        score_denominator = live_frame_counts.to(dtype=chunk_rewards.dtype).sum(dim=1).clamp(min=1.0)
         score_rewards = objective_chunk_rewards.sum(dim=1) / score_denominator
         actions = torch.stack(rollout_actions, dim=1)
         latents = torch.stack(rollout_latents, dim=1)
@@ -768,6 +791,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "train_chunk_rewards": chunk_rewards.view(group_count, generation_count, chunks_per_rollout),
             "dones": torch.stack(rollout_dones, dim=1).view(group_count, generation_count, chunks_per_rollout),
             "timeouts": torch.stack(rollout_timeouts, dim=1).view(group_count, generation_count, chunks_per_rollout),
+            "live_frames": live_frame_counts.view(group_count, generation_count, chunks_per_rollout),
             "values": torch.stack(rollout_values, dim=1).view(group_count, generation_count, chunks_per_rollout),
             "last_values": last_values,
             "latents": latents.view(
@@ -781,8 +805,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 group_count,
                 generation_count,
                 chunks_per_rollout,
-                old_log_probs.shape[-2],
-                old_log_probs.shape[-1],
+                -1,
             ),
             "train_step_indices": rollout_train_step_indices,
             "actions": actions.view(group_count, generation_count, chunks_per_rollout, horizon, self.cfg.action_dim),
@@ -793,11 +816,12 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "first_done_anchor_ori": first_done_anchor_ori.view(group_count, generation_count),
             "first_done_ee_body": first_done_ee_body.view(group_count, generation_count),
             "first_done_timeout": first_done_timeout.view(group_count, generation_count),
+            "first_done_frame": first_done_frame.view(group_count, generation_count),
             "collection_start_phases": collection_start_phases.view(group_count, generation_count),
             "sigma_schedule": sigma_schedule,
             "metric_chunk_return": metric_chunk_return,
             "metric_actions": metric_actions,
-            "metric_infos_list": rollout_infos[:1],
+            "metric_infos_list": metric_first_chunk_infos if metric_first_chunk_infos else rollout_infos[:1],
             "metric_chunk_return_first": metric_chunk_return_first,
             "metric_chunk_return_last": metric_chunk_return_last,
             "metric_actions_first": metric_actions_first,
@@ -887,13 +911,14 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         values: torch.Tensor,
         last_values: torch.Tensor,
         timeouts: torch.Tensor | None = None,
+        gamma: float | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return compute_gae_returns(
             rewards,
             dones,
             values,
             last_values,
-            gamma=float(self.cfg.discount_gamma),
+            gamma=float(self.cfg.discount_gamma if gamma is None else gamma),
             lam=float(self.cfg.gae_lambda),
             timeouts=timeouts,
             normalize_advantage=True,
@@ -928,11 +953,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             raise ValueError("MixGRPO PPO update expects one action sample per env step.")
         if latent_path.ndim != 3:
             raise ValueError("MixGRPO PPO update expects one SDE-ODE latent path per env step.")
-        if old_log_probs.ndim != 3:
-            raise ValueError("old_log_probs must have shape (samples, num_sde_steps, horizon).")
-        if old_log_probs.shape[:2] != (sample_count, train_step_indices.numel()):
+        if old_log_probs.ndim != 2:
+            raise ValueError("old_log_probs must contain per-SDE-step joint chunk scores.")
+        if old_log_probs.shape != (sample_count, train_step_indices.numel()):
             raise ValueError(
-                f"old_log_probs must have shape {(sample_count, train_step_indices.numel(), int(self.cfg.horizon))}, got {tuple(old_log_probs.shape)}"
+                f"old_log_probs must have shape {(sample_count, train_step_indices.numel())}, got {tuple(old_log_probs.shape)}"
             )
         if critic_obs.shape[0] != sample_count or returns.shape != (sample_count,) or old_values.shape != (sample_count,):
             raise ValueError("critic_obs, returns, and old_values must match the flattened sample count.")
@@ -1056,18 +1081,16 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                         micro_latent_path,
                         train_step_indices,
                     )
-                    # log_ratio / ratio shape: (B, num_sde_steps, horizon). Splitting per
-                    # frame keeps the PPO clip / KL semantics scale-invariant to horizon
-                    # (h=1 reduces to the (B, K, 1) tensor that mean()s identically to the
-                    # old (B, K) tensor).
+                    # log_ratio / ratio shape: (B, num_sde_steps). Each entry is the joint
+                    # probability ratio of the whole h-step action chunk for one SDE step.
                     log_ratio = new_log_probs - micro_old_log_probs
                     ratio = torch.exp(log_ratio)
-                    # Advantage broadcasts to every (sde_step, frame) cell within a sample.
+                    # Advantage broadcasts to every SDE transition within a sampled chunk.
                     micro_adv_steps = torch.clamp(
                         micro_adv,
                         -float(self.cfg.adv_clip_max),
                         float(self.cfg.adv_clip_max),
-                    ).view(-1, 1, 1)
+                    ).unsqueeze(-1)
                     unclipped_loss = -micro_adv_steps * ratio
                     clipped_loss = -micro_adv_steps * torch.clamp(
                         ratio,
@@ -1404,6 +1427,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             env_count = self.num_grpo_groups
             rollout_branch_count = int(self.cfg.num_generations)
             chunks = int(group_data["chunk_rewards"].shape[-1])
+            frame_gamma = float(self.cfg.discount_gamma)
+            chunk_gamma = frame_gamma ** max(1, int(self.cfg.horizon))
             train_chunk_rewards = group_data.get("train_chunk_rewards", group_data["chunk_rewards"])
             returns_per_step, _ppo_advantages_per_step = self._compute_gae_returns(
                 train_chunk_rewards.reshape(self.cfg.num_envs, chunks),
@@ -1411,6 +1436,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 group_data["values"].reshape(self.cfg.num_envs, chunks),
                 group_data["last_values"],
                 timeouts=group_data["timeouts"].reshape(self.cfg.num_envs, chunks),
+                gamma=chunk_gamma,
             )
             returns_per_chunk = returns_per_step.view(env_count, rollout_branch_count, chunks)
             # Per-chunk reward-to-go is the GRPO score signal. Survival is encouraged via a
@@ -1418,10 +1444,13 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             # back through gamma into earlier chunks, but it is no longer broadcast as a flat
             # global penalty to every chunk (which would let chunk-0's advantage encode the
             # branch's eventual death and pollute early credit assignment).
-            live_chunks = group_data["valid_mask"].float().sum(dim=-1)
+            live_frames = group_data.get(
+                "live_frames",
+                group_data["valid_mask"].float() * float(max(1, int(self.cfg.horizon))),
+            ).sum(dim=-1)
             early_stop_penalty = (
-                (float(chunks) - live_chunks)
-                / max(float(chunks), 1.0)
+                (float(chunks * max(1, int(self.cfg.horizon))) - live_frames)
+                / max(float(chunks * max(1, int(self.cfg.horizon))), 1.0)
                 * float(self.cfg.terminal_penalty)
             )
             sample_rewards = group_data["rewards"] - early_stop_penalty  # metric only
@@ -1440,9 +1469,16 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 death_one_hot = torch.nn.functional.one_hot(death_idx, num_classes=chunks).to(
                     dtype=first_life_rewards.dtype,
                 )
+                first_done_frame_g = group_data.get(
+                    "first_done_frame",
+                    torch.zeros_like(first_done_chunk_g),
+                ).to(device=first_life_rewards.device)
+                death_frame = first_done_frame_g.clamp(min=0, max=max(0, int(self.cfg.horizon) - 1))
+                death_discount = (frame_gamma ** death_frame.to(dtype=first_life_rewards.dtype)).unsqueeze(-1)
                 first_life_rewards = first_life_rewards - (
                     died_mask.to(dtype=first_life_rewards.dtype).unsqueeze(-1)
                     * death_one_hot
+                    * death_discount
                     * float(self.cfg.terminal_penalty)
                 )
             reward_to_go = torch.zeros_like(first_life_rewards)
@@ -1455,9 +1491,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             )
             alive_at_end_g = (~died_mask).to(dtype=first_life_rewards.dtype)
             running_return = tail_bootstrap_g * alive_at_end_g
-            gamma = float(self.cfg.discount_gamma)
             for chunk_idx in reversed(range(chunks)):
-                running_return = first_life_rewards[:, :, chunk_idx] + gamma * running_return
+                running_return = first_life_rewards[:, :, chunk_idx] + chunk_gamma * running_return
                 reward_to_go[:, :, chunk_idx] = running_return
                 running_return = running_return * valid_float[:, :, chunk_idx]
             chunk_scores = reward_to_go
@@ -1495,7 +1530,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 )[update_flat],
                 group_data["old_log_probs"].reshape(
                     env_count * rollout_branch_count * chunks,
-                    group_data["old_log_probs"].shape[-2],
                     group_data["old_log_probs"].shape[-1],
                 )[update_flat],
                 group_data["train_step_indices"],
@@ -1601,7 +1635,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         act_abs = act_abs_tensor.mean(dim=(0, 1))
         final_latents = group_data["latents"][..., -1, :]
         valid_final_latents = final_latents[valid_mask]
-        live_steps = valid_mask.float().sum(dim=-1) * self.cfg.horizon
+        live_frame_counts = group_data.get("live_frames")
+        if live_frame_counts is None:
+            live_steps = valid_mask.float().sum(dim=-1) * self.cfg.horizon
+        else:
+            live_steps = live_frame_counts.sum(dim=-1)
         live_steps_flat = live_steps.flatten()
         first_done_chunk = group_data.get("first_done_chunk")
         first_done_phase = group_data.get("first_done_phase")
