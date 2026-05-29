@@ -50,6 +50,9 @@ MIMIC_FOOT_BODY_NAMES = (
 )
 MIMIC_ANCHOR_BODY_NAME = "torso_link"
 OBS_DIM = 163
+# Each extra future reference frame appended to the actor observation adds the
+# reference joint_pos + joint_vel (action_dim * 2 = 58 dims).
+FUTURE_REF_FRAME_DIM = 58
 CRITIC_OBS_DIM = 286
 UNDESIRED_CONTACT_THRESHOLD = 1.0
 ANCHOR_Z_TERMINATION_THRESHOLD = 0.25
@@ -171,3 +174,7 @@ class MimicEnvConfig(EnvConfig):
     ee_body_names: tuple[str, ...] = MIMIC_EE_BODY_NAMES
     foot_body_names: tuple[str, ...] = MIMIC_FOOT_BODY_NAMES
     anchor_body_name: str = MIMIC_ANCHOR_BODY_NAME
+    # Number of future reference frames (joint_pos + joint_vel) appended to the actor
+    # observation. For policy horizon h, set this to h - 1 so the policy can see the
+    # references its multi-frame action chunk will track. 0 keeps the legacy single-frame obs.
+    future_ref_steps: int = 0

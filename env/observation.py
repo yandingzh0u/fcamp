@@ -11,7 +11,7 @@ from isaaclab.utils.math import (
     yaw_quat,
 )
 
-from .config import CRITIC_OBS_DIM, OBS_DIM
+from .config import CRITIC_OBS_DIM, FUTURE_REF_FRAME_DIM, OBS_DIM
 
 
 class MimicObservationMixin:
@@ -132,8 +132,18 @@ class MimicObservationMixin:
             ],
             dim=-1,
         )
-        if observation.shape[-1] != OBS_DIM:
-            raise RuntimeError(f"Expected observation dim {OBS_DIM}, got {observation.shape[-1]}")
+        future_ref_steps = int(self.task_cfg.future_ref_steps)
+        if future_ref_steps > 0:
+            future_terms = []
+            for k in range(1, future_ref_steps + 1):
+                future_phase = self.motion.clamp_time_steps(self.phase_steps + k)
+                future_frame = self.motion.get_frame(future_phase)
+                future_joint = torch.cat([future_frame["joint_pos"], future_frame["joint_vel"]], dim=-1)
+                future_terms.append(future_joint)
+            observation = torch.cat([observation, *future_terms], dim=-1)
+        expected_dim = OBS_DIM + future_ref_steps * FUTURE_REF_FRAME_DIM
+        if observation.shape[-1] != expected_dim:
+            raise RuntimeError(f"Expected observation dim {expected_dim}, got {observation.shape[-1]}")
         return observation
 
     def build_critic_observation(self) -> torch.Tensor:

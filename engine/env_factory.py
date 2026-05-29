@@ -5,6 +5,9 @@ from env.mimic import G1MimicEnv
 
 
 def make_mimic_env(cfg) -> G1MimicEnv:
+    future_ref_steps = int(getattr(cfg, "future_ref_steps", -1))
+    if future_ref_steps < 0:
+        future_ref_steps = max(0, int(cfg.horizon) - 1)
     return G1MimicEnv(
         MimicEnvConfig(
             device=cfg.device,
@@ -18,5 +21,6 @@ def make_mimic_env(cfg) -> G1MimicEnv:
             max_episode_steps=cfg.max_episode_steps,
             reset_noise=cfg.reset_noise,
             interval_pushes=cfg.interval_pushes,
+            future_ref_steps=future_ref_steps,
         )
     )

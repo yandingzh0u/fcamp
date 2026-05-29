@@ -6,6 +6,7 @@ from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
 
 from .config import (
     CRITIC_OBS_DIM,
+    FUTURE_REF_FRAME_DIM,
     OBS_DIM,
     PUSH_INTERVAL_STEP_RANGE,
     RESET_JOINT_POSITION_RANGE,
@@ -76,7 +77,7 @@ class G1MimicEnv(
 
     @property
     def observation_dim(self) -> int:
-        return OBS_DIM
+        return OBS_DIM + int(self.task_cfg.future_ref_steps) * FUTURE_REF_FRAME_DIM
 
     @property
     def critic_observation_dim(self) -> int:

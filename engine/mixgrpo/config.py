@@ -23,6 +23,10 @@ class MixGRPOConfig:
     policy_obs_dim: int = 0
     critic_obs_dim: int = 0
     horizon: int = 1
+    # Number of future reference frames appended to the actor observation. -1 (default)
+    # auto-sets it to horizon - 1 so a horizon-h policy sees the references its action
+    # chunk will track. Set 0 to force the legacy single-frame observation.
+    future_ref_steps: int = -1
     actor_hidden_dims: tuple[int, ...] = (512, 256, 128)
     critic_hidden_dims: tuple[int, ...] = (512, 256, 128)
     activation: str = "elu"

@@ -127,6 +127,10 @@ def main() -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args_cli.seed)
 
+    train_future_ref_steps = int(train_cfg.get("future_ref_steps", -1))
+    if train_future_ref_steps < 0:
+        train_future_ref_steps = max(0, int(train_cfg.get("horizon", 1)) - 1)
+
     env = G1MimicEnv(
         MimicEnvConfig(
             device=args_cli.device,
@@ -141,6 +145,7 @@ def main() -> None:
             max_episode_steps=int(1.0e9 / sim_dt),
             reset_noise=reset_noise,
             interval_pushes=interval_pushes,
+            future_ref_steps=train_future_ref_steps,
         )
     )
 
