@@ -129,7 +129,8 @@ def main() -> None:
 
     train_future_ref_steps = int(train_cfg.get("future_ref_steps", -1))
     if train_future_ref_steps < 0:
-        train_future_ref_steps = max(0, int(train_cfg.get("horizon", 1)) - 1)
+        train_horizon = int(train_cfg.get("horizon", 1))
+        train_future_ref_steps = train_horizon if train_horizon > 1 else 0
 
     env = G1MimicEnv(
         MimicEnvConfig(

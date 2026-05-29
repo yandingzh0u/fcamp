@@ -7,7 +7,11 @@ from env.mimic import G1MimicEnv
 def make_mimic_env(cfg) -> G1MimicEnv:
     future_ref_steps = int(getattr(cfg, "future_ref_steps", -1))
     if future_ref_steps < 0:
-        future_ref_steps = max(0, int(cfg.horizon) - 1)
+        horizon = int(cfg.horizon)
+        # h=1 keeps the legacy single-frame obs (no future ref) — that baseline is verified.
+        # For h>1 the policy emits actions tracking ref(p+1) .. ref(p+h), so the actor must
+        # see all h future references.
+        future_ref_steps = horizon if horizon > 1 else 0
     return G1MimicEnv(
         MimicEnvConfig(
             device=cfg.device,
