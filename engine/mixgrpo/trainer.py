@@ -14,7 +14,7 @@ from ..env_factory import make_mimic_env
 from ..env_state import EnvStateMixin
 from .inference import deterministic_sde_ode_actions
 from ..logging import LoggingMixin
-from ..returns import compute_gae_returns
+from ..returns import compute_frame_level_reward_to_go, compute_gae_returns
 from .sampling import flow_grpo_step
 from ..validation import ValidationMixin
 
@@ -28,6 +28,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             raise ValueError(f"horizon must be >= 1, got {cfg.horizon}")
         if float(cfg.value_loss_coef) != 0.0:
             raise ValueError("MixGRPO is critic-free; value_loss_coef must be 0.")
+        # Frame-Factorized consumption (per-frame log_prob / rollout / RTG / advantage /
+        # PPO loss) is fully wired (Tasks 3-6), so the flag is safe to enable.
         self.chunk_dim = cfg.horizon * cfg.action_dim
         self.checkpoint_dir = Path(cfg.checkpoint_dir).expanduser().resolve() if cfg.checkpoint_dir else None
         self._debug_probe_update = 0
@@ -406,6 +408,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         obs_prep = self.policy._prepare_observation(obs)
         batch_size = obs.shape[0]
         steps = int(self.cfg.flow_steps)
+        per_frame = bool(getattr(self.cfg, "frame_factorized", False))
         sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=obs.device, dtype=obs.dtype)
         latent = initial_noise.to(device=obs.device, dtype=obs.dtype) * float(self.cfg.init_noise_std)
         all_latents = [latent.detach()]
@@ -436,6 +439,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 deterministic=False,
                 sample_noise=sde_noise[:, step_index],
                 horizon=int(self.cfg.horizon),
+                per_frame=per_frame,
             )
             all_latents.append(latent.detach())
             step_log_probs.append(log_prob)
@@ -443,8 +447,13 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         if not step_log_probs:
             raise RuntimeError("SDE-ODE rollout produced no trainable transition log-probs.")
         actions = self.policy._action_transform(latent)
-        # step_log_probs is a list of (B,) joint chunk scores -> (B, num_sde_steps)
-        return actions, torch.stack(all_latents, dim=1), torch.stack(step_log_probs, dim=1)
+        # per_frame=False: step_log_probs is list of (B,)  -> stack -> (B, num_sde_steps)
+        # per_frame=True : step_log_probs is list of (B,h) -> stack(dim=-1) -> (B, h, num_sde_steps)
+        if per_frame:
+            stacked_log_probs = torch.stack(step_log_probs, dim=-1)
+        else:
+            stacked_log_probs = torch.stack(step_log_probs, dim=1)
+        return actions, torch.stack(all_latents, dim=1), stacked_log_probs
 
     def _mean_actions(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self._sde_ode_mean_actions(obs)
@@ -481,6 +490,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             raise ValueError("step_indices must be a non-empty 1-D tensor")
 
         obs_prep = self.policy._prepare_observation(obs)
+        per_frame = bool(getattr(self.cfg, "frame_factorized", False))
         sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=obs.device, dtype=obs.dtype)
         log_probs = []
         for step_tensor in step_indices.to(device=obs.device, dtype=torch.long):
@@ -506,9 +516,13 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 prev_sample=next_latent,
                 deterministic=False,
                 horizon=int(self.cfg.horizon),
+                per_frame=per_frame,
             )
             log_probs.append(log_prob)
-        # log_probs is a list of (B,) joint chunk scores -> (B, num_sde_steps)
+        # per_frame=False: list of (B,)   -> (B, num_sde_steps)
+        # per_frame=True : list of (B, h) -> (B, h, num_sde_steps)
+        if per_frame:
+            return torch.stack(log_probs, dim=-1)
         return torch.stack(log_probs, dim=1)
 
     def _record_first_done(
@@ -600,6 +614,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         rollout_timeouts = []
         rollout_valid = []
         rollout_live_frames = []
+        # Per-frame rollout buffers (Task 4 / S3). Each entry is a per-chunk (B, horizon)
+        # tensor; stacked to (B, chunks, horizon) then viewed (env, gen, chunks, horizon).
+        rollout_reward_frame = []
+        rollout_done_frame = []
+        rollout_alive_frame = []
         rollout_values = []
         rollout_infos = []
         metric_first_chunk_infos: list[dict[str, torch.Tensor]] = []
@@ -609,6 +628,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         metric_chunk_return_last = None
         metric_actions_first = None
         metric_actions_last = None
+        # Rollout-wide per-frame diagnostics use group_data["actions"]/alive_frame/reward_frame
+        # (Task 4 buffers), aggregated in _build_metrics; no chunk-0-only buffers needed.
+        metric_cross_chunk_delta_sum = torch.zeros((), device=self.env.device, dtype=obs_t.dtype)
+        metric_cross_chunk_delta_count = torch.zeros((), device=self.env.device, dtype=obs_t.dtype)
+        prev_chunk_last_action = None
         horizon = int(self.cfg.horizon)
         gamma = float(self.cfg.discount_gamma)
         # Reset on the final frame of every chunk so dead branches restart fresh for the
@@ -657,6 +681,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             chunk_live_frames = torch.zeros(total_envs, device=self.env.device, dtype=obs_t.dtype)
             alive_in_chunk = active_before_step.clone()
             last_info = None
+            # Per-frame buffers for THIS chunk (Task 4 / S3), shape (B,) per frame.
+            chunk_reward_frames: list[torch.Tensor] = []
+            chunk_done_frames: list[torch.Tensor] = []
+            chunk_alive_frames: list[torch.Tensor] = []
             # Save the chunk-start obs because it's the obs the policy used to generate
             # the action_chunk; downstream PPO update needs to recompute log-probs from
             # exactly this obs, not the post-step one.
@@ -682,6 +710,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 contrib = alive_before_frame.to(dtype=chunk_reward.dtype)
                 chunk_reward = chunk_reward + (gamma ** frame_idx) * reward_t.to(dtype=chunk_reward.dtype) * contrib
                 chunk_live_frames = chunk_live_frames + contrib
+                # Per-frame raw (undiscounted) buffers for frame-level RTG (Task 4 / S3).
+                chunk_reward_frames.append(reward_t.detach().to(dtype=chunk_reward.dtype))
+                chunk_done_frames.append((alive_before_frame & done_t).detach())
+                chunk_alive_frames.append(alive_before_frame.detach())
                 timeout_frame = info_t["done_terms"]["time_out"].bool()
                 new_done_in_chunk = alive_before_frame & done_t
                 if bool(new_done_in_chunk.any()):
@@ -718,6 +750,18 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 metric_chunk_return_last = reward_t.detach()
                 metric_actions_last = action_chunk.detach().clone()
 
+            # Cross-chunk boundary jump: |first action of this chunk - last action of prev chunk|
+            # over envs that were alive entering this chunk. Rollout-wide (not just chunk 0).
+            chunk_first_action = action_chunk[:, 0, :].detach()
+            chunk_last_action = action_chunk[:, horizon - 1, :].detach()
+            if prev_chunk_last_action is not None:
+                boundary_alive = active_before_step.to(dtype=obs_t.dtype)
+                if bool(boundary_alive.sum() > 0):
+                    delta = (chunk_first_action - prev_chunk_last_action).abs().mean(dim=-1)
+                    metric_cross_chunk_delta_sum = metric_cross_chunk_delta_sum + (delta * boundary_alive).sum()
+                    metric_cross_chunk_delta_count = metric_cross_chunk_delta_count + boundary_alive.sum()
+            prev_chunk_last_action = chunk_last_action
+
             rollout_obs.append(chunk_start_obs)
             rollout_critic_obs.append(critic_obs_t)
             rollout_latents.append(sample["all_latents"])
@@ -728,6 +772,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             rollout_timeouts.append(timeout_t.detach())
             rollout_valid.append(active_before_step.detach())
             rollout_live_frames.append(chunk_live_frames.detach())
+            # Stack this chunk's per-frame buffers -> (B, horizon) and collect (Task 4 / S3).
+            rollout_reward_frame.append(torch.stack(chunk_reward_frames, dim=1))
+            rollout_done_frame.append(torch.stack(chunk_done_frames, dim=1))
+            rollout_alive_frame.append(torch.stack(chunk_alive_frames, dim=1))
             rollout_values.append(value_t.detach())
             rollout_infos.append(info_t)
             self._record_train_episode_stats(
@@ -753,6 +801,13 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         chunk_rewards = torch.stack(rollout_rewards, dim=1)
         valid_steps = torch.stack(rollout_valid, dim=1)
         live_frame_counts = torch.stack(rollout_live_frames, dim=1)
+        # Per-frame rollout tensors (Task 4 / S3): (B, chunks, horizon) -> (env,gen,chunks,horizon)
+        reward_frame = torch.stack(rollout_reward_frame, dim=1)
+        done_frame = torch.stack(rollout_done_frame, dim=1)
+        alive_frame = torch.stack(rollout_alive_frame, dim=1)
+        reward_frame_g = reward_frame.view(group_count, generation_count, chunks_per_rollout, horizon)
+        done_frame_g = done_frame.view(group_count, generation_count, chunks_per_rollout, horizon)
+        alive_frame_g = alive_frame.view(group_count, generation_count, chunks_per_rollout, horizon)
         objective_chunk_rewards = chunk_rewards * valid_steps.to(dtype=chunk_rewards.dtype)
         score_denominator = live_frame_counts.to(dtype=chunk_rewards.dtype).sum(dim=1).clamp(min=1.0)
         score_rewards = objective_chunk_rewards.sum(dim=1) / score_denominator
@@ -794,6 +849,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "dones": torch.stack(rollout_dones, dim=1).view(group_count, generation_count, chunks_per_rollout),
             "timeouts": torch.stack(rollout_timeouts, dim=1).view(group_count, generation_count, chunks_per_rollout),
             "live_frames": live_frame_counts.view(group_count, generation_count, chunks_per_rollout),
+            "reward_frame": reward_frame_g,
+            "done_frame": done_frame_g,
+            "alive_frame": alive_frame_g,
             "values": torch.stack(rollout_values, dim=1).view(group_count, generation_count, chunks_per_rollout),
             "last_values": last_values,
             "latents": latents.view(
@@ -806,8 +864,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "old_log_probs": old_log_probs.view(
                 group_count,
                 generation_count,
-                chunks_per_rollout,
-                -1,
+                *old_log_probs.shape[1:],
             ),
             "train_step_indices": rollout_train_step_indices,
             "actions": actions.view(group_count, generation_count, chunks_per_rollout, horizon, self.cfg.action_dim),
@@ -828,6 +885,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "metric_chunk_return_last": metric_chunk_return_last,
             "metric_actions_first": metric_actions_first,
             "metric_actions_last": metric_actions_last,
+            "metric_cross_chunk_delta_sum": metric_cross_chunk_delta_sum,
+            "metric_cross_chunk_delta_count": metric_cross_chunk_delta_count,
             "metric_action_abs_max_all": metric_action_abs_max_all,
             "metric_rollout_info_items": metric_rollout_info_items,
             "next_observation": obs_t.detach().clone(),
@@ -949,18 +1008,42 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         advantages: torch.Tensor,
         returns: torch.Tensor,
         old_values: torch.Tensor,
+        alive_frame: torch.Tensor | None = None,
     ) -> dict[str, float]:
+        frame_factorized = bool(getattr(self.cfg, "frame_factorized", False))
         sample_count = obs.shape[0]
         if actions.ndim != 2:
             raise ValueError("MixGRPO PPO update expects one action sample per env step.")
         if latent_path.ndim != 3:
             raise ValueError("MixGRPO PPO update expects one SDE-ODE latent path per env step.")
-        if old_log_probs.ndim != 2:
-            raise ValueError("old_log_probs must contain per-SDE-step joint chunk scores.")
-        if old_log_probs.shape != (sample_count, train_step_indices.numel()):
-            raise ValueError(
-                f"old_log_probs must have shape {(sample_count, train_step_indices.numel())}, got {tuple(old_log_probs.shape)}"
-            )
+        if frame_factorized:
+            # old_log_probs: (B, horizon, flow_steps); advantages: (B, horizon);
+            # alive_frame: (B, horizon). Per-frame PPO loss lands in Task 6.
+            horizon = int(self.cfg.horizon)
+            if old_log_probs.ndim != 3 or old_log_probs.shape[1] != horizon:
+                raise ValueError(
+                    f"frame_factorized old_log_probs must be (B, horizon, flow_steps), got {tuple(old_log_probs.shape)}"
+                )
+            if old_log_probs.shape != (sample_count, horizon, train_step_indices.numel()):
+                raise ValueError(
+                    f"old_log_probs must have shape {(sample_count, horizon, train_step_indices.numel())}, "
+                    f"got {tuple(old_log_probs.shape)}"
+                )
+            if advantages.shape != (sample_count, horizon):
+                raise ValueError(
+                    f"frame_factorized advantages must be (B, horizon), got {tuple(advantages.shape)}"
+                )
+            if alive_frame is None or alive_frame.shape != (sample_count, horizon):
+                raise ValueError(
+                    f"frame_factorized requires alive_frame of shape {(sample_count, horizon)}"
+                )
+        else:
+            if old_log_probs.ndim != 2:
+                raise ValueError("old_log_probs must contain per-SDE-step joint chunk scores.")
+            if old_log_probs.shape != (sample_count, train_step_indices.numel()):
+                raise ValueError(
+                    f"old_log_probs must have shape {(sample_count, train_step_indices.numel())}, got {tuple(old_log_probs.shape)}"
+                )
         if critic_obs.shape[0] != sample_count or returns.shape != (sample_count,) or old_values.shape != (sample_count,):
             raise ValueError("critic_obs, returns, and old_values must match the flattened sample count.")
         if sample_count == 0:
@@ -977,6 +1060,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 "policy/old_log_prob": 0.0,
                 "policy/new_log_prob": 0.0,
                 "policy/kl_loss": 0.0,
+                "policy/joint_kl": 0.0,
+                "policy/joint_ratio": 1.0,
+                "policy/joint_clip_frac": 0.0,
                 "policy/step_ratio": 1.0,
                 "policy/step_ratio_min": 1.0,
                 "policy/step_ratio_max": 1.0,
@@ -1027,6 +1113,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "new_log_prob": 0.0,
             "kl_loss": 0.0,
             "grad_norm": 0.0,
+            "joint_kl": 0.0,
+            "joint_ratio": 0.0,
+            "joint_clip_frac": 0.0,
         }
         mini_batch_update_count = 0
         grad_update_count = 0
@@ -1045,6 +1134,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 mb_adv = advantages[mb]
                 mb_returns = returns[mb]
                 mb_old_values = old_values[mb]
+                mb_alive = alive_frame[mb].to(dtype=obs.dtype) if (frame_factorized and alive_frame is not None) else None
                 debug_first_policy_batch = self._debug_enabled() and start == 0
                 micro_batch_size = self._policy_micro_batch_size(mb.numel())
 
@@ -1062,6 +1152,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 mb_kl_weighted = 0.0
                 mb_ratio_min = float("inf")
                 mb_ratio_max = 0.0
+                mb_joint_kl_weighted = 0.0
+                mb_joint_ratio_weighted = 0.0
+                mb_joint_clip_weighted = 0.0
                 debug_new_log_probs = None
                 debug_log_ratio = None
                 debug_ratio = None
@@ -1077,29 +1170,76 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                     micro_adv = mb_adv[micro_start:micro_end]
                     micro_returns = mb_returns[micro_start:micro_end]
                     micro_old_values = mb_old_values[micro_start:micro_end]
+                    micro_alive = mb_alive[micro_start:micro_end] if mb_alive is not None else None
 
                     new_log_probs, _ = self._compute_path_log_probs_and_kl(
                         micro_obs,
                         micro_latent_path,
                         train_step_indices,
                     )
-                    # log_ratio / ratio shape: (B, num_sde_steps). Each entry is the joint
-                    # probability ratio of the whole h-step action chunk for one SDE step.
-                    log_ratio = new_log_probs - micro_old_log_probs
-                    ratio = torch.exp(log_ratio)
-                    # Advantage broadcasts to every SDE transition within a sampled chunk.
-                    micro_adv_steps = torch.clamp(
-                        micro_adv,
-                        -float(self.cfg.adv_clip_max),
-                        float(self.cfg.adv_clip_max),
-                    ).unsqueeze(-1)
-                    unclipped_loss = -micro_adv_steps * ratio
-                    clipped_loss = -micro_adv_steps * torch.clamp(
-                        ratio,
-                        1.0 - self.cfg.clip_range,
-                        1.0 + self.cfg.clip_range,
-                    )
-                    micro_policy_loss = torch.maximum(unclipped_loss, clipped_loss).mean()
+                    if frame_factorized:
+                        # Per-frame PPO (S5). Shapes:
+                        #   new/old_log_probs : (B, horizon, flow_steps)
+                        #   micro_adv         : (B, horizon)
+                        #   micro_alive       : (B, horizon)  alive-entering-frame mask
+                        # log_ratio / ratio : (B, horizon, flow_steps); advantage broadcasts
+                        # over the flow_steps axis. We do a masked mean over (horizon, steps)
+                        # so dead frames contribute nothing. We must NOT sum frames back to a
+                        # chunk before the surrogate.
+                        log_ratio = new_log_probs - micro_old_log_probs
+                        ratio = torch.exp(log_ratio)
+                        micro_adv_f = torch.clamp(
+                            micro_adv,
+                            -float(self.cfg.adv_clip_max),
+                            float(self.cfg.adv_clip_max),
+                        ).unsqueeze(-1)  # (B, horizon, 1)
+                        unclipped_loss = -micro_adv_f * ratio
+                        clipped_loss = -micro_adv_f * torch.clamp(
+                            ratio,
+                            1.0 - self.cfg.clip_range,
+                            1.0 + self.cfg.clip_range,
+                        )
+                        surrogate = torch.maximum(unclipped_loss, clipped_loss)  # (B, horizon, steps)
+                        mask_full = micro_alive.unsqueeze(-1).expand_as(surrogate)  # (B, horizon, steps)
+                        mask_bool = mask_full > 0
+                        mask_sum = mask_full.sum().clamp(min=1.0)
+                        # Use torch.where (not multiplication) so dead frames contribute exactly
+                        # zero value AND zero gradient, even if their ratio overflowed to inf.
+                        zeros = torch.zeros_like(surrogate)
+                        micro_policy_loss = torch.where(mask_bool, surrogate, zeros).sum() / mask_sum
+                        kl_terms = 0.5 * log_ratio.square()
+                        micro_kl_loss = torch.where(mask_bool, kl_terms, torch.zeros_like(kl_terms)).sum() / mask_sum
+                        # Joint-KL safety guard diagnostics (S6): the joint chunk distribution
+                        # is the sum over frames. Zero out dead frames before summing so an
+                        # overflowed dead-frame ratio cannot poison the joint metric.
+                        with torch.no_grad():
+                            safe_log_ratio = torch.where(mask_bool, log_ratio, torch.zeros_like(log_ratio))
+                            joint_log_ratio = safe_log_ratio.sum(dim=1)  # (B, steps): chunk-level log-ratio
+                            joint_ratio = torch.exp(joint_log_ratio)
+                            micro_joint_kl = 0.5 * joint_log_ratio.square().mean()
+                            micro_joint_ratio = joint_ratio.mean()
+                            micro_joint_clip = (
+                                torch.abs(joint_ratio - 1.0) > self.cfg.clip_range
+                            ).float().mean()
+                    else:
+                        # log_ratio / ratio shape: (B, num_sde_steps). Each entry is the joint
+                        # probability ratio of the whole h-step action chunk for one SDE step.
+                        log_ratio = new_log_probs - micro_old_log_probs
+                        ratio = torch.exp(log_ratio)
+                        # Advantage broadcasts to every SDE transition within a sampled chunk.
+                        micro_adv_steps = torch.clamp(
+                            micro_adv,
+                            -float(self.cfg.adv_clip_max),
+                            float(self.cfg.adv_clip_max),
+                        ).unsqueeze(-1)
+                        unclipped_loss = -micro_adv_steps * ratio
+                        clipped_loss = -micro_adv_steps * torch.clamp(
+                            ratio,
+                            1.0 - self.cfg.clip_range,
+                            1.0 + self.cfg.clip_range,
+                        )
+                        micro_policy_loss = torch.maximum(unclipped_loss, clipped_loss).mean()
+                        micro_kl_loss = 0.5 * log_ratio.square().mean()
                     if train_value:
                         value_pred = self.critic(micro_critic_obs)
                         if self.cfg.use_clipped_value_loss:
@@ -1115,9 +1255,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                     else:
                         micro_value_loss = torch.zeros((), device=obs.device, dtype=micro_policy_loss.dtype)
                     micro_entropy = torch.zeros((), device=obs.device, dtype=micro_policy_loss.dtype)
-                    # KL between new and old action distribution; tracked as a metric and used
-                    # by adaptive_kl learning-rate scheduling, NOT added to the loss.
-                    micro_kl_loss = 0.5 * log_ratio.square().mean()
+                    # micro_kl_loss is computed per-branch above (masked for frame_factorized,
+                    # plain mean otherwise). Tracked as a metric and used by adaptive_kl
+                    # learning-rate scheduling, NOT added to the loss (unless kl_penalty_coef>0).
                     micro_loss = (
                         micro_policy_loss
                         + float(self.cfg.value_loss_coef) * micro_value_loss
@@ -1131,16 +1271,40 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                         mb_value_loss_value += float(micro_value_loss.item() * weight)
                         mb_entropy_value += float(micro_entropy.item() * weight)
                         mb_kl_loss_value += float(micro_kl_loss.item() * weight)
-                        mb_clip_weighted += (
-                            torch.abs(ratio - 1.0) > self.cfg.clip_range
-                        ).float().mean().item() * weight
-                        mb_ratio_weighted += float(ratio.mean().item() * weight)
-                        mb_logprob_delta_weighted += float(log_ratio.abs().mean().item() * weight)
-                        mb_old_logprob_weighted += float(micro_old_log_probs.mean().item() * weight)
-                        mb_new_logprob_weighted += float(new_log_probs.mean().item() * weight)
-                        mb_kl_weighted += float(micro_kl_loss.item() * weight)
-                        mb_ratio_min = min(mb_ratio_min, float(ratio.min().item()))
-                        mb_ratio_max = max(mb_ratio_max, float(ratio.max().item()))
+                        if frame_factorized:
+                            # Mask dead frames so per-frame ratio/clip/logp stats reflect only
+                            # frames that actually entered the surrogate (mask_bool from above).
+                            alive_sel = mask_bool  # (B, horizon, steps)
+                            n_alive = alive_sel.sum().clamp(min=1)
+                            ratio_alive = ratio[alive_sel]
+                            log_ratio_alive = log_ratio[alive_sel]
+                            mb_clip_weighted += float(
+                                ((torch.abs(ratio_alive - 1.0) > self.cfg.clip_range).float().mean()).item() * weight
+                            )
+                            mb_ratio_weighted += float(ratio_alive.mean().item() * weight)
+                            mb_logprob_delta_weighted += float(log_ratio_alive.abs().mean().item() * weight)
+                            old_alive = micro_old_log_probs[alive_sel]
+                            new_alive = new_log_probs[alive_sel]
+                            mb_old_logprob_weighted += float(old_alive.mean().item() * weight)
+                            mb_new_logprob_weighted += float(new_alive.mean().item() * weight)
+                            mb_kl_weighted += float(micro_kl_loss.item() * weight)
+                            if ratio_alive.numel() > 0:
+                                mb_ratio_min = min(mb_ratio_min, float(ratio_alive.min().item()))
+                                mb_ratio_max = max(mb_ratio_max, float(ratio_alive.max().item()))
+                            mb_joint_kl_weighted += float(micro_joint_kl.item() * weight)
+                            mb_joint_ratio_weighted += float(micro_joint_ratio.item() * weight)
+                            mb_joint_clip_weighted += float(micro_joint_clip.item() * weight)
+                        else:
+                            mb_clip_weighted += (
+                                torch.abs(ratio - 1.0) > self.cfg.clip_range
+                            ).float().mean().item() * weight
+                            mb_ratio_weighted += float(ratio.mean().item() * weight)
+                            mb_logprob_delta_weighted += float(log_ratio.abs().mean().item() * weight)
+                            mb_old_logprob_weighted += float(micro_old_log_probs.mean().item() * weight)
+                            mb_new_logprob_weighted += float(new_log_probs.mean().item() * weight)
+                            mb_kl_weighted += float(micro_kl_loss.item() * weight)
+                            mb_ratio_min = min(mb_ratio_min, float(ratio.min().item()))
+                            mb_ratio_max = max(mb_ratio_max, float(ratio.max().item()))
                         if debug_first_policy_batch and debug_new_log_probs is None:
                             debug_new_log_probs = new_log_probs.detach()
                             debug_log_ratio = log_ratio.detach()
@@ -1167,6 +1331,21 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                     )
 
                 self._update_adaptive_learning_rate(mb_kl_loss_value)
+                # Joint-KL safety guard (S6): only intervenes when explicitly enabled AND
+                # frame-factorized. Forces lr down if the joint (chunk-level) KL blows past
+                # desired_kl * horizon; warns on excessive joint clip fraction.
+                if frame_factorized and bool(getattr(self.cfg, "joint_kl_guard", False)):
+                    joint_kl_threshold = float(self.cfg.desired_kl) * max(1, int(self.cfg.horizon))
+                    if joint_kl_threshold > 0.0 and mb_joint_kl_weighted > 2.0 * joint_kl_threshold:
+                        self.learning_rate = max(1.0e-5, self.learning_rate / 1.5)
+                        self.optimizer.param_groups[0]["lr"] = self.learning_rate
+                    if mb_joint_clip_weighted > 0.5:
+                        print(
+                            f"[JOINT_KL_GUARD] high joint clip frac={mb_joint_clip_weighted:.3f} "
+                            f"joint_kl={mb_joint_kl_weighted:.4f} (threshold {joint_kl_threshold:.4f}); "
+                            f"lr now {self.learning_rate:.2e}",
+                            flush=True,
+                        )
                 clip_params = list(self.policy.parameters())
                 if train_value:
                     clip_params += list(self.critic.parameters())
@@ -1185,6 +1364,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 totals["old_log_prob"] += mb_old_logprob_weighted
                 totals["new_log_prob"] += mb_new_logprob_weighted
                 totals["grad_norm"] += float(grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm)
+                totals["joint_kl"] += mb_joint_kl_weighted
+                totals["joint_ratio"] += mb_joint_ratio_weighted
+                totals["joint_clip_frac"] += mb_joint_clip_weighted
                 mini_batch_update_count += 1
                 grad_update_count += 1
 
@@ -1201,15 +1383,32 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                         )
                         step_log_ratio = step_new_log_probs - mb_old_log_probs[micro_start:micro_end]
                         step_ratio = torch.exp(step_log_ratio)
-                        step_kl_loss = 0.5 * step_log_ratio.square().mean()
-                        totals["step_clip_frac"] += (
-                            torch.abs(step_ratio - 1.0) > self.cfg.clip_range
-                        ).float().mean().item() * weight
-                        totals["step_ratio"] += float(step_ratio.mean().item() * weight)
-                        totals["step_ratio_min"] = min(totals["step_ratio_min"], float(step_ratio.min().item()))
-                        totals["step_ratio_max"] = max(totals["step_ratio_max"], float(step_ratio.max().item()))
-                        totals["step_logprob_delta_abs"] += float(step_log_ratio.abs().mean().item() * weight)
-                        totals["step_kl_loss"] += float(step_kl_loss.item() * weight)
+                        if frame_factorized and mb_alive is not None:
+                            # Mask dead frames so step_* diagnostics are not polluted.
+                            step_mask = mb_alive[micro_start:micro_end].unsqueeze(-1).expand_as(step_ratio) > 0
+                            step_ratio_sel = step_ratio[step_mask]
+                            step_log_ratio_sel = step_log_ratio[step_mask]
+                            if step_ratio_sel.numel() == 0:
+                                continue
+                            step_kl_loss = 0.5 * step_log_ratio_sel.square().mean()
+                            totals["step_clip_frac"] += float(
+                                ((torch.abs(step_ratio_sel - 1.0) > self.cfg.clip_range).float().mean()).item() * weight
+                            )
+                            totals["step_ratio"] += float(step_ratio_sel.mean().item() * weight)
+                            totals["step_ratio_min"] = min(totals["step_ratio_min"], float(step_ratio_sel.min().item()))
+                            totals["step_ratio_max"] = max(totals["step_ratio_max"], float(step_ratio_sel.max().item()))
+                            totals["step_logprob_delta_abs"] += float(step_log_ratio_sel.abs().mean().item() * weight)
+                            totals["step_kl_loss"] += float(step_kl_loss.item() * weight)
+                        else:
+                            step_kl_loss = 0.5 * step_log_ratio.square().mean()
+                            totals["step_clip_frac"] += (
+                                torch.abs(step_ratio - 1.0) > self.cfg.clip_range
+                            ).float().mean().item() * weight
+                            totals["step_ratio"] += float(step_ratio.mean().item() * weight)
+                            totals["step_ratio_min"] = min(totals["step_ratio_min"], float(step_ratio.min().item()))
+                            totals["step_ratio_max"] = max(totals["step_ratio_max"], float(step_ratio.max().item()))
+                            totals["step_logprob_delta_abs"] += float(step_log_ratio.abs().mean().item() * weight)
+                            totals["step_kl_loss"] += float(step_kl_loss.item() * weight)
                         if debug_first_policy_batch and debug_step_log_ratio is None:
                             debug_step_log_ratio = step_log_ratio.detach()
                             debug_step_ratio = step_ratio.detach()
@@ -1226,12 +1425,26 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             )
             post_log_ratio = post_new_log_probs - old_log_probs[:ratio_probe_count]
             post_ratio_tensor = torch.exp(post_log_ratio)
-            post_ratio = float(post_ratio_tensor.mean().item())
-            post_ratio_min = float(post_ratio_tensor.min().item())
-            post_ratio_max = float(post_ratio_tensor.max().item())
-            post_logprob_delta_abs = float(post_log_ratio.abs().mean().item())
-            post_kl_loss = float((0.5 * post_log_ratio.square()).mean().item())
-            post_clip_frac = float((torch.abs(post_ratio_tensor - 1.0) > self.cfg.clip_range).float().mean().item())
+            if frame_factorized and alive_frame is not None:
+                post_mask = alive_frame[:ratio_probe_count].unsqueeze(-1).expand_as(post_ratio_tensor) > 0
+                pr = post_ratio_tensor[post_mask]
+                plr = post_log_ratio[post_mask]
+                if pr.numel() == 0:
+                    pr = post_ratio_tensor.reshape(-1)
+                    plr = post_log_ratio.reshape(-1)
+                post_ratio = float(pr.mean().item())
+                post_ratio_min = float(pr.min().item())
+                post_ratio_max = float(pr.max().item())
+                post_logprob_delta_abs = float(plr.abs().mean().item())
+                post_kl_loss = float((0.5 * plr.square()).mean().item())
+                post_clip_frac = float((torch.abs(pr - 1.0) > self.cfg.clip_range).float().mean().item())
+            else:
+                post_ratio = float(post_ratio_tensor.mean().item())
+                post_ratio_min = float(post_ratio_tensor.min().item())
+                post_ratio_max = float(post_ratio_tensor.max().item())
+                post_logprob_delta_abs = float(post_log_ratio.abs().mean().item())
+                post_kl_loss = float((0.5 * post_log_ratio.square()).mean().item())
+                post_clip_frac = float((torch.abs(post_ratio_tensor - 1.0) > self.cfg.clip_range).float().mean().item())
 
         update_denom = max(mini_batch_update_count, 1)
         grad_denom = max(grad_update_count, 1)
@@ -1261,6 +1474,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "policy/value_loss": value_loss,
             "policy/entropy": entropy,
             "policy/kl_loss": kl_loss,
+            "policy/joint_kl": (totals["joint_kl"] / update_denom) if frame_factorized else kl_loss,
+            "policy/joint_ratio": (totals["joint_ratio"] / update_denom) if frame_factorized else (totals["pre_ratio"] / update_denom),
+            "policy/joint_clip_frac": (totals["joint_clip_frac"] / update_denom) if frame_factorized else (totals["pre_clip_frac"] / update_denom),
             "policy/clip_frac": totals["pre_clip_frac"] / update_denom,
             "policy/ratio": totals["pre_ratio"] / update_denom,
             "policy/ratio_min": totals["pre_ratio_min"] if totals["pre_ratio_min"] != float("inf") else 0.0,
@@ -1385,6 +1601,27 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             f"actor_hidden_dims={list(self.cfg.actor_hidden_dims)} "
             f"activation={self.cfg.activation} "
             f"action_squash_scale={self.cfg.action_squash_scale}",
+            flush=True,
+        )
+        _env_frames_per_update = self._chunks_per_grpo_update() * int(self.cfg.horizon)
+        _chunk_samples_per_update = int(self.cfg.num_envs) * self._chunks_per_grpo_update()
+        _frame_samples_per_update = _chunk_samples_per_update * int(self.cfg.horizon)
+        _sde_logprob_terms = _chunk_samples_per_update * int(self.cfg.flow_steps)
+        print(
+            f"[INFO] env_frames_per_update={_env_frames_per_update} "
+            f"chunk_samples_per_update={_chunk_samples_per_update} "
+            f"frame_samples_per_update={_frame_samples_per_update} "
+            f"sde_logprob_terms={_sde_logprob_terms} "
+            f"(note: POLICY_DETAIL 'samples' == chunk_samples_per_update)",
+            flush=True,
+        )
+        print(
+            f"[INFO] frame_factorized={self.cfg.frame_factorized} "
+            f"joint_kl_guard={self.cfg.joint_kl_guard} "
+            f"residual_action={self.cfg.residual_action} "
+            f"delta_scale={self.cfg.delta_scale} "
+            f"temporal_decoder={self.cfg.temporal_decoder} "
+            f"future_ref_mode={self.cfg.future_ref_mode}",
             flush=True,
         )
         print(
@@ -1513,13 +1750,63 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             valid_flat = group_data["valid_mask"].reshape(env_count * rollout_branch_count * chunks)
             update_flat = valid_flat
 
+            frame_factorized = bool(getattr(self.cfg, "frame_factorized", False))
+            if frame_factorized:
+                # --- Frame-Factorized credit assignment (Task 5 / S4) --------------------
+                # Frame-level RTG over the real time axis T = chunks * horizon, then
+                # group-relative advantage per (env, physical_frame_t) across generations.
+                horizon = int(self.cfg.horizon)
+                frame_rtg = compute_frame_level_reward_to_go(
+                    group_data["reward_frame"],
+                    group_data["done_frame"],
+                    group_data["alive_frame"],
+                    group_data["last_values"],
+                    gamma=frame_gamma,
+                    terminal_penalty=float(self.cfg.terminal_penalty),
+                )  # (E, G, chunks, horizon)
+                alive_frame_g = group_data["alive_frame"].to(dtype=frame_rtg.dtype)
+                T = chunks * horizon
+                # group-normalize per (env, t) across generations
+                frame_rtg_T = frame_rtg.reshape(env_count, rollout_branch_count, T)
+                alive_T = alive_frame_g.reshape(env_count, rollout_branch_count, T)
+                adv_frame_by_t = self._compute_group_relative_advantages(
+                    frame_rtg_T.permute(0, 2, 1).reshape(env_count * T, rollout_branch_count),
+                    (alive_T > 0).permute(0, 2, 1).reshape(env_count * T, rollout_branch_count),
+                )
+                # back to (E, G, chunks, horizon)
+                advantages_per_frame = (
+                    adv_frame_by_t.view(env_count, T, rollout_branch_count)
+                    .permute(0, 2, 1)
+                    .reshape(env_count, rollout_branch_count, chunks, horizon)
+                )
+                # valid (for PPO masking) is alive-entering-frame within valid chunks.
+                frame_valid = (group_data["alive_frame"] > 0) & valid_mask_g.unsqueeze(-1)
+                frame_valid_flat = frame_valid.reshape(env_count * rollout_branch_count * chunks, horizon)
+                # chunk-level update_flat still selects which (env,gen,chunk) rows enter the
+                # update; the per-frame alive mask inside the row handles dead frames.
+                adv_frame_flat = advantages_per_frame.reshape(
+                    env_count * rollout_branch_count * chunks, horizon
+                )[update_flat]
+                alive_frame_flat = (group_data["alive_frame"] > 0).reshape(
+                    env_count * rollout_branch_count * chunks, horizon
+                )[update_flat]
+                grpo_adv_flat = advantages_per_frame.reshape(
+                    env_count * rollout_branch_count * chunks * horizon
+                )[
+                    (group_data["alive_frame"] > 0).reshape(env_count * rollout_branch_count * chunks * horizon)
+                ]
+                adv_flat = adv_frame_flat
+            else:
+                adv_flat = advantages_per_chunk.reshape(env_count * rollout_branch_count * chunks)[update_flat]
+                grpo_adv_flat = advantages_per_chunk.reshape(env_count * rollout_branch_count * chunks)[valid_flat]
+                adv_frame_flat = None
+                alive_frame_flat = None
+
             obs_flat = group_data["obs"].reshape(env_count * rollout_branch_count * chunks, -1)[update_flat]
             critic_obs_flat = group_data["critic_obs"].reshape(env_count * rollout_branch_count * chunks, -1)[
                 update_flat
             ]
 
-            grpo_adv_flat = advantages_per_chunk.reshape(env_count * rollout_branch_count * chunks)[valid_flat]
-            adv_flat = advantages_per_chunk.reshape(env_count * rollout_branch_count * chunks)[update_flat]
             self._debug_print_advantages(advantages_per_chunk, adv_flat, update_flat, group_data)
             t1 = time.perf_counter()
             update_metrics = self._policy_update(
@@ -1533,12 +1820,13 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 )[update_flat],
                 group_data["old_log_probs"].reshape(
                     env_count * rollout_branch_count * chunks,
-                    group_data["old_log_probs"].shape[-1],
+                    *group_data["old_log_probs"].shape[3:],
                 )[update_flat],
                 group_data["train_step_indices"],
                 adv_flat,
                 returns_per_chunk.reshape(env_count * rollout_branch_count * chunks)[update_flat],
                 group_data["values"].reshape(env_count * rollout_branch_count * chunks)[update_flat],
+                alive_frame=alive_frame_flat,
             )
             update_time = time.perf_counter() - t1
             metrics = self._build_metrics(group_data, advantages_per_chunk, update_metrics, collect_time, update_time)
@@ -1622,6 +1910,50 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         metric_actions_last = group_data.get("metric_actions_last")
         act_first_mean = float(metric_actions_first.abs().mean().item()) if metric_actions_first is not None else 0.0
         act_last_mean = float(metric_actions_last.abs().mean().item()) if metric_actions_last is not None else 0.0
+
+        # --- Per-frame diagnostics (Task 2 / S1), ROLLOUT-WIDE -----------------------
+        # Aggregate frame0/frame1 action magnitude and in-chunk |a1-a0| over ALL chunks
+        # (alive-weighted), not just chunk 0, so the metrics reflect h=2 jitter across the
+        # whole rollout (SH-2). Uses the full per-frame buffers from Task 4.
+        horizon_dim = int(self.cfg.horizon)
+        actions_full = group_data.get("actions")  # (E, G, chunks, horizon, action_dim)
+        alive_full = group_data.get("alive_frame")  # (E, G, chunks, horizon)
+        reward_full = group_data.get("reward_frame")  # (E, G, chunks, horizon)
+
+        def _alive_weighted_mean(per_value: torch.Tensor, alive_w: torch.Tensor) -> float:
+            denom = alive_w.sum()
+            if float(denom.item()) <= 0.0:
+                return float("nan")
+            return float(((per_value * alive_w).sum() / denom).item())
+
+        frame_abs_means: list[float] = []
+        frame_reward_means: list[float] = []
+        in_chunk_delta_abs = float("nan")
+        if actions_full is not None and alive_full is not None:
+            alive_w = alive_full.to(dtype=actions_full.dtype)  # (E,G,chunks,horizon)
+            per_frame_abs = actions_full.abs().mean(dim=-1)  # (E,G,chunks,horizon)
+            for f in range(horizon_dim):
+                frame_abs_means.append(_alive_weighted_mean(per_frame_abs[..., f], alive_w[..., f]))
+            if horizon_dim > 1:
+                # |a_{f} - a_{f-1}| averaged over action dims, weighted by alive at frame f.
+                delta = (actions_full[..., 1:, :] - actions_full[..., :-1, :]).abs().mean(dim=-1)  # (E,G,chunks,h-1)
+                in_chunk_delta_abs = _alive_weighted_mean(delta, alive_w[..., 1:])
+            if reward_full is not None:
+                rw = reward_full.to(dtype=actions_full.dtype)
+                for f in range(horizon_dim):
+                    frame_reward_means.append(_alive_weighted_mean(rw[..., f], alive_w[..., f]))
+        frame0_abs_mean = frame_abs_means[0] if frame_abs_means else 0.0
+        frame1_abs_mean = frame_abs_means[1] if len(frame_abs_means) > 1 else float("nan")
+        frame0_reward_mean = frame_reward_means[0] if frame_reward_means else float("nan")
+        frame1_reward_mean = frame_reward_means[1] if len(frame_reward_means) > 1 else float("nan")
+
+        cross_delta_sum = group_data.get("metric_cross_chunk_delta_sum")
+        cross_delta_count = group_data.get("metric_cross_chunk_delta_count")
+        if cross_delta_sum is not None and cross_delta_count is not None and float(cross_delta_count.item()) > 0.0:
+            cross_chunk_delta_abs = float((cross_delta_sum / cross_delta_count).item())
+        else:
+            cross_chunk_delta_abs = float("nan")
+        # ----------------------------------------------------------------------------
         chunk_first_mean = (
             float(metric_chunk_return_first.mean().item())
             if metric_chunk_return_first is not None
@@ -1831,6 +2163,12 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "act/r_wrist_yaw": float(act_abs[28].item()),
             "act/first_abs_mean": act_first_mean,
             "act/last_abs_mean": act_last_mean,
+            "act/frame0_abs_mean": frame0_abs_mean,
+            "act/frame1_abs_mean": frame1_abs_mean,
+            "act/in_chunk_delta_abs": in_chunk_delta_abs,
+            "act/cross_chunk_delta_abs": cross_chunk_delta_abs,
+            "reward/frame0_mean": frame0_reward_mean,
+            "reward/frame1_mean": frame1_reward_mean,
         }
         done_union: dict[str, torch.Tensor] = {}
         metric_infos_list = group_data["metric_infos_list"]

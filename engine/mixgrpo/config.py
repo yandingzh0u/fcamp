@@ -33,6 +33,25 @@ class MixGRPOConfig:
     flow_steps: int = 4
     action_squash_scale: float = 5.0
 
+    # --- Frame-Factorized h>1 controls (see .kiro/specs/h2-action-chunk) ---
+    # All default to current (chunk-level) behavior so omitting them is a no-op.
+    # frame_factorized turns on per-frame log_prob / reward / RTG / advantage / PPO ratio
+    # (the root-cause fix). It is an atomic switch: S2-S5 in design.md activate together.
+    frame_factorized: bool = False
+    # joint_kl_guard only *intervenes* (forces lr down) when BOTH joint_kl_guard=True AND
+    # frame_factorized=True. Otherwise it only reports joint_kl / joint_ratio metrics.
+    joint_kl_guard: bool = False
+    # residual_action reparametrizes the h>1 action chunk as a0 + delta (temporal smoothness
+    # in the deterministic transform, not in correlated noise). Enhancement, not first fix.
+    residual_action: bool = False
+    delta_scale: float = 0.5
+    # temporal_decoder swaps the flat MLP for an encoder + shared per-frame decoder. Optional.
+    temporal_decoder: bool = False
+    # future_ref_mode controls what future reference info is appended to the actor obs.
+    # "joint" = current behavior (future joint pos/vel). "joint_anchor"/"full" add compact
+    # future anchor/root/body targets. Changing this changes obs_dim (checkpoint-incompatible).
+    future_ref_mode: str = "joint"
+
     init_noise_std: float = 0.8
     init_same_noise: bool = False
     eval_initial_noise: str = "zero"

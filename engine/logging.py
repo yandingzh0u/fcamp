@@ -94,6 +94,13 @@ class LoggingMixin:
             f"opt_steps={metrics.get('policy/optimizer_steps', float('nan')):.0f}",
             flush=True,
         )
+        print(
+            f"[JOINT_KL] "
+            f"joint_kl={metrics.get('policy/joint_kl', float('nan')):.5f} "
+            f"joint_ratio={metrics.get('policy/joint_ratio', float('nan')):.4f} "
+            f"joint_clip={metrics.get('policy/joint_clip_frac', float('nan')):.4f}",
+            flush=True,
+        )
         self._log_policy_detail("POLICY_DETAIL", metrics, include_grpo=True)
 
     def _log_policy_detail(self, label: str, metrics: dict[str, float], *, include_grpo: bool) -> None:
@@ -229,6 +236,16 @@ class LoggingMixin:
             f"last={metrics.get('act/last_abs_mean', float('nan')):.4f} "
             f"latent_abs={metrics.get('latent/final_abs_mean', float('nan')):.4f} "
             f"latent_max={metrics.get('latent/final_abs_max', float('nan')):.4f}",
+            flush=True,
+        )
+        print(
+            f"[FRAME_DIAG] "
+            f"frame0_abs={metrics.get('act/frame0_abs_mean', float('nan')):.4f} "
+            f"frame1_abs={metrics.get('act/frame1_abs_mean', float('nan')):.4f} "
+            f"in_chunk_delta={metrics.get('act/in_chunk_delta_abs', float('nan')):.4f} "
+            f"cross_chunk_delta={metrics.get('act/cross_chunk_delta_abs', float('nan')):.4f} "
+            f"frame0_reward={metrics.get('reward/frame0_mean', float('nan')):.5f} "
+            f"frame1_reward={metrics.get('reward/frame1_mean', float('nan')):.5f}",
             flush=True,
         )
         print(

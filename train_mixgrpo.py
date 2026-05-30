@@ -84,6 +84,55 @@ parser.add_argument(
     help="Number of env-frames each policy chunk advances; chunk reward = discounted sum across these frames.",
 )
 parser.add_argument(
+    "--frame_factorized",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help=(
+        "Frame-Factorized h>1: per-frame log_prob / reward / RTG / advantage / PPO ratio. "
+        "Atomic root-cause fix (design S2-S5). Default off keeps chunk-level behavior. "
+        "No-op when horizon=1 (numerically equivalent to current path)."
+    ),
+)
+parser.add_argument(
+    "--joint_kl_guard",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help=(
+        "Joint-KL safety guard. Only intervenes (forces lr down) when BOTH this and "
+        "--frame_factorized are set; otherwise it only reports joint_kl/joint_ratio metrics."
+    ),
+)
+parser.add_argument(
+    "--residual_action",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help=(
+        "Reparametrize the h>1 action chunk as a0 + delta for temporal smoothness. "
+        "Enhancement, not the first fix. No-op when horizon=1."
+    ),
+)
+parser.add_argument(
+    "--delta_scale",
+    type=float,
+    default=0.5,
+    help="Scale of the residual frame-to-frame delta when --residual_action is set.",
+)
+parser.add_argument(
+    "--temporal_decoder",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Use an encoder + shared per-frame decoder instead of the flat MLP. Optional enhancement.",
+)
+parser.add_argument(
+    "--future_ref_mode",
+    choices=("joint", "joint_anchor", "full"),
+    default="joint",
+    help=(
+        "Future reference info appended to the actor obs. 'joint' = current behavior. "
+        "'joint_anchor'/'full' add compact future anchor/root/body targets (changes obs_dim)."
+    ),
+)
+parser.add_argument(
     "--tail_bootstrap_steps",
     type=int,
     default=0,
@@ -280,6 +329,12 @@ def main() -> None:
         policy_obs_dim=args_cli.policy_obs_dim,
         critic_obs_dim=args_cli.critic_obs_dim,
         horizon=args_cli.horizon,
+        frame_factorized=args_cli.frame_factorized,
+        joint_kl_guard=args_cli.joint_kl_guard,
+        residual_action=args_cli.residual_action,
+        delta_scale=args_cli.delta_scale,
+        temporal_decoder=args_cli.temporal_decoder,
+        future_ref_mode=args_cli.future_ref_mode,
         actor_hidden_dims=tuple(args_cli.actor_hidden_dims),
         critic_hidden_dims=tuple(args_cli.critic_hidden_dims),
         activation=args_cli.activation,
