@@ -14,7 +14,7 @@ from ..env_factory import make_mimic_env
 from ..env_state import EnvStateMixin
 from .inference import deterministic_sde_ode_actions
 from ..logging import LoggingMixin
-from ..returns import compute_frame_level_reward_to_go, compute_gae_returns
+from ..returns import compute_frame_level_reward_to_go
 from .sampling import flow_grpo_step
 from ..validation import ValidationMixin
 
@@ -351,7 +351,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "all_latents": latent_path.detach(),
             "log_probs": step_log_probs.detach(),
             "train_step_indices": train_step_indices.detach().clone(),
-            "sigma_schedule": torch.linspace(1.0, 0.0, self.cfg.flow_steps + 1, device=obs.device, dtype=obs.dtype),
         }
 
     def _sample_policy_with_logprobs(
@@ -361,41 +360,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         sde_noise: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         return self._sde_sample_with_logprobs(obs, noise, sde_noise=sde_noise)
-
-    def _sde_ode_mean_actions(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        noise = torch.zeros(obs.shape[0], self.chunk_dim, device=obs.device, dtype=obs.dtype)
-        self.policy._validate_inputs(obs, noise, self.cfg.flow_steps)
-        obs_prep = self.policy._prepare_observation(obs)
-        batch_size = obs.shape[0]
-        steps = self.cfg.flow_steps
-        sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=obs.device, dtype=obs.dtype)
-        latent = noise
-        all_latents = [latent.detach()]
-        zero_step_noise = torch.zeros_like(latent)
-
-        for step_index in range(steps):
-            sigma = sigma_schedule[step_index]
-            timestep_batch = torch.full(
-                (batch_size,),
-                float(sigma.item()),
-                device=obs.device,
-                dtype=obs.dtype,
-            )
-
-            model_output = self.policy.velocity_field(obs_prep, latent, timestep_batch)
-            latent, _ = flow_grpo_step(
-                model_output=model_output,
-                latents=latent,
-                sigmas=sigma_schedule,
-                index=step_index,
-                eta=float(self.cfg.sde_eta),
-                deterministic=False,
-                sample_noise=zero_step_noise,
-                horizon=int(self.cfg.horizon),
-            )
-            all_latents.append(latent.detach())
-        mean_actions = self.policy._action_transform(latent)
-        return mean_actions, torch.stack(all_latents, dim=1)
 
     def _sde_ode_rollout_actions(
         self,
@@ -454,9 +418,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         else:
             stacked_log_probs = torch.stack(step_log_probs, dim=1)
         return actions, torch.stack(all_latents, dim=1), stacked_log_probs
-
-    def _mean_actions(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self._sde_ode_mean_actions(obs)
 
     def _deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
         initial_noise = None
@@ -585,8 +546,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             else torch.zeros(total_envs, dtype=torch.long, device=self.env.device)
         )
         obs_t = current_obs
-        critic_obs_t = torch.zeros(total_envs, 0, device=self.env.device)
-        sigma_schedule = None
         metric_action_abs_max_all = 0.0
 
         first_done_chunk = torch.full(
@@ -604,7 +563,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         ever_done = torch.zeros(total_envs, dtype=torch.bool, device=self.env.device)
 
         rollout_obs = []
-        rollout_critic_obs = []
         rollout_latents = []
         rollout_old_log_probs = []
         rollout_train_step_indices = None
@@ -619,7 +577,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         rollout_reward_frame = []
         rollout_done_frame = []
         rollout_alive_frame = []
-        rollout_values = []
         rollout_infos = []
         metric_first_chunk_infos: list[dict[str, torch.Tensor]] = []
         metric_rollout_info_items: list[tuple[dict[str, torch.Tensor], torch.Tensor]] = []
@@ -659,9 +616,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             )
             with torch.no_grad():
                 sample = self._sample_policy_with_logprobs(obs_t, noise, sde_noise=sde_noise)
-                value_t = torch.zeros(total_envs, device=self.env.device)
 
-            sigma_schedule = sample["sigma_schedule"]
             rollout_train_step_indices = sample["train_step_indices"]
             action_chunk = sample["actions"]
             expected_action_shape = (total_envs, horizon, self.cfg.action_dim)
@@ -763,7 +718,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             prev_chunk_last_action = chunk_last_action
 
             rollout_obs.append(chunk_start_obs)
-            rollout_critic_obs.append(critic_obs_t)
             rollout_latents.append(sample["all_latents"])
             rollout_old_log_probs.append(sample["log_probs"].detach())
             rollout_actions.append(action_chunk.detach())
@@ -776,15 +730,12 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             rollout_reward_frame.append(torch.stack(chunk_reward_frames, dim=1))
             rollout_done_frame.append(torch.stack(chunk_done_frames, dim=1))
             rollout_alive_frame.append(torch.stack(chunk_alive_frames, dim=1))
-            rollout_values.append(value_t.detach())
             rollout_infos.append(info_t)
             self._record_train_episode_stats(
                 reward_t.detach(),
                 done_t.detach(),
                 step_counts=chunk_live_frames.detach(),
             )
-
-            critic_obs_t = torch.zeros(total_envs, 0, device=self.env.device)
 
         last_values = torch.zeros(total_envs, device=self.env.device)
         tail_steps = max(0, int(getattr(self.cfg, "tail_bootstrap_steps", 0)))
@@ -834,12 +785,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 chunks_per_rollout,
                 -1,
             ),
-            "critic_obs": torch.stack(rollout_critic_obs, dim=1).view(
-                group_count,
-                generation_count,
-                chunks_per_rollout,
-                -1,
-            ),
             "rewards": objective_chunk_rewards.sum(dim=1).view(group_count, generation_count),
             "raw_rewards": chunk_rewards.sum(dim=1).view(group_count, generation_count),
             "score_rewards": score_rewards.view(group_count, generation_count),
@@ -852,7 +797,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "reward_frame": reward_frame_g,
             "done_frame": done_frame_g,
             "alive_frame": alive_frame_g,
-            "values": torch.stack(rollout_values, dim=1).view(group_count, generation_count, chunks_per_rollout),
             "last_values": last_values,
             "latents": latents.view(
                 group_count,
@@ -877,7 +821,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "first_done_timeout": first_done_timeout.view(group_count, generation_count),
             "first_done_frame": first_done_frame.view(group_count, generation_count),
             "collection_start_phases": collection_start_phases.view(group_count, generation_count),
-            "sigma_schedule": sigma_schedule,
             "metric_chunk_return": metric_chunk_return,
             "metric_actions": metric_actions,
             "metric_infos_list": metric_first_chunk_infos if metric_first_chunk_infos else rollout_infos[:1],
@@ -890,7 +833,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "metric_action_abs_max_all": metric_action_abs_max_all,
             "metric_rollout_info_items": metric_rollout_info_items,
             "next_observation": obs_t.detach().clone(),
-            "next_critic_observation": critic_obs_t.detach().clone(),
         }
 
     def _compute_tail_bootstrap(
@@ -965,26 +907,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         tail_return = tail_return * alive_mask.to(dtype=tail_return.dtype)
         return tail_return.detach()
 
-    def _compute_gae_returns(
-        self,
-        rewards: torch.Tensor,
-        dones: torch.Tensor,
-        values: torch.Tensor,
-        last_values: torch.Tensor,
-        timeouts: torch.Tensor | None = None,
-        gamma: float | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return compute_gae_returns(
-            rewards,
-            dones,
-            values,
-            last_values,
-            gamma=float(self.cfg.discount_gamma if gamma is None else gamma),
-            lam=float(self.cfg.gae_lambda),
-            timeouts=timeouts,
-            normalize_advantage=True,
-        )
-
     def _compute_path_log_probs_and_kl(
         self,
         obs: torch.Tensor,
@@ -1000,14 +922,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
     def _policy_update(
         self,
         obs: torch.Tensor,
-        critic_obs: torch.Tensor,
         actions: torch.Tensor,
         latent_path: torch.Tensor,
         old_log_probs: torch.Tensor,
         train_step_indices: torch.Tensor,
         advantages: torch.Tensor,
-        returns: torch.Tensor,
-        old_values: torch.Tensor,
         alive_frame: torch.Tensor | None = None,
     ) -> dict[str, float]:
         frame_factorized = bool(getattr(self.cfg, "frame_factorized", False))
@@ -1018,7 +937,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             raise ValueError("MixGRPO PPO update expects one SDE-ODE latent path per env step.")
         if frame_factorized:
             # old_log_probs: (B, horizon, flow_steps); advantages: (B, horizon);
-            # alive_frame: (B, horizon). Per-frame PPO loss lands in Task 6.
+            # alive_frame: (B, horizon). Per-frame PPO loss (design S5).
             horizon = int(self.cfg.horizon)
             if old_log_probs.ndim != 3 or old_log_probs.shape[1] != horizon:
                 raise ValueError(
@@ -1044,8 +963,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 raise ValueError(
                     f"old_log_probs must have shape {(sample_count, train_step_indices.numel())}, got {tuple(old_log_probs.shape)}"
                 )
-        if critic_obs.shape[0] != sample_count or returns.shape != (sample_count,) or old_values.shape != (sample_count,):
-            raise ValueError("critic_obs, returns, and old_values must match the flattened sample count.")
         if sample_count == 0:
             return {
                 "policy/loss": 0.0,
@@ -1087,7 +1004,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             }
         mini_batch_size = self._policy_mini_batch_size(sample_count)
         advantage_abs_mean = float(advantages.detach().abs().mean().item())
-        train_value = float(self.cfg.value_loss_coef) != 0.0
         probe_count = min(128, sample_count)
         probe_obs = obs[:probe_count]
         with torch.no_grad():
@@ -1129,11 +1045,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 mb_obs = obs[mb]
                 mb_actions = actions[mb]
                 mb_latent_path = latent_path[mb]
-                mb_critic_obs = critic_obs[mb]
                 mb_old_log_probs = old_log_probs[mb]
                 mb_adv = advantages[mb]
-                mb_returns = returns[mb]
-                mb_old_values = old_values[mb]
                 mb_alive = alive_frame[mb].to(dtype=obs.dtype) if (frame_factorized and alive_frame is not None) else None
                 debug_first_policy_batch = self._debug_enabled() and start == 0
                 micro_batch_size = self._policy_micro_batch_size(mb.numel())
@@ -1163,13 +1076,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                     micro_end = min(micro_start + micro_batch_size, mb_size)
                     weight = (micro_end - micro_start) / mb_size
                     micro_obs = mb_obs[micro_start:micro_end]
-                    micro_critic_obs = mb_critic_obs[micro_start:micro_end]
                     micro_actions = mb_actions[micro_start:micro_end]
                     micro_latent_path = mb_latent_path[micro_start:micro_end]
                     micro_old_log_probs = mb_old_log_probs[micro_start:micro_end]
                     micro_adv = mb_adv[micro_start:micro_end]
-                    micro_returns = mb_returns[micro_start:micro_end]
-                    micro_old_values = mb_old_values[micro_start:micro_end]
                     micro_alive = mb_alive[micro_start:micro_end] if mb_alive is not None else None
 
                     new_log_probs, _ = self._compute_path_log_probs_and_kl(
@@ -1240,27 +1150,12 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                         )
                         micro_policy_loss = torch.maximum(unclipped_loss, clipped_loss).mean()
                         micro_kl_loss = 0.5 * log_ratio.square().mean()
-                    if train_value:
-                        value_pred = self.critic(micro_critic_obs)
-                        if self.cfg.use_clipped_value_loss:
-                            value_clipped = micro_old_values + (value_pred - micro_old_values).clamp(
-                                -self.cfg.clip_range,
-                                self.cfg.clip_range,
-                            )
-                            value_losses = (value_pred - micro_returns).square()
-                            value_losses_clipped = (value_clipped - micro_returns).square()
-                            micro_value_loss = torch.maximum(value_losses, value_losses_clipped).mean()
-                        else:
-                            micro_value_loss = (micro_returns - value_pred).square().mean()
-                    else:
-                        micro_value_loss = torch.zeros((), device=obs.device, dtype=micro_policy_loss.dtype)
                     micro_entropy = torch.zeros((), device=obs.device, dtype=micro_policy_loss.dtype)
                     # micro_kl_loss is computed per-branch above (masked for frame_factorized,
                     # plain mean otherwise). Tracked as a metric and used by adaptive_kl
                     # learning-rate scheduling, NOT added to the loss (unless kl_penalty_coef>0).
                     micro_loss = (
                         micro_policy_loss
-                        + float(self.cfg.value_loss_coef) * micro_value_loss
                         - float(self.cfg.entropy_coef) * micro_entropy
                         + float(self.cfg.kl_penalty_coef) * micro_kl_loss
                     )
@@ -1268,7 +1163,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
 
                     with torch.no_grad():
                         mb_policy_loss_value += float(micro_policy_loss.item() * weight)
-                        mb_value_loss_value += float(micro_value_loss.item() * weight)
                         mb_entropy_value += float(micro_entropy.item() * weight)
                         mb_kl_loss_value += float(micro_kl_loss.item() * weight)
                         if frame_factorized:
@@ -1321,8 +1215,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                     print(self._peek(debug_log_ratio, "step_log_ratio"), flush=True)
                     print(self._peek(debug_ratio, "step_ratio"), flush=True)
                     print(self._peek(mb_adv, "mb_adv"), flush=True)
-                    print(self._peek(mb_returns, "mb_returns"), flush=True)
-                    print(self._peek(mb_old_values, "mb_old_values"), flush=True)
                     print(
                         f"[DEBUG] mb_policy_loss={mb_policy_loss_value:.6f} "
                         f"mb_value_loss={mb_value_loss_value:.6f} "
@@ -1346,10 +1238,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                             f"lr now {self.learning_rate:.2e}",
                             flush=True,
                         )
-                clip_params = list(self.policy.parameters())
-                if train_value:
-                    clip_params += list(self.critic.parameters())
-                grad_norm = torch.nn.utils.clip_grad_norm_(clip_params, self.cfg.max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    list(self.policy.parameters()), self.cfg.max_grad_norm
+                )
                 self.optimizer.step()
 
                 totals["policy_loss"] += mb_policy_loss_value
@@ -1617,11 +1508,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         )
         print(
             f"[INFO] frame_factorized={self.cfg.frame_factorized} "
-            f"joint_kl_guard={self.cfg.joint_kl_guard} "
-            f"residual_action={self.cfg.residual_action} "
-            f"delta_scale={self.cfg.delta_scale} "
-            f"temporal_decoder={self.cfg.temporal_decoder} "
-            f"future_ref_mode={self.cfg.future_ref_mode}",
+            f"joint_kl_guard={self.cfg.joint_kl_guard}",
             flush=True,
         )
         print(
@@ -1630,10 +1517,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             f"adv_clip_max={self.cfg.adv_clip_max} "
                 f"desired_kl={self.cfg.desired_kl} "
             f"gamma={self.cfg.discount_gamma} "
-            f"gae_lambda={self.cfg.gae_lambda} "
             f"entropy_coef={self.cfg.entropy_coef} "
             f"value_loss_coef={self.cfg.value_loss_coef} "
-            f"use_clipped_value_loss={self.cfg.use_clipped_value_loss} "
             f"num_mini_batches={self.cfg.num_mini_batches} "
             f"mini_batch_override={self.cfg.mini_batch_size} "
             f"micro_batch={self.cfg.micro_batch_size} "
@@ -1670,15 +1555,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             frame_gamma = float(self.cfg.discount_gamma)
             chunk_gamma = frame_gamma ** max(1, int(self.cfg.horizon))
             train_chunk_rewards = group_data.get("train_chunk_rewards", group_data["chunk_rewards"])
-            returns_per_step, _ppo_advantages_per_step = self._compute_gae_returns(
-                train_chunk_rewards.reshape(self.cfg.num_envs, chunks),
-                group_data["dones"].reshape(self.cfg.num_envs, chunks),
-                group_data["values"].reshape(self.cfg.num_envs, chunks),
-                group_data["last_values"],
-                timeouts=group_data["timeouts"].reshape(self.cfg.num_envs, chunks),
-                gamma=chunk_gamma,
-            )
-            returns_per_chunk = returns_per_step.view(env_count, rollout_branch_count, chunks)
             # Per-chunk reward-to-go is the GRPO score signal. Survival is encouraged via a
             # *local* terminal_penalty subtracted at the death chunk only — RTG then folds it
             # back through gamma into earlier chunks, but it is no longer broadcast as a flat
@@ -1803,15 +1679,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 alive_frame_flat = None
 
             obs_flat = group_data["obs"].reshape(env_count * rollout_branch_count * chunks, -1)[update_flat]
-            critic_obs_flat = group_data["critic_obs"].reshape(env_count * rollout_branch_count * chunks, -1)[
-                update_flat
-            ]
 
             self._debug_print_advantages(advantages_per_chunk, adv_flat, update_flat, group_data)
             t1 = time.perf_counter()
             update_metrics = self._policy_update(
                 obs_flat,
-                critic_obs_flat,
                 group_data["actions"].reshape(env_count * rollout_branch_count * chunks, self.chunk_dim)[update_flat],
                 group_data["latents"].reshape(
                     env_count * rollout_branch_count * chunks,
@@ -1824,8 +1696,6 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 )[update_flat],
                 group_data["train_step_indices"],
                 adv_flat,
-                returns_per_chunk.reshape(env_count * rollout_branch_count * chunks)[update_flat],
-                group_data["values"].reshape(env_count * rollout_branch_count * chunks)[update_flat],
                 alive_frame=alive_frame_flat,
             )
             update_time = time.perf_counter() - t1

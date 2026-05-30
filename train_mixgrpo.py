@@ -20,20 +20,12 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--num_envs", type=int, default=8192, help="Number of parallel IsaacLab environments.")
 parser.add_argument("--action_dim", type=int, default=29, help="Single-step action dimension.")
 parser.add_argument("--policy_obs_dim", type=int, default=0, help="Observation dim consumed by the policy. 0 uses the full env observation.")
-parser.add_argument("--critic_obs_dim", type=int, default=0, help="Observation dim consumed by the critic. 0 uses the official privileged env observation.")
 parser.add_argument(
     "--actor_hidden_dims",
     type=int,
     nargs="+",
     default=[512, 256, 128],
     help="Actor hidden dimensions. Default matches Unitree RSL-RL PPO.",
-)
-parser.add_argument(
-    "--critic_hidden_dims",
-    type=int,
-    nargs="+",
-    default=[512, 256, 128],
-    help="Critic hidden dimensions. Default matches Unitree RSL-RL PPO.",
 )
 parser.add_argument("--activation", type=str, default="elu", help="Actor activation. Default matches Unitree RSL-RL PPO.")
 parser.add_argument("--flow_steps", type=int, default=4, help="Number of flow denoising steps.")
@@ -103,36 +95,6 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "--residual_action",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help=(
-        "Reparametrize the h>1 action chunk as a0 + delta for temporal smoothness. "
-        "Enhancement, not the first fix. No-op when horizon=1."
-    ),
-)
-parser.add_argument(
-    "--delta_scale",
-    type=float,
-    default=0.5,
-    help="Scale of the residual frame-to-frame delta when --residual_action is set.",
-)
-parser.add_argument(
-    "--temporal_decoder",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help="Use an encoder + shared per-frame decoder instead of the flat MLP. Optional enhancement.",
-)
-parser.add_argument(
-    "--future_ref_mode",
-    choices=("joint", "joint_anchor", "full"),
-    default="joint",
-    help=(
-        "Future reference info appended to the actor obs. 'joint' = current behavior. "
-        "'joint_anchor'/'full' add compact future anchor/root/body targets (changes obs_dim)."
-    ),
-)
-parser.add_argument(
     "--tail_bootstrap_steps",
     type=int,
     default=0,
@@ -149,7 +111,6 @@ parser.add_argument(
     help="Extra GRPO sample-score penalty for early termination inside a rollout. 50 dominates the +8/chunk in-life reward, so 'slow-sink-then-die' becomes RTG-negative vs trying to stay upright.",
 )
 parser.add_argument("--discount_gamma", type=float, default=0.99, help="Chunk return-to-go discount for GRPO advantages.")
-parser.add_argument("--gae_lambda", type=float, default=0.95, help="GAE lambda. Default matches Unitree PPO.")
 parser.add_argument(
     "--policy_epochs",
     type=int,
@@ -173,12 +134,6 @@ parser.add_argument(
     help="Optional critic value loss coefficient. Default 0 follows official MixGRPO pure actor update.",
 )
 parser.add_argument(
-    "--use_clipped_value_loss",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-    help="Use clipped value loss. Default matches Unitree PPO.",
-)
-parser.add_argument(
     "--num_mini_batches",
     type=int,
     default=4,
@@ -196,7 +151,6 @@ parser.add_argument(
     default=8192,
     help="Max samples per log-prob forward/backward inside one logical mini-batch. Uses gradient accumulation.",
 )
-parser.add_argument("--lr", type=float, default=1e-3, help="Critic learning rate.")
 parser.add_argument("--policy_lr", type=float, default=1.0e-3, help="Flow policy learning rate for robot control.")
 parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Gradient clipping threshold.")
 parser.add_argument("--max_updates", type=int, default=30000, help="Total number of MixGRPO training iterations.")
@@ -327,16 +281,10 @@ def main() -> None:
         interval_pushes=args_cli.interval_pushes,
         action_dim=args_cli.action_dim,
         policy_obs_dim=args_cli.policy_obs_dim,
-        critic_obs_dim=args_cli.critic_obs_dim,
         horizon=args_cli.horizon,
         frame_factorized=args_cli.frame_factorized,
         joint_kl_guard=args_cli.joint_kl_guard,
-        residual_action=args_cli.residual_action,
-        delta_scale=args_cli.delta_scale,
-        temporal_decoder=args_cli.temporal_decoder,
-        future_ref_mode=args_cli.future_ref_mode,
         actor_hidden_dims=tuple(args_cli.actor_hidden_dims),
-        critic_hidden_dims=tuple(args_cli.critic_hidden_dims),
         activation=args_cli.activation,
         flow_steps=args_cli.flow_steps,
         action_squash_scale=args_cli.action_squash_scale,
@@ -349,19 +297,16 @@ def main() -> None:
         tail_bootstrap_steps=args_cli.tail_bootstrap_steps,
         terminal_penalty=args_cli.terminal_penalty,
         discount_gamma=args_cli.discount_gamma,
-        gae_lambda=args_cli.gae_lambda,
         clip_range=args_cli.clip_range,
         adv_clip_max=args_cli.adv_clip_max,
         desired_kl=args_cli.desired_kl,
         kl_penalty_coef=args_cli.kl_penalty_coef,
         entropy_coef=args_cli.entropy_coef,
         value_loss_coef=args_cli.value_loss_coef,
-        use_clipped_value_loss=args_cli.use_clipped_value_loss,
         policy_epochs=args_cli.policy_epochs,
         num_mini_batches=args_cli.num_mini_batches,
         mini_batch_size=args_cli.mini_batch_size,
         micro_batch_size=args_cli.micro_batch_size,
-        lr=args_cli.lr,
         policy_lr=args_cli.policy_lr,
         max_grad_norm=args_cli.max_grad_norm,
         max_updates=args_cli.max_updates,

@@ -56,7 +56,7 @@ class CheckpointMixin:
             self.optimizer.load_state_dict(payload["optimizer"])
         else:
             raise KeyError(f"Checkpoint {checkpoint_path} has no optimizer state.")
-        policy_lr = float(getattr(self.cfg, "policy_lr", self.cfg.lr))
+        policy_lr = float(self.cfg.policy_lr)
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = policy_lr
         if hasattr(self, "learning_rate"):

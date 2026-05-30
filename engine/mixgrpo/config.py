@@ -21,36 +21,23 @@ class MixGRPOConfig:
 
     action_dim: int = 29
     policy_obs_dim: int = 0
-    critic_obs_dim: int = 0
     horizon: int = 1
     # Number of future reference frames appended to the actor observation. -1 (default)
     # auto-sets it to horizon - 1 so a horizon-h policy sees the references its action
     # chunk will track. Set 0 to force the legacy single-frame observation.
     future_ref_steps: int = -1
     actor_hidden_dims: tuple[int, ...] = (512, 256, 128)
-    critic_hidden_dims: tuple[int, ...] = (512, 256, 128)
     activation: str = "elu"
     flow_steps: int = 4
     action_squash_scale: float = 5.0
 
-    # --- Frame-Factorized h>1 controls (see .kiro/specs/h2-action-chunk) ---
-    # All default to current (chunk-level) behavior so omitting them is a no-op.
-    # frame_factorized turns on per-frame log_prob / reward / RTG / advantage / PPO ratio
-    # (the root-cause fix). It is an atomic switch: S2-S5 in design.md activate together.
+    # Frame-Factorized h>1 (see .kiro/specs/h2-action-chunk). Defaults to chunk-level
+    # behavior so omitting it is a no-op. Turns on per-frame log_prob / reward / RTG /
+    # advantage / PPO ratio (the root-cause fix); atomic switch for S2-S5 in design.md.
     frame_factorized: bool = False
     # joint_kl_guard only *intervenes* (forces lr down) when BOTH joint_kl_guard=True AND
     # frame_factorized=True. Otherwise it only reports joint_kl / joint_ratio metrics.
     joint_kl_guard: bool = False
-    # residual_action reparametrizes the h>1 action chunk as a0 + delta (temporal smoothness
-    # in the deterministic transform, not in correlated noise). Enhancement, not first fix.
-    residual_action: bool = False
-    delta_scale: float = 0.5
-    # temporal_decoder swaps the flat MLP for an encoder + shared per-frame decoder. Optional.
-    temporal_decoder: bool = False
-    # future_ref_mode controls what future reference info is appended to the actor obs.
-    # "joint" = current behavior (future joint pos/vel). "joint_anchor"/"full" add compact
-    # future anchor/root/body targets. Changing this changes obs_dim (checkpoint-incompatible).
-    future_ref_mode: str = "joint"
 
     init_noise_std: float = 0.8
     init_same_noise: bool = False
@@ -68,7 +55,6 @@ class MixGRPOConfig:
     tail_bootstrap_steps: int = 0
     terminal_penalty: float = 50.0
     discount_gamma: float = 0.99
-    gae_lambda: float = 0.95
     clip_range: float = 0.3
     adv_clip_max: float = 5.0
     desired_kl: float = 0.03
@@ -79,14 +65,12 @@ class MixGRPOConfig:
     kl_penalty_coef: float = 0.0
     entropy_coef: float = 0.005
     value_loss_coef: float = 0.0
-    use_clipped_value_loss: bool = True
     policy_epochs: int = 5
     num_mini_batches: int = 4
     mini_batch_size: int = 0
     micro_batch_size: int = 8192
     max_grad_norm: float = 1.0
 
-    lr: float = 1e-3
     policy_lr: float = 1e-3
     seed: int = 0
     max_updates: int = 30000
