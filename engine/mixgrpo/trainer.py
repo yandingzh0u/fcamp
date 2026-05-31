@@ -372,7 +372,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         obs_prep = self.policy._prepare_observation(obs)
         batch_size = obs.shape[0]
         steps = int(self.cfg.flow_steps)
-        per_frame = bool(getattr(self.cfg, "frame_factorized", False))
+        # Loss is always chunk-level (joint sample) PPO. The flow policy is a JOINT policy
+        # pi(a0..a_{h-1}|s); per-frame log-prob splitting is a biased gradient estimator for
+        # it (FPO/DPPO use chunk-level PPO with one joint log-ratio + one chunk advantage).
+        # frame_factorized is kept only for per-frame DIAGNOSTICS, never for the policy loss.
+        per_frame = False
         sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=obs.device, dtype=obs.dtype)
         latent = initial_noise.to(device=obs.device, dtype=obs.dtype) * float(self.cfg.init_noise_std)
         all_latents = [latent.detach()]
@@ -451,7 +455,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             raise ValueError("step_indices must be a non-empty 1-D tensor")
 
         obs_prep = self.policy._prepare_observation(obs)
-        per_frame = bool(getattr(self.cfg, "frame_factorized", False))
+        # Always chunk-level for the loss (see _sde_ode_rollout_actions note).
+        per_frame = False
         sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=obs.device, dtype=obs.dtype)
         log_probs = []
         for step_tensor in step_indices.to(device=obs.device, dtype=torch.long):
@@ -929,7 +934,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         advantages: torch.Tensor,
         alive_frame: torch.Tensor | None = None,
     ) -> dict[str, float]:
-        frame_factorized = bool(getattr(self.cfg, "frame_factorized", False))
+        # Policy loss is always chunk-level (joint sample). frame_factorized never enters the
+        # loss (it is a biased estimator for the joint flow policy); kept for diagnostics only.
+        frame_factorized = False
         sample_count = obs.shape[0]
         if actions.ndim != 2:
             raise ValueError("MixGRPO PPO update expects one action sample per env step.")
@@ -1507,8 +1514,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             flush=True,
         )
         print(
-            f"[INFO] frame_factorized={self.cfg.frame_factorized} "
-            f"joint_kl_guard={self.cfg.joint_kl_guard}",
+            f"[INFO] ppo_objective=chunk_level(joint_sample) "
+            f"frame_factorized_diagnostics_only={self.cfg.frame_factorized}",
             flush=True,
         )
         print(
@@ -1626,7 +1633,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             valid_flat = group_data["valid_mask"].reshape(env_count * rollout_branch_count * chunks)
             update_flat = valid_flat
 
-            frame_factorized = bool(getattr(self.cfg, "frame_factorized", False))
+            # Loss/advantage are always chunk-level (joint sample) PPO. Frame-level RTG/
+            # advantage is a biased estimator for the joint flow policy and is disabled in the
+            # loss path; per-frame quantities remain available only as diagnostics.
+            frame_factorized = False
             if frame_factorized:
                 # --- Frame-Factorized credit assignment (Task 5 / S4) --------------------
                 # Frame-level RTG over the real time axis T = chunks * horizon, then

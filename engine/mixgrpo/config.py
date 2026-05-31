@@ -31,12 +31,13 @@ class MixGRPOConfig:
     flow_steps: int = 4
     action_squash_scale: float = 5.0
 
-    # Frame-Factorized h>1 (see .kiro/specs/h2-action-chunk). Defaults to chunk-level
-    # behavior so omitting it is a no-op. Turns on per-frame log_prob / reward / RTG /
-    # advantage / PPO ratio (the root-cause fix); atomic switch for S2-S5 in design.md.
+    # DEPRECATED for the loss path. The flow policy is a JOINT policy pi(a0..a_{h-1}|s);
+    # per-frame PPO is a biased gradient estimator (FPO/DPPO use chunk-level PPO: one joint
+    # log-ratio + one chunk advantage). The training objective is ALWAYS chunk-level now.
+    # This flag is retained only so per-frame DIAGNOSTICS can be logged; it does NOT change
+    # the loss/advantage/log-prob path regardless of value.
     frame_factorized: bool = False
-    # joint_kl_guard only *intervenes* (forces lr down) when BOTH joint_kl_guard=True AND
-    # frame_factorized=True. Otherwise it only reports joint_kl / joint_ratio metrics.
+    # joint_kl_guard: currently inert (the guard lived in the removed frame-level loss path).
     joint_kl_guard: bool = False
 
     init_noise_std: float = 0.8
