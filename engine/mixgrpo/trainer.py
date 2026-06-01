@@ -28,9 +28,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             raise ValueError(f"horizon must be >= 1, got {cfg.horizon}")
         if float(cfg.value_loss_coef) != 0.0:
             raise ValueError("MixGRPO is critic-free; value_loss_coef must be 0.")
-        # Frame-Factorized consumption (per-frame log_prob / rollout / RTG / advantage /
-        # PPO loss) is fully wired (Tasks 3-6), so the flag is safe to enable.
-        self.chunk_dim = cfg.horizon * cfg.action_dim
+        # chunk_dim = the dimensionality the flow + transition log_prob operate on. With a
+        # temporal basis (basis_count < horizon) this is the COEFFICIENT latent dim, set from
+        # the policy below; action_chunk_dim is the executed horizon-frame action dim.
+        self.action_chunk_dim = cfg.horizon * cfg.action_dim
         self.checkpoint_dir = Path(cfg.checkpoint_dir).expanduser().resolve() if cfg.checkpoint_dir else None
         self._debug_probe_update = 0
         self._debug_probe_sample_printed = False
@@ -59,7 +60,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             activation=cfg.activation,
             init_noise_std=cfg.init_noise_std,
             action_squash_scale=cfg.action_squash_scale,
+            basis_count=int(getattr(cfg, "basis_count", 0)),
         ).to(self.env.device)
+        # Latent / noise / transition-log_prob dimensionality (coefficient space).
+        self.chunk_dim = self.policy.chunk_dim
 
         self.optimizer = torch.optim.Adam(
             self.policy.parameters(),
@@ -1515,7 +1519,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         )
         print(
             f"[INFO] ppo_objective=chunk_level(joint_sample) "
-            f"frame_factorized_diagnostics_only={self.cfg.frame_factorized}",
+            f"frame_factorized_diagnostics_only={self.cfg.frame_factorized} "
+            f"basis_count={self.policy.basis_count} latent_dim={self.policy.chunk_dim} "
+            f"action_chunk_dim={self.action_chunk_dim}",
             flush=True,
         )
         print(
@@ -1694,7 +1700,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             t1 = time.perf_counter()
             update_metrics = self._policy_update(
                 obs_flat,
-                group_data["actions"].reshape(env_count * rollout_branch_count * chunks, self.chunk_dim)[update_flat],
+                group_data["actions"].reshape(env_count * rollout_branch_count * chunks, self.action_chunk_dim)[update_flat],
                 group_data["latents"].reshape(
                     env_count * rollout_branch_count * chunks,
                     self.cfg.flow_steps + 1,

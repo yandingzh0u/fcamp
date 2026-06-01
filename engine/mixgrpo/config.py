@@ -39,6 +39,12 @@ class MixGRPOConfig:
     frame_factorized: bool = False
     # joint_kl_guard: currently inert (the guard lived in the removed frame-level loss path).
     joint_kl_guard: bool = False
+    # Temporal trajectory prior for h>1 action chunks. The flow/log_prob operate in a
+    # COEFFICIENT latent of `basis_count` low-frequency modes per joint; a fixed temporal
+    # basis expands them to the horizon-frame action chunk, constraining executed chunks to
+    # the smooth-trajectory manifold (fixes in_chunk_delta -> 1 / rising action_rate at large
+    # horizon). 0 -> basis_count = horizon = legacy flat per-frame parametrization (no-op).
+    basis_count: int = 0
 
     init_noise_std: float = 0.8
     init_same_noise: bool = False

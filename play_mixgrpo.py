@@ -157,6 +157,7 @@ def main() -> None:
         hidden_dims=tuple(train_cfg.get("actor_hidden_dims", (512, 256, 128))),
         activation=train_cfg.get("activation", "elu"),
         action_squash_scale=action_squash_scale,
+        basis_count=int(train_cfg.get("basis_count", 0)),
     ).to(env.device)
     policy.load_state_dict(payload["policy"])
     policy.eval()

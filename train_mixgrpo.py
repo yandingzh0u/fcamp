@@ -95,6 +95,16 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--basis_count",
+    type=int,
+    default=0,
+    help=(
+        "Temporal-basis coefficient count for h>1 action chunks. The flow/log_prob run in a "
+        "basis_count*action_dim coefficient latent; a fixed low-frequency basis expands to the "
+        "horizon-frame chunk (smooth-trajectory prior). 0 = basis_count=horizon = legacy flat."
+    ),
+)
+parser.add_argument(
     "--tail_bootstrap_steps",
     type=int,
     default=0,
@@ -282,6 +292,7 @@ def main() -> None:
         action_dim=args_cli.action_dim,
         policy_obs_dim=args_cli.policy_obs_dim,
         horizon=args_cli.horizon,
+        basis_count=args_cli.basis_count,
         frame_factorized=args_cli.frame_factorized,
         joint_kl_guard=args_cli.joint_kl_guard,
         actor_hidden_dims=tuple(args_cli.actor_hidden_dims),
