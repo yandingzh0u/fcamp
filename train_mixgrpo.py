@@ -65,8 +65,18 @@ parser.add_argument(
     type=int,
     default=24,
     help=(
-        "Number of SDE-explored policy chunks per GRPO update. "
-        "Environment frames per update are chunks_per_rollout * horizon."
+        "Fallback number of SDE-explored policy chunks per GRPO update when "
+        "--rollout_env_steps <= 0."
+    ),
+)
+parser.add_argument(
+    "--rollout_env_steps",
+    type=int,
+    default=24,
+    help=(
+        "Fixed environment frames per GRPO update. Effective chunks are "
+        "rollout_env_steps // horizon and must divide exactly. "
+        "Set <=0 to use --chunks_per_rollout directly."
     ),
 )
 parser.add_argument(
@@ -229,6 +239,14 @@ parser.add_argument("--debug_probe_every", type=int, default=1, help="Print debu
 parser.add_argument("--fix_root_link", action="store_true", default=False, help="Lock the robot base in place.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.rollout_env_steps > 0:
+    if args_cli.horizon <= 0:
+        parser.error("--horizon must be positive when --rollout_env_steps is enabled.")
+    if args_cli.rollout_env_steps % args_cli.horizon != 0:
+        parser.error(
+            "--rollout_env_steps must be divisible by --horizon; "
+            f"got rollout_env_steps={args_cli.rollout_env_steps}, horizon={args_cli.horizon}."
+        )
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -304,6 +322,7 @@ def main() -> None:
         eval_initial_noise=args_cli.eval_initial_noise,
         sde_eta=args_cli.sde_eta,
         num_generations=args_cli.num_generations,
+        rollout_env_steps=args_cli.rollout_env_steps,
         chunks_per_rollout=args_cli.chunks_per_rollout,
         tail_bootstrap_steps=args_cli.tail_bootstrap_steps,
         terminal_penalty=args_cli.terminal_penalty,

@@ -1440,6 +1440,14 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         return max(1, self.cfg.horizon * self._chunks_per_grpo_update())
 
     def _chunks_per_grpo_update(self) -> int:
+        rollout_env_steps = int(getattr(self.cfg, "rollout_env_steps", 0))
+        if rollout_env_steps > 0:
+            horizon = max(1, int(self.cfg.horizon))
+            if rollout_env_steps % horizon != 0:
+                raise ValueError(
+                    f"rollout_env_steps ({rollout_env_steps}) must be divisible by horizon ({horizon})."
+                )
+            return max(1, rollout_env_steps // horizon)
         return max(1, int(self.cfg.chunks_per_rollout))
 
     def _training_anchor_phases(self) -> torch.Tensor:
@@ -1490,7 +1498,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             f"rollout_env_steps={self._training_rollout_horizon()} "
             f"reset_noise={self.cfg.reset_noise} interval_pushes={self.cfg.interval_pushes} "
             f"num_envs={self.cfg.num_envs} "
-            f"chunks_per_rollout={self.cfg.chunks_per_rollout} "
+            f"rollout_env_steps_target={int(getattr(self.cfg, 'rollout_env_steps', 0))} "
+            f"configured_chunks_per_rollout={self.cfg.chunks_per_rollout} "
             f"tail_bootstrap_steps={int(getattr(self.cfg, 'tail_bootstrap_steps', 0))} "
             f"terminal_penalty={self.cfg.terminal_penalty} "
             f"num_generations={self.cfg.num_generations} "

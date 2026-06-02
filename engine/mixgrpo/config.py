@@ -51,8 +51,13 @@ class MixGRPOConfig:
     eval_initial_noise: str = "zero"
     sde_eta: float = 0.7
     num_generations: int = 4
-    # Number of policy chunks per GRPO update. The environment frames per update
-    # are `chunks_per_rollout * horizon`.
+    # Fixed environment frames per GRPO update. The effective number of policy
+    # chunks is derived as `rollout_env_steps // horizon`; rollout_env_steps
+    # must divide horizon exactly. This matches FPO-style data collection where
+    # the physical rollout window stays fixed while the executed action chunk
+    # length changes. Set <= 0 to use chunks_per_rollout directly.
+    rollout_env_steps: int = 24
+    # Fallback number of policy chunks per GRPO update when rollout_env_steps <= 0.
     chunks_per_rollout: int = 24
     # Number of extra deterministic-policy steps rolled out *after* the main GRPO window
     # to estimate a Monte-Carlo tail bootstrap value. 0 disables (legacy behavior). The
