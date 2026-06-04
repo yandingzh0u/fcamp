@@ -55,6 +55,12 @@ class MixGRPOConfig:
     # the smooth-trajectory manifold (fixes in_chunk_delta -> 1 / rising action_rate at large
     # horizon). 0 -> basis_count = horizon = legacy flat per-frame parametrization (no-op).
     basis_count: int = 0
+    # Front-of-chunk residual stitching. When >0, decoded chunks are blended from the
+    # previous executed residual action (the last_action observation term) into the raw
+    # decoded chunk over this many frames. This fixes cross-chunk target discontinuities
+    # without adding future reference context.
+    chunk_stitch_frames: int = 0
+    chunk_stitch_mode: str = "smoothstep"
 
     init_noise_std: float = 0.8
     init_same_noise: bool = False

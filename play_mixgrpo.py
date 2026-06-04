@@ -188,6 +188,8 @@ def main() -> None:
         activation=train_cfg.get("activation", "elu"),
         action_squash_scale=action_squash_scale,
         basis_count=int(train_cfg.get("basis_count", 0)),
+        chunk_stitch_frames=int(train_cfg.get("chunk_stitch_frames", 0)),
+        chunk_stitch_mode=str(train_cfg.get("chunk_stitch_mode", "smoothstep")),
     ).to(env.device)
     policy.load_state_dict(payload["policy"])
     policy.eval()
@@ -207,7 +209,9 @@ def main() -> None:
     print(f"[INFO] motion_file={motion_file}", flush=True)
     print(
         f"[INFO] horizon={train_cfg['horizon']} action_dim={train_cfg['action_dim']} "
-        f"flow_steps={flow_steps} action_squash_scale={action_squash_scale}",
+        f"flow_steps={flow_steps} action_squash_scale={action_squash_scale} "
+        f"chunk_stitch_frames={policy.chunk_stitch_frames} "
+        f"chunk_stitch_mode={policy.chunk_stitch_mode}",
         flush=True,
     )
     print(

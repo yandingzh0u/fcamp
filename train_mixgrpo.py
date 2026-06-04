@@ -121,6 +121,21 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--chunk_stitch_frames",
+    type=int,
+    default=0,
+    help=(
+        "Blend the first N decoded residual-action frames from the previous executed "
+        "last_action into the raw policy chunk. 0 disables."
+    ),
+)
+parser.add_argument(
+    "--chunk_stitch_mode",
+    choices=("none", "linear", "smoothstep"),
+    default="smoothstep",
+    help="Blend curve for --chunk_stitch_frames.",
+)
+parser.add_argument(
     "--tail_bootstrap_steps",
     type=int,
     default=0,
@@ -365,6 +380,8 @@ def main() -> None:
         policy_obs_dim=args_cli.policy_obs_dim,
         horizon=args_cli.horizon,
         basis_count=args_cli.basis_count,
+        chunk_stitch_frames=args_cli.chunk_stitch_frames,
+        chunk_stitch_mode=args_cli.chunk_stitch_mode,
         frame_factorized=args_cli.frame_factorized,
         joint_kl_guard=args_cli.joint_kl_guard,
         actor_hidden_dims=tuple(args_cli.actor_hidden_dims),

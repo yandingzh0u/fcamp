@@ -31,6 +31,8 @@ class FlowMatchingPolicy(nn.Module):
         init_noise_std: float = 1.0,
         action_squash_scale: float = 5.0,
         basis_count: int = 0,
+        chunk_stitch_frames: int = 0,
+        chunk_stitch_mode: str = "smoothstep",
     ):
         super().__init__()
         self.action_dim = action_dim
@@ -65,6 +67,13 @@ class FlowMatchingPolicy(nn.Module):
         if action_squash_scale <= 0.0:
             raise ValueError(f"action_squash_scale must be > 0, got {action_squash_scale}")
         self.action_squash_scale = float(action_squash_scale)
+        self.chunk_stitch_frames = max(0, int(chunk_stitch_frames))
+        self.chunk_stitch_mode = str(chunk_stitch_mode).lower()
+        if self.chunk_stitch_mode not in ("none", "linear", "smoothstep"):
+            raise ValueError(
+                "chunk_stitch_mode must be one of: none, linear, smoothstep; "
+                f"got {chunk_stitch_mode!r}"
+            )
         # Fixed temporal basis B: (horizon, basis_count). chunk[t] = sum_k B[t,k] * coeff[k].
         # Identity when basis_count == horizon (legacy flat parametrization, byte-identical).
         self.register_buffer("temporal_basis", self._build_temporal_basis(horizon, self.basis_count))
@@ -109,16 +118,54 @@ class FlowMatchingPolicy(nn.Module):
         net_input = torch.cat([observation, noisy_actions, time.unsqueeze(-1)], dim=-1)
         return self.velocity_net(net_input)
 
-    def _action_transform(self, action_value: torch.Tensor) -> torch.Tensor:
+    def _stitch_chunk_start(
+        self,
+        chunk: torch.Tensor,
+        start_action: torch.Tensor | None,
+    ) -> torch.Tensor:
+        frames = min(self.chunk_stitch_frames, self.horizon)
+        if frames <= 0 or self.chunk_stitch_mode == "none" or start_action is None:
+            return chunk
+
+        expected_start_shape = (*chunk.shape[:-2], self.action_dim)
+        start_action = start_action.to(device=chunk.device, dtype=chunk.dtype)
+        try:
+            start_action = torch.broadcast_to(start_action, expected_start_shape)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"start_action must broadcast to {expected_start_shape}, got {tuple(start_action.shape)}"
+            ) from exc
+
+        if frames == 1:
+            weights = torch.zeros(1, device=chunk.device, dtype=chunk.dtype)
+        else:
+            weights = torch.linspace(0.0, 1.0, frames, device=chunk.device, dtype=chunk.dtype)
+            if self.chunk_stitch_mode == "smoothstep":
+                weights = weights.square() * (3.0 - 2.0 * weights)
+        weight_shape = (1,) * len(chunk.shape[:-2]) + (frames, 1)
+        weights = weights.view(weight_shape)
+        start = start_action.unsqueeze(-2)
+
+        stitched = chunk.clone()
+        stitched[..., :frames, :] = (1.0 - weights) * start + weights * chunk[..., :frames, :]
+        return stitched
+
+    def _action_transform(
+        self,
+        action_value: torch.Tensor,
+        start_action: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         scale = self.action_squash_scale
+        leading_shape = action_value.shape[:-1]
         if self.basis_count == self.horizon:
             # Identity basis: legacy flat per-frame parametrization (byte-identical).
-            return scale * torch.tanh(action_value / scale)
-        # action_value is the coefficient latent: (..., basis_count * action_dim).
-        leading_shape = action_value.shape[:-1]
-        coeff = action_value.view(*leading_shape, self.basis_count, self.action_dim)
-        # Expand to per-frame chunk via fixed temporal basis: (horizon, basis_count) @ coeff.
-        basis = self.temporal_basis.to(dtype=coeff.dtype)  # (horizon, basis_count)
-        chunk = torch.einsum("hk,...ka->...ha", basis, coeff)  # (..., horizon, action_dim)
+            chunk = action_value.view(*leading_shape, self.horizon, self.action_dim)
+        else:
+            # action_value is the coefficient latent: (..., basis_count * action_dim).
+            coeff = action_value.view(*leading_shape, self.basis_count, self.action_dim)
+            # Expand to per-frame chunk via fixed temporal basis: (horizon, basis_count) @ coeff.
+            basis = self.temporal_basis.to(dtype=coeff.dtype)  # (horizon, basis_count)
+            chunk = torch.einsum("hk,...ka->...ha", basis, coeff)  # (..., horizon, action_dim)
         squashed = scale * torch.tanh(chunk / scale)
+        squashed = self._stitch_chunk_start(squashed, start_action)
         return squashed.reshape(*leading_shape, self.action_chunk_dim)

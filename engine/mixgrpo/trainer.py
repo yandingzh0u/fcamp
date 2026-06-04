@@ -61,6 +61,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             init_noise_std=cfg.init_noise_std,
             action_squash_scale=cfg.action_squash_scale,
             basis_count=int(getattr(cfg, "basis_count", 0)),
+            chunk_stitch_frames=int(getattr(cfg, "chunk_stitch_frames", 0)),
+            chunk_stitch_mode=str(getattr(cfg, "chunk_stitch_mode", "smoothstep")),
         ).to(self.env.device)
         # Latent / noise / transition-log_prob dimensionality (coefficient space).
         self.chunk_dim = self.policy.chunk_dim
@@ -420,7 +422,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
 
         if not step_log_probs:
             raise RuntimeError("SDE-ODE rollout produced no trainable transition log-probs.")
-        actions = self.policy._action_transform(latent)
+        actions = self.policy._action_transform(
+            latent,
+            start_action=obs[..., -self.cfg.action_dim :],
+        )
         # per_frame=False: step_log_probs is list of (B,)  -> stack -> (B, num_sde_steps)
         # per_frame=True : step_log_probs is list of (B,h) -> stack(dim=-1) -> (B, h, num_sde_steps)
         if per_frame:
@@ -1550,7 +1555,9 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             f"[INFO] ppo_objective=chunk_level(joint_sample) "
             f"frame_factorized_diagnostics_only={self.cfg.frame_factorized} "
             f"basis_count={self.policy.basis_count} latent_dim={self.policy.chunk_dim} "
-            f"action_chunk_dim={self.action_chunk_dim}",
+            f"action_chunk_dim={self.action_chunk_dim} "
+            f"chunk_stitch_frames={self.policy.chunk_stitch_frames} "
+            f"chunk_stitch_mode={self.policy.chunk_stitch_mode}",
             flush=True,
         )
         print(
