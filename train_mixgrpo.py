@@ -48,6 +48,12 @@ parser.add_argument(
     help="Use the same initial latent for all generations in a GRPO group. Default False so every branch gets an independent initial latent (broader group exploration).",
 )
 parser.add_argument(
+    "--first_generation_zero_noise",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Make branch 0 in each GRPO group use zero initial/SDE noise. Off by default because an exact mean-path SDE sample has almost no first-order log-prob gradient.",
+)
+parser.add_argument(
     "--eval_initial_noise",
     choices=("random", "zero"),
     default="zero",
@@ -176,6 +182,17 @@ parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Gradient c
 parser.add_argument("--max_updates", type=int, default=30000, help="Total number of MixGRPO training iterations.")
 parser.add_argument("--seed", type=int, default=0, help="Random seed.")
 parser.add_argument("--sim_dt", type=float, default=0.02, help="Simulation timestep.")
+parser.add_argument(
+    "--action_scale_multiplier",
+    type=float,
+    default=1.0,
+    help="Multiplier on the env residual action scale. Values like 0.25 make the policy stay closer to the reference pose.",
+)
+parser.add_argument("--joint_acc_weight", type=float, default=2.5e-7, help="Reward penalty weight for joint acceleration.")
+parser.add_argument("--joint_torque_weight", type=float, default=1.0e-5, help="Reward penalty weight for joint torque.")
+parser.add_argument("--action_rate_weight", type=float, default=1.0e-1, help="Reward penalty weight for action delta.")
+parser.add_argument("--action_accel_weight", type=float, default=0.0, help="Reward penalty weight for second-order action delta.")
+parser.add_argument("--action_l2_weight", type=float, default=0.0, help="Reward penalty weight for residual action magnitude.")
 parser.add_argument("--max_episode_steps", type=int, default=1500, help="Official 30s time-out threshold for mimic env.")
 parser.add_argument(
     "--startup_randomization",
@@ -195,8 +212,28 @@ parser.add_argument(
     default=True,
     help="Enable official interval push perturbations. Use --no-interval_pushes for clean curriculum probes.",
 )
+parser.add_argument(
+    "--observation_noise",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Enable actor observation noise during training. Validation defaults to a clean observation path.",
+)
 parser.add_argument("--motion_start_phase", type=int, default=0, help="First reference phase sampled for training resets.")
 parser.add_argument("--motion_end_phase", type=int, default=-1, help="Last reference phase sampled for training resets. Negative uses motion end.")
+parser.add_argument(
+    "--adaptive_motion_sampling",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Sample training reset phases from failure-weighted bins. Default on; use --no-adaptive_motion_sampling for uniform phase sampling.",
+)
+parser.add_argument(
+    "--adaptive_uniform_ratio",
+    type=float,
+    default=0.1,
+    help="Uniform floor mixed into adaptive phase bins when --adaptive_motion_sampling is enabled.",
+)
+parser.add_argument("--adaptive_alpha", type=float, default=0.001, help="EMA update rate for adaptive failure bins.")
+parser.add_argument("--adaptive_kernel_size", type=int, default=1, help="Smoothing kernel width for adaptive failure bins.")
 parser.add_argument("--motion_file", type=str, default="", help="Optional override for the dance npz path.")
 parser.add_argument("--run_name", type=str, default="", help="Optional run folder name under --run_root.")
 parser.add_argument("--run_root", type=str, default="runs", help="Root directory for automatic logs and checkpoints.")
@@ -225,6 +262,12 @@ parser.add_argument(
     action="store_true",
     default=True,
     help="Snapshot and restore the training simulator around validation.",
+)
+parser.add_argument(
+    "--validation_observation_noise",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Enable observation noise during validation. Default off so deterministic eval/playback is actually deterministic.",
 )
 parser.add_argument(
     "--target_validation_steps",
@@ -300,13 +343,24 @@ def main() -> None:
         num_envs=args_cli.num_envs,
         sim_dt=args_cli.sim_dt,
         fix_root_link=args_cli.fix_root_link,
+        action_scale_multiplier=args_cli.action_scale_multiplier,
         startup_randomization=args_cli.startup_randomization,
         motion_start_phase=args_cli.motion_start_phase,
         motion_end_phase=args_cli.motion_end_phase,
+        adaptive_motion_sampling=args_cli.adaptive_motion_sampling,
+        adaptive_uniform_ratio=args_cli.adaptive_uniform_ratio,
+        adaptive_alpha=args_cli.adaptive_alpha,
+        adaptive_kernel_size=args_cli.adaptive_kernel_size,
         max_episode_steps=args_cli.max_episode_steps,
         motion_file=motion_file,
         reset_noise=args_cli.reset_noise,
         interval_pushes=args_cli.interval_pushes,
+        observation_noise=args_cli.observation_noise,
+        joint_acc_weight=args_cli.joint_acc_weight,
+        joint_torque_weight=args_cli.joint_torque_weight,
+        action_rate_weight=args_cli.action_rate_weight,
+        action_accel_weight=args_cli.action_accel_weight,
+        action_l2_weight=args_cli.action_l2_weight,
         action_dim=args_cli.action_dim,
         policy_obs_dim=args_cli.policy_obs_dim,
         horizon=args_cli.horizon,
@@ -319,6 +373,7 @@ def main() -> None:
         action_squash_scale=args_cli.action_squash_scale,
         init_noise_std=args_cli.init_noise_std,
         init_same_noise=args_cli.init_same_noise,
+        first_generation_zero_noise=args_cli.first_generation_zero_noise,
         eval_initial_noise=args_cli.eval_initial_noise,
         sde_eta=args_cli.sde_eta,
         num_generations=args_cli.num_generations,
@@ -351,6 +406,7 @@ def main() -> None:
         validation_start_phase=args_cli.validation_start_phase,
         validation_fixed_seed=args_cli.validation_fixed_seed,
         validation_preserve_state=args_cli.validation_preserve_state,
+        validation_observation_noise=args_cli.validation_observation_noise,
         target_validation_steps=args_cli.target_validation_steps,
         success_checkpoint_name=args_cli.success_checkpoint_name,
         debug_probe=args_cli.debug_probe,

@@ -11,21 +11,31 @@ class MixGRPOConfig:
     num_envs: int = 8192
     sim_dt: float = 0.02
     fix_root_link: bool = False
+    action_scale_multiplier: float = 1.0
     max_episode_steps: int = 1500
     motion_start_phase: int = 0
     motion_end_phase: int = -1
+    adaptive_motion_sampling: bool = True
+    adaptive_uniform_ratio: float = 0.1
+    adaptive_alpha: float = 0.001
+    adaptive_kernel_size: int = 1
     motion_file: str = str(DEFAULT_MOTION_FILE)
     startup_randomization: bool = True
     reset_noise: bool = True
     interval_pushes: bool = True
+    observation_noise: bool = True
+    joint_acc_weight: float = 2.5e-7
+    joint_torque_weight: float = 1.0e-5
+    action_rate_weight: float = 1.0e-1
+    action_accel_weight: float = 0.0
+    action_l2_weight: float = 0.0
 
     action_dim: int = 29
     policy_obs_dim: int = 0
     horizon: int = 1
-    # Number of future reference frames appended to the actor observation. -1 (default)
-    # auto-sets it to horizon - 1 so a horizon-h policy sees the references its action
-    # chunk will track. Set 0 to force the legacy single-frame observation.
-    future_ref_steps: int = -1
+    # Deprecated compatibility field. Actor observations use the verified legacy input:
+    # current reference only, no future reference frames.
+    future_ref_steps: int = 0
     actor_hidden_dims: tuple[int, ...] = (512, 256, 128)
     activation: str = "elu"
     flow_steps: int = 4
@@ -48,6 +58,7 @@ class MixGRPOConfig:
 
     init_noise_std: float = 0.8
     init_same_noise: bool = False
+    first_generation_zero_noise: bool = False
     eval_initial_noise: str = "zero"
     sde_eta: float = 0.7
     num_generations: int = 4
@@ -98,6 +109,7 @@ class MixGRPOConfig:
     validation_start_phase: int = 0
     validation_fixed_seed: int = -1
     validation_preserve_state: bool = True
+    validation_observation_noise: bool = False
     target_validation_steps: int = 0
     success_checkpoint_name: str = "success_10s.pt"
 

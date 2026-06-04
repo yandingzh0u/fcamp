@@ -26,17 +26,19 @@ class G1Env:
         self.dt = cfg.sim_dt
         self.decimation = int(cfg.decimation)
         self.physics_dt = cfg.sim_dt / float(self.decimation)
+        self._render_step_index = 0
 
         sim_cfg = sim_utils.SimulationCfg(
             device=cfg.device,
             dt=self.physics_dt,
-            render_interval=self.decimation,
+            render_interval=self.decimation * max(1, int(getattr(cfg, "render_every", 1))),
         )
         sim_cfg.physx.gpu_max_rigid_patch_count = 10 * 2**15
         self.sim = SimulationContext(sim_cfg)
 
         scene_cfg = G1SceneCfg(num_envs=cfg.num_envs, env_spacing=cfg.env_spacing)
         scene_cfg.robot = make_g1_cfg("{ENV_REGEX_NS}/Robot", fix_root_link=cfg.fix_root_link)
+        scene_cfg.contact_forces.debug_vis = bool(getattr(cfg, "contact_debug_vis", False))
         self.scene = InteractiveScene(scene_cfg)
         self.robot: Articulation = self.scene["robot"]
 
@@ -57,7 +59,7 @@ class G1Env:
             G1_MIMIC_ACTION_SCALE_VALUES,
             dtype=torch.float32,
             device=self.device,
-        ).unsqueeze(0)
+        ).unsqueeze(0) * float(getattr(cfg, "action_scale_multiplier", 1.0))
         min_push, max_push = PUSH_INTERVAL_STEP_RANGE
         self.next_push_step = torch.randint(
             min_push,

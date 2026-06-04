@@ -247,6 +247,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             0,
             source_for_target,
         )
+        self.env.prev_action[target_env_ids] = self.env.prev_action.index_select(0, source_for_target)
 
         target_env_ids_cpu = target_env_ids.detach().cpu()
         source_for_target_cpu = source_for_target.detach().cpu()
@@ -276,6 +277,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         self.env.phase_steps[target_env_ids] = self.env.phase_steps.index_select(0, source_for_target)
         self.env.episode_steps[target_env_ids] = self.env.episode_steps.index_select(0, source_for_target)
         self.env.last_action[target_env_ids] = self.env.last_action.index_select(0, source_for_target)
+        self.env.prev_action[target_env_ids] = self.env.prev_action.index_select(0, source_for_target)
         self.env.next_push_step[target_env_ids] = self.env.next_push_step.index_select(0, source_for_target)
         self.env.scene.update(self.env.physics_dt)
 
@@ -623,6 +625,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 device=self.env.device,
                 dtype=obs_t.dtype,
             )
+            if bool(getattr(self.cfg, "first_generation_zero_noise", False)):
+                zero_branch_ids = torch.arange(0, total_envs, generation_count, device=self.env.device)
+                noise[zero_branch_ids] = 0.0
+                sde_noise[zero_branch_ids] = 0.0
             with torch.no_grad():
                 sample = self._sample_policy_with_logprobs(obs_t, noise, sde_noise=sde_noise)
 
@@ -1497,6 +1503,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             f"rollout_chunks={self._chunks_per_grpo_update()} "
             f"rollout_env_steps={self._training_rollout_horizon()} "
             f"reset_noise={self.cfg.reset_noise} interval_pushes={self.cfg.interval_pushes} "
+            f"observation_noise={getattr(self.cfg, 'observation_noise', True)} "
+            f"future_ref_steps={getattr(self.env.task_cfg, 'future_ref_steps', 0)} "
+            f"phase_sampler={'adaptive' if getattr(self.cfg, 'adaptive_motion_sampling', False) else 'uniform'} "
+            f"adaptive_uniform_ratio={getattr(self.cfg, 'adaptive_uniform_ratio', 0.1)} "
             f"num_envs={self.cfg.num_envs} "
             f"rollout_env_steps_target={int(getattr(self.cfg, 'rollout_env_steps', 0))} "
             f"configured_chunks_per_rollout={self.cfg.chunks_per_rollout} "
@@ -1506,12 +1516,22 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             f"grpo_groups={self.num_grpo_groups} "
             f"init_noise_std={self.cfg.init_noise_std} "
             f"init_same_noise={self.cfg.init_same_noise} "
+            f"first_generation_zero_noise={getattr(self.cfg, 'first_generation_zero_noise', False)} "
             f"eval_initial_noise={self.cfg.eval_initial_noise} "
             f"sde_eta={self.cfg.sde_eta} "
             f"flow_steps={self.cfg.flow_steps} "
             f"actor_hidden_dims={list(self.cfg.actor_hidden_dims)} "
             f"activation={self.cfg.activation} "
             f"action_squash_scale={self.cfg.action_squash_scale}",
+            flush=True,
+        )
+        print(
+            f"[INFO] action_scale_multiplier={getattr(self.cfg, 'action_scale_multiplier', 1.0)} "
+            f"reward_weights joint_acc={getattr(self.cfg, 'joint_acc_weight', 2.5e-7)} "
+            f"torque={getattr(self.cfg, 'joint_torque_weight', 1.0e-5)} "
+            f"action_rate={getattr(self.cfg, 'action_rate_weight', 1.0e-1)} "
+            f"action_accel={getattr(self.cfg, 'action_accel_weight', 0.0)} "
+            f"action_l2={getattr(self.cfg, 'action_l2_weight', 0.0)}",
             flush=True,
         )
         _env_frames_per_update = self._chunks_per_grpo_update() * int(self.cfg.horizon)
@@ -1550,7 +1570,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         )
         print(
             "[INFO] critic_free=True actor_std_trainable=False "
-            "exploration=four_step_sde_noise first_generation_zero_sde_noise=False",
+            f"exploration=four_step_sde_noise "
+            f"first_generation_zero_sde_noise={getattr(self.cfg, 'first_generation_zero_noise', False)}",
             flush=True,
         )
         if self.checkpoint_dir is not None:
@@ -2113,9 +2134,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         metrics["train/recent_episode_count"] = float(len(train_reward_buffer))
         metrics["train/completed_episodes"] = float(getattr(self, "_train_completed_episodes", 0))
         reward_weights = {
-            "joint_acc": -2.5e-7,
-            "joint_torque": -1.0e-5,
-            "action_rate": -1.0e-1,
+            "joint_acc": -float(getattr(self.cfg, "joint_acc_weight", 2.5e-7)),
+            "joint_torque": -float(getattr(self.cfg, "joint_torque_weight", 1.0e-5)),
+            "action_rate": -float(getattr(self.cfg, "action_rate_weight", 1.0e-1)),
+            "action_accel": -float(getattr(self.cfg, "action_accel_weight", 0.0)),
+            "action_l2": -float(getattr(self.cfg, "action_l2_weight", 0.0)),
             "joint_limit": -10.0,
             "anchor_pos_reward": 2.0,
             "anchor_ori_reward": 2.0,
@@ -2123,6 +2146,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "body_ori_reward": 1.0,
             "body_lin_vel_reward": 1.0,
             "body_ang_vel_reward": 1.0,
+            "joint_pos_reward": 1.0,
+            "joint_vel_reward": 0.5,
             "undesired_contacts": -0.1,
         }
         weighted_positive = 0.0

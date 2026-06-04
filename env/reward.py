@@ -12,12 +12,22 @@ class MimicRewardMixin:
         self,
         action_offsets: torch.Tensor,
         previous_action: torch.Tensor,
+        previous_previous_action: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         context = self.get_tracking_context()
         reference = context["reference"]
         joint_acc = torch.sum(torch.square(self.robot.data.joint_acc[:, self.action_joint_ids]), dim=-1)
         joint_torque = torch.sum(torch.square(self.robot.data.applied_torque[:, self.action_joint_ids]), dim=-1)
-        action_rate = torch.sum(torch.square(action_offsets - previous_action), dim=-1)
+        action_regularization_scale = float(getattr(self.task_cfg, "action_scale_multiplier", 1.0))
+        regularized_action = action_offsets * action_regularization_scale
+        regularized_previous_action = previous_action * action_regularization_scale
+        regularized_previous_previous_action = previous_previous_action * action_regularization_scale
+        action_rate = torch.sum(torch.square(regularized_action - regularized_previous_action), dim=-1)
+        action_accel = torch.sum(
+            torch.square(regularized_action - 2.0 * regularized_previous_action + regularized_previous_previous_action),
+            dim=-1,
+        )
+        action_l2 = torch.sum(torch.square(regularized_action), dim=-1)
         out_of_limits = -(
             self.robot.data.joint_pos[:, self.action_joint_ids]
             - self.robot.data.soft_joint_pos_limits[:, self.action_joint_ids, 0]
@@ -76,10 +86,18 @@ class MimicRewardMixin:
         )
         undesired_contacts = torch.sum(undesired_contact_mask.to(dtype=torch.float32), dim=-1)
 
+        joint_acc_weight = float(getattr(self.task_cfg, "joint_acc_weight", 2.5e-7))
+        joint_torque_weight = float(getattr(self.task_cfg, "joint_torque_weight", 1.0e-5))
+        action_rate_weight = float(getattr(self.task_cfg, "action_rate_weight", 1.0e-1))
+        action_accel_weight = float(getattr(self.task_cfg, "action_accel_weight", 0.0))
+        action_l2_weight = float(getattr(self.task_cfg, "action_l2_weight", 0.0))
+
         reward = (
-            -2.5e-7 * joint_acc
-            - 1.0e-5 * joint_torque
-            - 1.0e-1 * action_rate
+            -joint_acc_weight * joint_acc
+            - joint_torque_weight * joint_torque
+            - action_rate_weight * action_rate
+            - action_accel_weight * action_accel
+            - action_l2_weight * action_l2
             - 10.0 * joint_limit
             + 2.0 * anchor_pos_reward
             + 2.0 * anchor_ori_reward
@@ -95,6 +113,8 @@ class MimicRewardMixin:
             "joint_acc": joint_acc,
             "joint_torque": joint_torque,
             "action_rate": action_rate,
+            "action_accel": action_accel,
+            "action_l2": action_l2,
             "joint_limit": joint_limit,
             "anchor_pos_reward": anchor_pos_reward,
             "anchor_ori_reward": anchor_ori_reward,

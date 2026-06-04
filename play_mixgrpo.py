@@ -30,6 +30,12 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=0, help="Random seed.")
 parser.add_argument("--motion_file", type=str, default="", help="Optional override for the motion npz path.")
 parser.add_argument("--sim_dt", type=float, default=-1.0, help="Override checkpoint sim_dt. Negative keeps checkpoint value.")
+parser.add_argument(
+    "--action_scale_multiplier",
+    type=float,
+    default=-1.0,
+    help="Override env residual action scale during playback. Negative keeps checkpoint value.",
+)
 parser.add_argument("--fix_root_link", action="store_true", default=False, help="Lock the robot base in place.")
 parser.add_argument("--motion_start_phase", type=int, default=-1, help="Override first reference phase for resets. Negative keeps checkpoint/default.")
 parser.add_argument("--motion_end_phase", type=int, default=-1, help="Override last reference phase for resets. Negative keeps checkpoint/default.")
@@ -51,11 +57,29 @@ parser.add_argument(
     default=None,
     help="Override interval push perturbations. Default keeps checkpoint setting.",
 )
+parser.add_argument(
+    "--observation_noise",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Override actor observation noise. Default off for clean deterministic playback.",
+)
 parser.add_argument("--reset_on_done", action="store_true", default=False, help="Reset robot when a termination condition is hit.")
 parser.add_argument("--loop_motion", action="store_true", default=False, help="Reset to start_phase when reference motion ends.")
 parser.add_argument("--log_every", type=int, default=100, help="Print playback stats every N simulation steps.")
 parser.add_argument("--real_time", action="store_true", default=False, help="Throttle playback to wall-clock time. GUI playback enables this automatically.")
 parser.add_argument("--no_real_time", action="store_true", default=False, help="Disable automatic wall-clock throttling in GUI playback.")
+parser.add_argument(
+    "--render_every",
+    type=int,
+    default=1,
+    help="Render every N control steps in GUI playback. 2 or 3 reduces Isaac GUI stutter on slower scenes.",
+)
+parser.add_argument(
+    "--contact_debug_vis",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Show contact sensor debug visualization. Default off because it is expensive in GUI playback.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -109,6 +133,10 @@ def main() -> None:
         action_squash_scale = float(args_cli.action_squash_scale)
     else:
         action_squash_scale = float(train_cfg.get("action_squash_scale", 1.0e6))
+    if args_cli.action_scale_multiplier >= 0.0:
+        action_scale_multiplier = float(args_cli.action_scale_multiplier)
+    else:
+        action_scale_multiplier = float(train_cfg.get("action_scale_multiplier", 1.0))
     startup_randomization = (
         bool(train_cfg.get("startup_randomization", True))
         if args_cli.startup_randomization is None
@@ -122,15 +150,13 @@ def main() -> None:
         if args_cli.interval_pushes is None
         else bool(args_cli.interval_pushes)
     )
+    observation_noise = False if args_cli.observation_noise is None else bool(args_cli.observation_noise)
 
     torch.manual_seed(args_cli.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args_cli.seed)
 
-    train_future_ref_steps = int(train_cfg.get("future_ref_steps", -1))
-    if train_future_ref_steps < 0:
-        train_horizon = int(train_cfg.get("horizon", 1))
-        train_future_ref_steps = train_horizon if train_horizon > 1 else 0
+    train_future_ref_steps = 0
 
     env = G1MimicEnv(
         MimicEnvConfig(
@@ -138,6 +164,9 @@ def main() -> None:
             num_envs=args_cli.num_envs,
             sim_dt=sim_dt,
             render=not args_cli.headless,
+            render_every=max(1, args_cli.render_every),
+            contact_debug_vis=args_cli.contact_debug_vis,
+            action_scale_multiplier=action_scale_multiplier,
             fix_root_link=args_cli.fix_root_link or train_cfg.get("fix_root_link", False),
             startup_randomization=startup_randomization,
             motion_start_phase=motion_start_phase,
@@ -146,6 +175,7 @@ def main() -> None:
             max_episode_steps=int(1.0e9 / sim_dt),
             reset_noise=reset_noise,
             interval_pushes=interval_pushes,
+            observation_noise=observation_noise,
             future_ref_steps=train_future_ref_steps,
         )
     )
@@ -182,7 +212,10 @@ def main() -> None:
     )
     print(
         f"[INFO] startup_randomization={startup_randomization} "
-        f"reset_noise={reset_noise} interval_pushes={interval_pushes}",
+        f"reset_noise={reset_noise} interval_pushes={interval_pushes} "
+        f"observation_noise={observation_noise} render_every={max(1, args_cli.render_every)} "
+        f"contact_debug_vis={args_cli.contact_debug_vis} "
+        f"action_scale_multiplier={action_scale_multiplier}",
         flush=True,
     )
     eval_initial_noise = args_cli.eval_initial_noise or train_cfg.get("eval_initial_noise", "random")

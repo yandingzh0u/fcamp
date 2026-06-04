@@ -34,6 +34,8 @@ class ValidationMixin:
         env_device = torch.device(self.env.device)
         cpu_rng_state = torch.random.get_rng_state()
         cuda_rng_state = None
+        original_observation_noise = getattr(self.env.task_cfg, "observation_noise", True)
+        self.env.task_cfg.observation_noise = bool(getattr(self.cfg, "validation_observation_noise", False))
         if torch.cuda.is_available() and env_device.type == "cuda":
             cuda_rng_state = torch.cuda.get_rng_state(env_device)
         if fixed_seed is not None and torch.cuda.is_available() and env_device.type == "cuda":
@@ -147,6 +149,7 @@ class ValidationMixin:
                     if bool(done.all()):
                         break
         finally:
+            self.env.task_cfg.observation_noise = original_observation_noise
             if training_snapshot is not None and hasattr(self, "_restore_env_state"):
                 self._restore_env_state(training_snapshot)
                 if training_observation is not None:

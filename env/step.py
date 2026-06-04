@@ -13,13 +13,17 @@ class MimicStepMixin:
         reset_horizon: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         previous_action = self.last_action.clone()
+        previous_previous_action = self.prev_action.clone()
         self._apply_action_targets(action_offsets)
         for _ in range(self.decimation):
             self.scene.write_data_to_sim()
             self.sim.step(render=False)
             self.scene.update(self.physics_dt)
         if self.cfg.render:
-            self.sim.render()
+            self._render_step_index += 1
+            render_every = max(1, int(getattr(self.cfg, "render_every", 1)))
+            if self._render_step_index % render_every == 0:
+                self.sim.render()
 
         self.episode_steps += 1
         # Advance phase BEFORE reward/termination so robot(t+1) is compared against ref(t+1).
@@ -30,7 +34,7 @@ class MimicStepMixin:
         self._resample_finished_motions()
 
         termination_phase_steps = self.phase_steps.clone()
-        reward, reward_terms = self.compute_reward(action_offsets, previous_action)
+        reward, reward_terms = self.compute_reward(action_offsets, previous_action, previous_previous_action)
         done, done_terms, debug_terms = self.compute_termination()
         terminal_observation = None
 
@@ -45,8 +49,10 @@ class MimicStepMixin:
                 reset_phases = self.sample_phase_indices(env_ids.numel(), horizon=max(1, reset_horizon))
                 self.reset_envs(env_ids, phase_indices=reset_phases)
 
+        self.prev_action = previous_action.clone()
         self.last_action = action_offsets.clone()
         if auto_reset and bool(done.any()):
+            self.prev_action[done] = 0.0
             self.last_action[done] = 0.0
         self._update_adaptive_motion_sampling()
         self._apply_interval_pushes()

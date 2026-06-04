@@ -6,7 +6,6 @@ from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
 
 from .config import (
     CRITIC_OBS_DIM,
-    FUTURE_REF_FRAME_DIM,
     OBS_DIM,
     PUSH_INTERVAL_STEP_RANGE,
     RESET_JOINT_POSITION_RANGE,
@@ -65,6 +64,7 @@ class G1MimicEnv(
         self._init_adaptive_motion_sampling()
 
         self.last_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
+        self.prev_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self.phase_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.episode_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.motion_start_phase = max(0, min(int(cfg.motion_start_phase), self.motion.num_frames - 1))
@@ -77,7 +77,7 @@ class G1MimicEnv(
 
     @property
     def observation_dim(self) -> int:
-        return OBS_DIM + int(self.task_cfg.future_ref_steps) * FUTURE_REF_FRAME_DIM
+        return OBS_DIM
 
     @property
     def critic_observation_dim(self) -> int:
@@ -89,6 +89,16 @@ class G1MimicEnv(
         if num_samples == 0:
             return torch.empty(0, dtype=torch.long, device=self.device)
         horizon = max(1, int(horizon))
+        min_phase = self.motion_start_phase
+        max_phase = min(
+            self.motion_end_phase,
+            max(0, self.motion.num_frames - horizon),
+        )
+        if max_phase < min_phase:
+            return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
+        if not self.adaptive_motion_sampling:
+            return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
+
         sampling_probabilities = self.bin_failed_count + self.adaptive_uniform_ratio / float(self.bin_count)
         sampling_probabilities = torch.nn.functional.pad(
             sampling_probabilities.unsqueeze(0).unsqueeze(0),
@@ -99,20 +109,19 @@ class G1MimicEnv(
             sampling_probabilities,
             self.adaptive_kernel.view(1, 1, -1),
         ).view(-1)
-        sampling_probabilities = sampling_probabilities / sampling_probabilities.sum()
-        sampled_bins = torch.multinomial(sampling_probabilities, num_samples, replacement=True)
-        phase_indices = (
-            (sampled_bins + torch.rand(num_samples, device=self.device))
-            / self.bin_count
-            * (self.motion.num_frames - 1)
-        ).long()
-        max_phase = min(
-            self.motion_end_phase,
-            max(0, self.motion.num_frames - horizon),
+        candidate_phases = torch.arange(min_phase, max_phase + 1, dtype=torch.long, device=self.device)
+        candidate_bins = torch.clamp(
+            (candidate_phases * self.bin_count) // max(self.motion.num_frames, 1),
+            0,
+            self.bin_count - 1,
         )
-        if max_phase < self.motion_start_phase:
-            return torch.full((num_samples,), self.motion_start_phase, dtype=torch.long, device=self.device)
-        return torch.clamp(phase_indices, min=self.motion_start_phase, max=max_phase)
+        phase_probabilities = sampling_probabilities.index_select(0, candidate_bins)
+        probability_sum = phase_probabilities.sum()
+        if not bool(torch.isfinite(probability_sum)) or float(probability_sum.item()) <= 0.0:
+            return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
+        phase_probabilities = phase_probabilities / probability_sum
+        sampled_offsets = torch.multinomial(phase_probabilities, num_samples, replacement=True)
+        return candidate_phases.index_select(0, sampled_offsets)
 
     def reset(self, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
@@ -134,6 +143,7 @@ class G1MimicEnv(
         self.phase_steps[env_ids] = phase_indices
         self.episode_steps[env_ids] = 0
         self.last_action[env_ids] = 0.0
+        self.prev_action[env_ids] = 0.0
         min_push, max_push = PUSH_INTERVAL_STEP_RANGE
         self.next_push_step[env_ids] = torch.randint(
             min_push,
@@ -210,13 +220,16 @@ class G1MimicEnv(
         self.bin_count = max(self.bin_count, 1)
         self.bin_failed_count = torch.zeros(self.bin_count, dtype=torch.float32, device=self.device)
         self._current_bin_failed = torch.zeros(self.bin_count, dtype=torch.float32, device=self.device)
-        self.adaptive_kernel_size = 1
-        self.adaptive_uniform_ratio = 0.1
-        self.adaptive_alpha = 0.001
+        self.adaptive_motion_sampling = bool(self.task_cfg.adaptive_motion_sampling)
+        self.adaptive_kernel_size = max(1, int(self.task_cfg.adaptive_kernel_size))
+        self.adaptive_uniform_ratio = max(0.0, float(self.task_cfg.adaptive_uniform_ratio))
+        self.adaptive_alpha = min(1.0, max(0.0, float(self.task_cfg.adaptive_alpha)))
         kernel = torch.tensor([0.8**i for i in range(self.adaptive_kernel_size)], dtype=torch.float32, device=self.device)
         self.adaptive_kernel = kernel / kernel.sum()
 
     def _record_adaptive_motion_failures(self, failed_env_ids: torch.Tensor, failure_phase_steps: torch.Tensor) -> None:
+        if not self.adaptive_motion_sampling:
+            return
         if failed_env_ids.numel() == 0:
             return
         current_bin_index = torch.clamp(
@@ -228,6 +241,9 @@ class G1MimicEnv(
         self._current_bin_failed[:] = torch.bincount(fail_bins, minlength=self.bin_count).to(self._current_bin_failed)
 
     def _update_adaptive_motion_sampling(self) -> None:
+        if not self.adaptive_motion_sampling:
+            self._current_bin_failed.zero_()
+            return
         self.bin_failed_count = (
             self.adaptive_alpha * self._current_bin_failed
             + (1.0 - self.adaptive_alpha) * self.bin_failed_count

@@ -18,6 +18,7 @@ class EnvStateMixin:
             "phase_steps": self.env.phase_steps.clone(),
             "episode_steps": self.env.episode_steps.clone(),
             "last_action": self.env.last_action.clone(),
+            "prev_action": self.env.prev_action.clone(),
             "next_push_step": self.env.next_push_step.clone(),
             "bin_failed_count": self.env.bin_failed_count.clone(),
         }
@@ -39,6 +40,7 @@ class EnvStateMixin:
         self.env.phase_steps = snapshot["phase_steps"].clone()
         self.env.episode_steps = snapshot["episode_steps"].clone()
         self.env.last_action = snapshot["last_action"].clone()
+        self.env.prev_action = snapshot.get("prev_action", torch.zeros_like(self.env.last_action)).clone()
         self.env.next_push_step = snapshot["next_push_step"].clone()
         self.env.default_root_state = snapshot["default_root_state"].clone()
         self.env.default_joint_pos = snapshot["default_joint_pos"].clone()

@@ -207,6 +207,8 @@ class LoggingMixin:
         print(
             f"[TRAIN_COST] "
             f"action_rate={metrics.get('reward/action_rate_mean', float('nan')):.5f} "
+            f"action_accel={metrics.get('reward/action_accel_mean', float('nan')):.5f} "
+            f"action_l2={metrics.get('reward/action_l2_mean', float('nan')):.5f} "
             f"joint_torque={metrics.get('reward/joint_torque_mean', float('nan')):.5f} "
             f"joint_limit={metrics.get('reward/joint_limit_mean', float('nan')):.5f} "
             f"undesired_contacts={metrics.get('reward/undesired_contacts_mean', float('nan')):.5f}",
@@ -218,6 +220,8 @@ class LoggingMixin:
             f"penalty={metrics.get('reward_weighted/penalty', float('nan')):.5f} "
             f"total={metrics.get('reward_weighted/total', float('nan')):.5f} "
             f"act_rate={metrics.get('reward_weighted/action_rate', float('nan')):.5f} "
+            f"act_accel={metrics.get('reward_weighted/action_accel', float('nan')):.5f} "
+            f"act_l2={metrics.get('reward_weighted/action_l2', float('nan')):.5f} "
             f"torque={metrics.get('reward_weighted/joint_torque', float('nan')):.5f} "
             f"contacts={metrics.get('reward_weighted/undesired_contacts', float('nan')):.5f}",
             flush=True,

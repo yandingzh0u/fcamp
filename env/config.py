@@ -50,9 +50,6 @@ MIMIC_FOOT_BODY_NAMES = (
 )
 MIMIC_ANCHOR_BODY_NAME = "torso_link"
 OBS_DIM = 163
-# Each extra future reference frame appended to the actor observation adds the
-# reference joint_pos + joint_vel (action_dim * 2 = 58 dims).
-FUTURE_REF_FRAME_DIM = 58
 CRITIC_OBS_DIM = 286
 UNDESIRED_CONTACT_THRESHOLD = 1.0
 ANCHOR_Z_TERMINATION_THRESHOLD = 0.25
@@ -155,6 +152,9 @@ class EnvConfig:
     sim_dt: float = 0.02
     decimation: int = 4
     render: bool = False
+    render_every: int = 1
+    contact_debug_vis: bool = False
+    action_scale_multiplier: float = 1.0
     env_spacing: float = 2.5
     fix_root_link: bool = False
     startup_randomization: bool = True
@@ -168,13 +168,22 @@ class MimicEnvConfig(EnvConfig):
     max_episode_steps: int = 1500
     motion_start_phase: int = 0
     motion_end_phase: int = -1
+    adaptive_motion_sampling: bool = True
+    adaptive_uniform_ratio: float = 0.1
+    adaptive_alpha: float = 0.001
+    adaptive_kernel_size: int = 1
     reset_noise: bool = True
     interval_pushes: bool = True
+    observation_noise: bool = True
+    joint_acc_weight: float = 2.5e-7
+    joint_torque_weight: float = 1.0e-5
+    action_rate_weight: float = 1.0e-1
+    action_accel_weight: float = 0.0
+    action_l2_weight: float = 0.0
     track_body_names: tuple[str, ...] = MIMIC_BODY_NAMES
     ee_body_names: tuple[str, ...] = MIMIC_EE_BODY_NAMES
     foot_body_names: tuple[str, ...] = MIMIC_FOOT_BODY_NAMES
     anchor_body_name: str = MIMIC_ANCHOR_BODY_NAME
-    # Number of future reference frames (joint_pos + joint_vel) appended to the actor
-    # observation. For policy horizon h, set this to h - 1 so the policy can see the
-    # references its multi-frame action chunk will track. 0 keeps the legacy single-frame obs.
+    # Deprecated compatibility field. Actor observations use the verified legacy input:
+    # current reference only, no future reference frames.
     future_ref_steps: int = 0
