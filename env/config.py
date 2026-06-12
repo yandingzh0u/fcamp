@@ -19,17 +19,15 @@ DEFAULT_MOTION_FILE = (
     PROJECT_ROOT
     / "assets"
     / "motions"
-    / "g1"
-    / "dance_102"
-    / "G1_Take_102.input60_output50.asset_order.npz"
+    / "g1_crawl"
+    / "motion_crawl_slope.npz"
 )
 
-# Slope mesh imported from the holosoma crawl_slope task (base ground slab removed).
-# Spawned as a static visual + collision prop offset beside each robot so the slope is
-# visible in every env. The dance motion itself is unchanged and still happens on the
-# flat ground plane.
-SLOPE_USD_FILE = PROJECT_ROOT / "assets" / "terrains" / "slope.usd"
-SLOPE_OFFSET = (2.0, 0.0, 0.0)
+# Crawl terrain imported from the holosoma crawl_slope task. The crawl motion is recorded
+# in this terrain's frame (the robot climbs the ramp), so the slope is spawned at each
+# env origin and acts as the ground for that env.
+SLOPE_USD_FILE = PROJECT_ROOT / "assets" / "motions" / "g1_crawl" / "terrain_slope.usd"
+SLOPE_OFFSET = (0.0, 0.0, 0.0)
 
 MIMIC_BODY_NAMES = (
     "pelvis",

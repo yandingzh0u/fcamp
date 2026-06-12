@@ -9,53 +9,53 @@ from isaaclab.assets import ArticulationCfg
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Holosoma G1 (29 DOF, half-sphere hand) converted from the URDF that ships with the
+# holosoma whole-body-tracking task. This replaces the original Unitree factory USD so
+# the crawl_slope motion (recorded on this exact robot) tracks correctly.
 G1_LOCAL_USD_PATH = (
     PROJECT_ROOT
     / "assets"
     / "robots"
-    / "unitree_model"
-    / "G1"
-    / "29dof"
-    / "usd"
-    / "g1_29dof_rev_1_0"
-    / "g1_29dof_rev_1_0.usd"
+    / "holosoma_g1"
+    / "g1_29dof.usd"
 )
 
+# Action / observation / motion joint order. Matches the holosoma motion file's
+# `joint_names` (URDF serial-chain order). The env resolves these names against the
+# articulation with find_joints(preserve_order=True), so the physical asset order does
+# not need to match this list.
 G1_29DOF_ASSET_JOINT_NAMES = [
     "left_hip_pitch_joint",
-    "right_hip_pitch_joint",
-    "waist_yaw_joint",
     "left_hip_roll_joint",
-    "right_hip_roll_joint",
-    "waist_roll_joint",
     "left_hip_yaw_joint",
-    "right_hip_yaw_joint",
-    "waist_pitch_joint",
     "left_knee_joint",
-    "right_knee_joint",
-    "left_shoulder_pitch_joint",
-    "right_shoulder_pitch_joint",
     "left_ankle_pitch_joint",
-    "right_ankle_pitch_joint",
-    "left_shoulder_roll_joint",
-    "right_shoulder_roll_joint",
     "left_ankle_roll_joint",
+    "right_hip_pitch_joint",
+    "right_hip_roll_joint",
+    "right_hip_yaw_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
     "right_ankle_roll_joint",
+    "waist_yaw_joint",
+    "waist_roll_joint",
+    "waist_pitch_joint",
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
     "left_shoulder_yaw_joint",
-    "right_shoulder_yaw_joint",
     "left_elbow_joint",
-    "right_elbow_joint",
     "left_wrist_roll_joint",
-    "right_wrist_roll_joint",
     "left_wrist_pitch_joint",
-    "right_wrist_pitch_joint",
     "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
     "right_wrist_yaw_joint",
 ]
 
-# IsaacLab JointPositionAction with joint_names=[".*"] uses the articulation
-# asset order. Keep our action, observation, and motion arrays in that same
-# order so Python training matches the official ManagerBased mimic task.
 G1_29DOF_ACTION_NAMES = G1_29DOF_ASSET_JOINT_NAMES
 
 
@@ -73,14 +73,14 @@ G1_BASE_CFG = ArticulationCfg(
             max_depenetration_velocity=1.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=True,
+            enabled_self_collisions=False,
             fix_root_link=False,
             solver_position_iteration_count=8,
             solver_velocity_iteration_count=4,
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.76),
+        pos=(0.0, 0.0, 0.8),
         joint_pos={
             ".*_hip_pitch_joint": -0.312,
             ".*_knee_joint": 0.669,

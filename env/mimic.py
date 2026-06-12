@@ -17,6 +17,7 @@ from .motion import MimicMotionReference
 from .observation import MimicObservationMixin
 from .reward import MimicRewardMixin
 from .robot import G1Env
+from .robots.g1 import G1_29DOF_ACTION_NAMES
 from .step import MimicStepMixin
 from .terminal import MimicTerminationMixin
 
@@ -60,6 +61,9 @@ class G1MimicEnv(
             self.track_body_ids,
             self.anchor_body_id,
             self.device,
+            robot_body_names=list(self.robot.body_names),
+            action_joint_names=list(G1_29DOF_ACTION_NAMES),
+            root_body_name="pelvis",
         )
         self._init_adaptive_motion_sampling()
 
