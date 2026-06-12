@@ -40,12 +40,16 @@ class G1MimicEnv(
         self.ee_body_indices = [self.track_body_names.index(name) for name in cfg.ee_body_names]
         self.termination_body_indices = list(self.ee_body_indices)
         self.contact_sensor = self.scene["contact_forces"]
-        allowed_contact_names = set(cfg.ee_body_names)
+        from .config import CONTACT_ALLOWED_SUBSTRINGS
+
+        def _contact_allowed(body_name: str) -> bool:
+            return any(token in body_name for token in CONTACT_ALLOWED_SUBSTRINGS)
+
         self.undesired_contact_body_ids = torch.tensor(
             [
                 self.contact_sensor.body_names.index(body_name)
                 for body_name in self.contact_sensor.body_names
-                if body_name not in allowed_contact_names
+                if not _contact_allowed(body_name)
             ],
             dtype=torch.long,
             device=self.device,

@@ -48,16 +48,27 @@ MIMIC_BODY_NAMES = (
 MIMIC_EE_BODY_NAMES = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
+    "left_wrist_yaw_link",
+    "right_wrist_yaw_link",
 )
 MIMIC_FOOT_BODY_NAMES = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
 )
 MIMIC_ANCHOR_BODY_NAME = "torso_link"
+# Body-name substrings whose ground/self contact is NOT penalized. Mirrors the official
+# holosoma crawl whitelist (feet, ankles, wrists, foot contact points, half-sphere hands)
+# so the robot may support itself on hands/knees/feet while crawling the slope.
+CONTACT_ALLOWED_SUBSTRINGS = (
+    "ankle_roll_link",
+    "wrist_yaw_link",
+    "foot_contact_point",
+    "sphere_hand_link",
+)
 OBS_DIM = 163
 CRITIC_OBS_DIM = 286
 UNDESIRED_CONTACT_THRESHOLD = 1.0
-ANCHOR_Z_TERMINATION_THRESHOLD = 0.25
+ANCHOR_Z_TERMINATION_THRESHOLD = 0.5
 ANCHOR_ORI_TERMINATION_THRESHOLD = 0.8
 EE_Z_TERMINATION_THRESHOLD = 0.25
 RESET_ROOT_POSE_RANGE = (
