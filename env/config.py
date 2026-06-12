@@ -24,6 +24,13 @@ DEFAULT_MOTION_FILE = (
     / "G1_Take_102.input60_output50.asset_order.npz"
 )
 
+# Slope mesh imported from the holosoma crawl_slope task (base ground slab removed).
+# Spawned as a static visual + collision prop offset beside each robot so the slope is
+# visible in every env. The dance motion itself is unchanged and still happens on the
+# flat ground plane.
+SLOPE_USD_FILE = PROJECT_ROOT / "assets" / "terrains" / "slope.usd"
+SLOPE_OFFSET = (2.0, 0.0, 0.0)
+
 MIMIC_BODY_NAMES = (
     "pelvis",
     "left_hip_roll_link",
@@ -134,6 +141,15 @@ class G1SceneCfg(InteractiveSceneCfg):
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
         spawn=sim_utils.DomeLightCfg(color=(0.13, 0.13, 0.13), intensity=1000.0),
+    )
+    slope = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Slope",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=str(SLOPE_USD_FILE),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.55, 0.35)),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=SLOPE_OFFSET),
     )
     robot = make_g1_cfg("{ENV_REGEX_NS}/Robot", fix_root_link=False)
     contact_forces = ContactSensorCfg(

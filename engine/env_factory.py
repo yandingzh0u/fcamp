@@ -11,6 +11,8 @@ def make_mimic_env(cfg) -> G1MimicEnv:
             device=cfg.device,
             num_envs=cfg.num_envs,
             sim_dt=cfg.sim_dt,
+            render=getattr(cfg, "render", False),
+            render_every=getattr(cfg, "render_every", 1),
             fix_root_link=cfg.fix_root_link,
             action_scale_multiplier=getattr(cfg, "action_scale_multiplier", 1.0),
             startup_randomization=cfg.startup_randomization,

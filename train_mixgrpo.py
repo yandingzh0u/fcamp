@@ -78,7 +78,7 @@ parser.add_argument(
 parser.add_argument(
     "--rollout_env_steps",
     type=int,
-    default=24,
+    default=48,
     help=(
         "Fixed environment frames per GRPO update. Effective chunks are "
         "rollout_env_steps // horizon and must divide exactly. "
@@ -88,7 +88,7 @@ parser.add_argument(
 parser.add_argument(
     "--horizon",
     type=int,
-    default=1,
+    default=12,
     help="Number of env-frames each policy chunk advances; chunk reward = discounted sum across these frames.",
 )
 parser.add_argument(
@@ -113,7 +113,7 @@ parser.add_argument(
 parser.add_argument(
     "--basis_count",
     type=int,
-    default=0,
+    default=4,
     help=(
         "Temporal-basis coefficient count for h>1 action chunks. The flow/log_prob run in a "
         "basis_count*action_dim coefficient latent; a fixed low-frequency basis expands to the "
@@ -138,7 +138,7 @@ parser.add_argument(
 parser.add_argument(
     "--tail_bootstrap_steps",
     type=int,
-    default=0,
+    default=80,
     help=(
         "Roll out the deterministic policy for this many env steps after each GRPO window "
         "to estimate a Monte-Carlo tail return as last_values for GAE/RTG. 0 disables. "
@@ -165,7 +165,7 @@ parser.add_argument(
     help="Clipping range for the MixGRPO step log-prob ratio. Default is widened for robot control.",
 )
 parser.add_argument("--adv_clip_max", type=float, default=5.0, help="Clamp absolute advantages in the MixGRPO policy loss.")
-parser.add_argument("--desired_kl", type=float, default=0.03, help="Adaptive learning-rate KL target.")
+parser.add_argument("--desired_kl", type=float, default=0.06, help="Adaptive learning-rate KL target.")
 parser.add_argument("--kl_penalty_coef", type=float, default=0.0, help="KL penalty coefficient added to the policy loss. 0 disables (standard PPO clip only).")
 parser.add_argument("--entropy_coef", type=float, default=0.005, help="Entropy coefficient. Default matches Unitree PPO.")
 parser.add_argument(
@@ -194,7 +194,7 @@ parser.add_argument(
 )
 parser.add_argument("--policy_lr", type=float, default=1.0e-3, help="Flow policy learning rate for robot control.")
 parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Gradient clipping threshold.")
-parser.add_argument("--max_updates", type=int, default=30000, help="Total number of MixGRPO training iterations.")
+parser.add_argument("--max_updates", type=int, default=3000, help="Total number of MixGRPO training iterations.")
 parser.add_argument("--seed", type=int, default=0, help="Random seed.")
 parser.add_argument("--sim_dt", type=float, default=0.02, help="Simulation timestep.")
 parser.add_argument(
@@ -254,7 +254,7 @@ parser.add_argument("--run_name", type=str, default="", help="Optional run folde
 parser.add_argument("--run_root", type=str, default="runs", help="Root directory for automatic logs and checkpoints.")
 parser.add_argument("--checkpoint_dir", type=str, default="", help="Directory for saving checkpoints. Defaults to runs/<run_name>/checkpoints.")
 parser.add_argument("--log_file", type=str, default="", help="Path for train stdout/stderr log. Defaults to runs/<run_name>/logs/train.log.")
-parser.add_argument("--save_every", type=int, default=500, help="Save a checkpoint every N updates. 0 disables.")
+parser.add_argument("--save_every", type=int, default=100, help="Save a checkpoint every N updates. 0 disables.")
 parser.add_argument("--resume", type=str, default="", help="Optional checkpoint path to resume from.")
 parser.add_argument(
     "--reset_optimizer_on_resume",
@@ -263,8 +263,8 @@ parser.add_argument(
     help="Load policy weights from --resume but start a fresh optimizer state.",
 )
 parser.add_argument("--log_every", type=int, default=1, help="Print metrics every N updates.")
-parser.add_argument("--validation_every", type=int, default=0, help="Run a validation rollout every N updates. 0 disables.")
-parser.add_argument("--validation_max_steps", type=int, default=500, help="Max simulation steps per validation rollout.")
+parser.add_argument("--validation_every", type=int, default=100, help="Run a validation rollout every N updates. 0 disables.")
+parser.add_argument("--validation_max_steps", type=int, default=1500, help="Max simulation steps per validation rollout.")
 parser.add_argument("--validation_start_phase", type=int, default=0, help="Reference motion phase for validation resets.")
 parser.add_argument(
     "--validation_fixed_seed",
@@ -357,6 +357,7 @@ def main() -> None:
         device=args_cli.device,
         num_envs=args_cli.num_envs,
         sim_dt=args_cli.sim_dt,
+        render=not args_cli.headless,
         fix_root_link=args_cli.fix_root_link,
         action_scale_multiplier=args_cli.action_scale_multiplier,
         startup_randomization=args_cli.startup_randomization,

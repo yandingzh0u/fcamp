@@ -10,6 +10,8 @@ class MixGRPOConfig:
     device: str = "cuda:0"
     num_envs: int = 8192
     sim_dt: float = 0.02
+    render: bool = False
+    render_every: int = 1
     fix_root_link: bool = False
     action_scale_multiplier: float = 1.0
     max_episode_steps: int = 1500
