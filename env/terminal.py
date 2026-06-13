@@ -39,6 +39,9 @@ class MimicTerminationMixin:
         termination_z_error_max = termination_z_error.max(dim=-1).values
         termination_z_error_mean = termination_z_error.mean(dim=-1)
         time_out = self.episode_steps >= self.task_cfg.max_episode_steps
+        motion_end = getattr(self, "_motion_end_mask", None)
+        if motion_end is not None:
+            time_out = time_out | motion_end
         done = time_out | anchor_pos_bad | anchor_ori_bad | ee_body_bad
         return done, {
             "time_out": time_out,

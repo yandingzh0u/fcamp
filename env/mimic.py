@@ -4,6 +4,12 @@ import torch
 
 from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
 
+from .adaptive_sampling import (
+    allocate_sampling_counts,
+    build_adaptive_phase_probabilities,
+    compute_failure_rates,
+    stratified_uniform_offsets,
+)
 from .config import (
     CRITIC_OBS_DIM,
     OBS_DIM,
@@ -72,6 +78,13 @@ class G1MimicEnv(
         )
         self._init_adaptive_motion_sampling()
 
+        # Adaptive episode cap: when max_episode_steps <= 0, the time-out follows the motion
+        # length so "survive the whole clip" is the real success bar instead of an arbitrary
+        # fixed horizon. The motion-end termination already caps episodes at num_frames; this
+        # keeps the explicit time_out consistent with the clip and robust to clip-length changes.
+        if int(cfg.max_episode_steps) <= 0:
+            self.task_cfg.max_episode_steps = int(self.motion.num_frames)
+
         self.last_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self.prev_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self.phase_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -108,29 +121,42 @@ class G1MimicEnv(
         if not self.adaptive_motion_sampling:
             return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
 
-        sampling_probabilities = self.bin_failed_count + self.adaptive_uniform_ratio / float(self.bin_count)
-        sampling_probabilities = torch.nn.functional.pad(
-            sampling_probabilities.unsqueeze(0).unsqueeze(0),
+        failure_rates = compute_failure_rates(self.bin_failed_count, self.bin_exposure_count)
+        failure_rates = torch.nn.functional.pad(
+            failure_rates.unsqueeze(0).unsqueeze(0),
             (0, self.adaptive_kernel_size - 1),
             mode="replicate",
         )
-        sampling_probabilities = torch.nn.functional.conv1d(
-            sampling_probabilities,
+        failure_rates = torch.nn.functional.conv1d(
+            failure_rates,
             self.adaptive_kernel.view(1, 1, -1),
         ).view(-1)
         candidate_phases = torch.arange(min_phase, max_phase + 1, dtype=torch.long, device=self.device)
-        candidate_bins = torch.clamp(
-            (candidate_phases * self.bin_count) // max(self.motion.num_frames, 1),
-            0,
-            self.bin_count - 1,
+        adaptive_probabilities = build_adaptive_phase_probabilities(
+            failure_rates,
+            candidate_phases,
+            motion_num_frames=self.motion.num_frames,
         )
-        phase_probabilities = sampling_probabilities.index_select(0, candidate_bins)
-        probability_sum = phase_probabilities.sum()
-        if not bool(torch.isfinite(probability_sum)) or float(probability_sum.item()) <= 0.0:
-            return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
-        phase_probabilities = phase_probabilities / probability_sum
-        sampled_offsets = torch.multinomial(phase_probabilities, num_samples, replacement=True)
-        return candidate_phases.index_select(0, sampled_offsets)
+        start_count, uniform_count, adaptive_count = allocate_sampling_counts(
+            num_samples,
+            uniform_ratio=self.adaptive_uniform_ratio,
+            start_phase_ratio=self.motion_start_phase_ratio,
+        )
+        sampled_phases = []
+        if start_count > 0:
+            sampled_phases.append(torch.full((start_count,), min_phase, dtype=torch.long, device=self.device))
+        if uniform_count > 0:
+            uniform_offsets = stratified_uniform_offsets(
+                candidate_phases.numel(),
+                uniform_count,
+                device=self.device,
+            )
+            sampled_phases.append(candidate_phases.index_select(0, uniform_offsets))
+        if adaptive_count > 0:
+            sampled_offsets = torch.multinomial(adaptive_probabilities, adaptive_count, replacement=True)
+            sampled_phases.append(candidate_phases.index_select(0, sampled_offsets))
+        phases = torch.cat(sampled_phases)
+        return phases.index_select(0, torch.randperm(num_samples, device=self.device))
 
     def reset(self, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
@@ -228,36 +254,61 @@ class G1MimicEnv(
         self.bin_count = int(self.motion.num_frames // (1.0 / self.dt)) + 1
         self.bin_count = max(self.bin_count, 1)
         self.bin_failed_count = torch.zeros(self.bin_count, dtype=torch.float32, device=self.device)
-        self._current_bin_failed = torch.zeros(self.bin_count, dtype=torch.float32, device=self.device)
+        self.bin_exposure_count = torch.zeros(self.bin_count, dtype=torch.float32, device=self.device)
         self.adaptive_motion_sampling = bool(self.task_cfg.adaptive_motion_sampling)
         self.adaptive_kernel_size = max(1, int(self.task_cfg.adaptive_kernel_size))
-        self.adaptive_uniform_ratio = max(0.0, float(self.task_cfg.adaptive_uniform_ratio))
+        self.adaptive_uniform_ratio = min(1.0, max(0.0, float(self.task_cfg.adaptive_uniform_ratio)))
+        self.motion_start_phase_ratio = min(1.0, max(0.0, float(self.task_cfg.motion_start_phase_ratio)))
         self.adaptive_alpha = min(1.0, max(0.0, float(self.task_cfg.adaptive_alpha)))
         kernel = torch.tensor([0.8**i for i in range(self.adaptive_kernel_size)], dtype=torch.float32, device=self.device)
         self.adaptive_kernel = kernel / kernel.sum()
 
-    def _record_adaptive_motion_failures(self, failed_env_ids: torch.Tensor, failure_phase_steps: torch.Tensor) -> None:
+    def update_adaptive_motion_statistics(
+        self,
+        start_phases: torch.Tensor,
+        failed: torch.Tensor,
+        *,
+        rollout_steps: int,
+    ) -> None:
         if not self.adaptive_motion_sampling:
             return
-        if failed_env_ids.numel() == 0:
+        if start_phases.shape != failed.shape:
+            raise ValueError("start_phases and failed must have matching shapes")
+        if start_phases.numel() == 0:
             return
-        current_bin_index = torch.clamp(
-            (failure_phase_steps * self.bin_count) // max(self.motion.num_frames, 1),
+
+        start_bins = torch.clamp(
+            (start_phases.reshape(-1).long() * self.bin_count) // max(self.motion.num_frames, 1),
             0,
             self.bin_count - 1,
         )
-        fail_bins = current_bin_index.index_select(0, failed_env_ids)
-        self._current_bin_failed[:] = torch.bincount(fail_bins, minlength=self.bin_count).to(self._current_bin_failed)
+        batch_exposure = torch.bincount(start_bins, minlength=self.bin_count).to(self.bin_exposure_count)
+        batch_failures = torch.zeros_like(self.bin_failed_count)
+        batch_failures.scatter_add_(0, start_bins, failed.reshape(-1).to(dtype=batch_failures.dtype))
 
-    def _update_adaptive_motion_sampling(self) -> None:
-        if not self.adaptive_motion_sampling:
-            self._current_bin_failed.zero_()
-            return
-        self.bin_failed_count = (
-            self.adaptive_alpha * self._current_bin_failed
-            + (1.0 - self.adaptive_alpha) * self.bin_failed_count
+        effective_alpha = 1.0 - (1.0 - self.adaptive_alpha) ** max(1, int(rollout_steps))
+        self.bin_failed_count.mul_(1.0 - effective_alpha).add_(batch_failures, alpha=effective_alpha)
+        self.bin_exposure_count.mul_(1.0 - effective_alpha).add_(
+            batch_exposure,
+            alpha=effective_alpha,
         )
-        self._current_bin_failed.zero_()
+
+    def adaptive_sampling_stats(self) -> dict[str, float]:
+        rates = compute_failure_rates(self.bin_failed_count, self.bin_exposure_count)
+        probabilities = rates / rates.sum().clamp_min(1.0e-8)
+        entropy = -(probabilities * probabilities.clamp_min(1.0e-12).log()).sum()
+        if self.bin_count > 1:
+            entropy = entropy / torch.log(torch.tensor(float(self.bin_count), device=self.device))
+        else:
+            entropy = torch.ones_like(entropy)
+        top_rate, top_bin = rates.max(dim=0)
+        return {
+            "failure_rate_mean": float(rates.mean().item()),
+            "failure_rate_max": float(top_rate.item()),
+            "top_bin": float(top_bin.item()),
+            "entropy": float(entropy.item()),
+            "exposure_sum": float(self.bin_exposure_count.sum().item()),
+        }
 
     def _resample_finished_motions(self) -> None:
         env_ids = torch.where(self.phase_steps >= self.motion.num_frames)[0]

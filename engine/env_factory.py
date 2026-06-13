@@ -20,6 +20,7 @@ def make_mimic_env(cfg) -> G1MimicEnv:
             motion_end_phase=cfg.motion_end_phase,
             adaptive_motion_sampling=getattr(cfg, "adaptive_motion_sampling", True),
             adaptive_uniform_ratio=getattr(cfg, "adaptive_uniform_ratio", 0.1),
+            motion_start_phase_ratio=getattr(cfg, "motion_start_phase_ratio", 0.25),
             adaptive_alpha=getattr(cfg, "adaptive_alpha", 0.001),
             adaptive_kernel_size=getattr(cfg, "adaptive_kernel_size", 1),
             motion_file=cfg.motion_file,

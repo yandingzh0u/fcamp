@@ -62,7 +62,12 @@ class LoggingMixin:
             f"start_mean={metrics.get('phase/start_mean', float('nan')):.2f} "
             f"start_min={metrics.get('phase/start_min', float('nan')):.0f} "
             f"start_max={metrics.get('phase/start_max', float('nan')):.0f} "
-            f"fail_rel_mean={metrics.get('rollout/first_failure_relative_phase_mean', float('nan')):.2f}",
+            f"start_at_min={metrics.get('phase/start_at_min_frac', float('nan')):.5f} "
+            f"fail_rel_mean={metrics.get('rollout/first_failure_relative_phase_mean', float('nan')):.2f} "
+            f"sampler_fail={metrics.get('sampler/failure_rate_mean', float('nan')):.3f} "
+            f"sampler_max={metrics.get('sampler/failure_rate_max', float('nan')):.3f} "
+            f"sampler_top_bin={metrics.get('sampler/top_bin', float('nan')):.0f} "
+            f"sampler_entropy={metrics.get('sampler/entropy', float('nan')):.3f}",
             flush=True,
         )
         print(

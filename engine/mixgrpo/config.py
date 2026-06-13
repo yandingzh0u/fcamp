@@ -14,11 +14,12 @@ class MixGRPOConfig:
     render_every: int = 1
     fix_root_link: bool = False
     action_scale_multiplier: float = 1.0
-    max_episode_steps: int = 1500
+    max_episode_steps: int = -1
     motion_start_phase: int = 0
     motion_end_phase: int = -1
     adaptive_motion_sampling: bool = True
     adaptive_uniform_ratio: float = 0.1
+    motion_start_phase_ratio: float = 0.25
     adaptive_alpha: float = 0.001
     adaptive_kernel_size: int = 1
     motion_file: str = str(DEFAULT_MOTION_FILE)
@@ -118,6 +119,7 @@ class MixGRPOConfig:
     validation_fixed_seed: int = -1
     validation_preserve_state: bool = True
     validation_observation_noise: bool = False
+    validation_done_frac_early_stop: float = 0.98
     target_validation_steps: int = 0
     success_checkpoint_name: str = "success_10s.pt"
 

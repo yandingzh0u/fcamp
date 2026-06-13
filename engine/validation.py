@@ -4,6 +4,8 @@ import time
 
 import torch
 
+from env.config import EE_Z_TERMINATION_THRESHOLD
+
 def _short_body_name(body_name: str) -> str:
     short_name = body_name.removesuffix("_link")
     for suffix in ("_yaw", "_roll"):
@@ -17,7 +19,12 @@ class ValidationMixin:
         validation_max_steps = int(self.cfg.validation_max_steps)
         target_steps = int(getattr(self.cfg, "target_validation_steps", 0))
         max_episode_steps = int(getattr(self.cfg, "max_episode_steps", validation_max_steps))
-        if 0 < target_steps < max_episode_steps:
+        # The episode can never outlive the motion clip (motion-end is a terminal), so there is
+        # no point looping validation past it. Cap the validation horizon at the clip length
+        # unless the user explicitly wants to probe a longer survival target.
+        if max_episode_steps > 0:
+            validation_max_steps = min(validation_max_steps, max_episode_steps)
+        if 0 < target_steps:
             validation_max_steps = max(validation_max_steps, target_steps + 1)
         return max(1, validation_max_steps)
 
@@ -123,7 +130,7 @@ class ValidationMixin:
                             done_debug_record[name][new_done] = debug_terms[name][new_done]
                         ee_z_error_by_body = debug_terms["ee_z_error_by_body"][new_done]
                         done_ee_z_error_record[new_done] = ee_z_error_by_body
-                        done_ee_bad_record[new_done] = ee_z_error_by_body > 0.25
+                        done_ee_bad_record[new_done] = ee_z_error_by_body > EE_Z_TERMINATION_THRESHOLD
                     survived_steps += active_mask.to(dtype=torch.long)
                     cumulative_reward += active_mask.float() * reward
                     reward_terms = info.get("reward_terms", {})
@@ -133,6 +140,7 @@ class ValidationMixin:
                             diag_accum[key] += active_f * reward_terms[key]
                     diag_steps += active_f
                     done |= step_done
+                    done_frac = done.float().mean().item()
                     if (
                         step_idx == 0
                         or (step_idx + 1) % 50 == 0
@@ -146,6 +154,15 @@ class ValidationMixin:
                             f"elapsed={time.perf_counter() - rollout_t0:.3f}s",
                             flush=True,
                         )
+                    # Early exit: once the overwhelming majority of envs have terminated, the
+                    # remaining survivors add wall-time for negligible statistical value
+                    # (deterministic envs die in near-lockstep). Stops the long thin tail.
+                    if done_frac >= float(getattr(self.cfg, "validation_done_frac_early_stop", 0.98)):
+                        print(
+                            f"[VALIDATION_EARLY_STOP] step={step_idx + 1} done_frac={done_frac:.4f}",
+                            flush=True,
+                        )
+                        break
                     if bool(done.all()):
                         break
         finally:

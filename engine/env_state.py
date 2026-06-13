@@ -21,6 +21,7 @@ class EnvStateMixin:
             "prev_action": self.env.prev_action.clone(),
             "next_push_step": self.env.next_push_step.clone(),
             "bin_failed_count": self.env.bin_failed_count.clone(),
+            "bin_exposure_count": self.env.bin_exposure_count.clone(),
         }
 
     def _restore_env_state(self, snapshot: dict[str, torch.Tensor]) -> None:
@@ -48,5 +49,5 @@ class EnvStateMixin:
         self.env.default_action_joint_pos = snapshot["default_action_joint_pos"].clone()
         self.env.default_action_joint_vel = snapshot["default_action_joint_vel"].clone()
         self.env.bin_failed_count = snapshot["bin_failed_count"].clone()
-        self.env._current_bin_failed.zero_()
+        self.env.bin_exposure_count = snapshot["bin_exposure_count"].clone()
         self.env.scene.update(self.env.physics_dt)

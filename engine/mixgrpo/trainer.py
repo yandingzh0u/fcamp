@@ -41,6 +41,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             torch.cuda.manual_seed_all(cfg.seed)
 
         self.env = make_mimic_env(cfg)
+        # The env resolves max_episode_steps<=0 to the motion clip length. Mirror that resolved
+        # value back into cfg so reward projections / validation horizon use the real cap.
+        resolved_max_steps = int(getattr(self.env.task_cfg, "max_episode_steps", cfg.max_episode_steps))
+        if resolved_max_steps > 0:
+            cfg.max_episode_steps = resolved_max_steps
         if self.env.action_dim != cfg.action_dim:
             raise ValueError(f"Expected env action_dim {self.env.action_dim}, got {cfg.action_dim}")
         if cfg.num_generations < 1:
@@ -912,9 +917,17 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                     tail_return = tail_return + discount * reward.to(dtype=tail_return.dtype) * contrib_mask
                     new_done = still_alive & step_done
                     if bool(new_done.any()):
-                        tail_return = tail_return - discount * float(terminal_penalty) * new_done.to(
-                            dtype=tail_return.dtype
-                        )
+                        # Do not penalize motion-end / time-out: reaching the clip end is a
+                        # success, not a fall. Only genuine tracking failures are penalized.
+                        timeout_done = _info.get("done_terms", {}).get("time_out")
+                        if timeout_done is not None:
+                            failure_done = new_done & (~timeout_done.bool())
+                        else:
+                            failure_done = new_done
+                        if bool(failure_done.any()):
+                            tail_return = tail_return - discount * float(terminal_penalty) * failure_done.to(
+                                dtype=tail_return.dtype
+                            )
                     still_alive = still_alive & ~step_done
                     if not bool(still_alive.any()):
                         break
@@ -1512,6 +1525,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             f"future_ref_steps={getattr(self.env.task_cfg, 'future_ref_steps', 0)} "
             f"phase_sampler={'adaptive' if getattr(self.cfg, 'adaptive_motion_sampling', False) else 'uniform'} "
             f"adaptive_uniform_ratio={getattr(self.cfg, 'adaptive_uniform_ratio', 0.1)} "
+            f"motion_start_phase_ratio={getattr(self.cfg, 'motion_start_phase_ratio', 0.25)} "
             f"num_envs={self.cfg.num_envs} "
             f"rollout_env_steps_target={int(getattr(self.cfg, 'rollout_env_steps', 0))} "
             f"configured_chunks_per_rollout={self.cfg.chunks_per_rollout} "
@@ -1592,10 +1606,24 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
 
             t0 = time.perf_counter()
             current_obs = self._resample_group_starts()
+            # Every update force-resets all envs, ending their in-progress episodes. Clear the
+            # per-env reward/length accumulators so train/mean_episode_length reflects steps
+            # survived *within* this update's rollout instead of accumulating across updates.
+            if hasattr(self, "_train_reward_sum"):
+                self._train_reward_sum.zero_()
+                self._train_episode_length.zero_()
             self.current_observation = current_obs
             self._debug_probe_update = update_idx
             self._debug_probe_sample_printed = False
             group_data = self._collect_rollout(current_obs)
+            update_sampler = getattr(self.env, "update_adaptive_motion_statistics", None)
+            if callable(update_sampler):
+                sampler_failed = (group_data["first_done_phase"] >= 0) & (~group_data["first_done_timeout"])
+                update_sampler(
+                    group_data["collection_start_phases"],
+                    sampler_failed,
+                    rollout_steps=self._training_rollout_horizon(),
+                )
             self.current_observation = group_data["next_observation"]
             self._debug_print_collection(group_data)
             collect_time = time.perf_counter() - t0
@@ -1629,7 +1657,15 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             # whole rollout have first_done_chunk == chunks_per_rollout and contribute no
             # penalty.
             first_done_chunk_g = group_data["first_done_chunk"].to(device=first_life_rewards.device)
-            died_mask = first_done_chunk_g < chunks
+            # A branch that reached the motion end / hit the episode time-out did NOT fail —
+            # it successfully tracked the whole assigned segment. Excluding it from the death
+            # mask prevents the algorithm from punishing successful completion with the
+            # terminal_penalty (which previously made finishing the clip RTG-negative).
+            first_done_timeout_g = group_data.get(
+                "first_done_timeout",
+                torch.zeros_like(first_done_chunk_g, dtype=torch.bool),
+            ).to(device=first_life_rewards.device).bool()
+            died_mask = (first_done_chunk_g < chunks) & (~first_done_timeout_g)
             if bool(died_mask.any()):
                 death_idx = first_done_chunk_g.clamp(max=chunks - 1)
                 death_one_hot = torch.nn.functional.one_hot(death_idx, num_classes=chunks).to(
@@ -1931,6 +1967,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         chunk_raw_means = group_data.get("raw_chunk_rewards", chunk_rewards_for_metrics).mean(dim=(0, 1))
         chunk_count_for_metrics = int(chunk_objective_means.shape[0])
         mid_chunk_index = min(max(chunk_count_for_metrics // 2, 0), chunk_count_for_metrics - 1)
+        sampler_stats_fn = getattr(self.env, "adaptive_sampling_stats", None)
+        sampler_stats = sampler_stats_fn() if callable(sampler_stats_fn) else {}
         metrics = {
             **update_metrics,
             "algo/name": "mixgrpo",
@@ -2054,6 +2092,24 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             "phase/start_max": (
                 float(collection_start_phases.max().item()) if collection_start_phases is not None else float("nan")
             ),
+            "phase/start_at_min_frac": (
+                float(
+                    (
+                        collection_start_phases
+                        == int(getattr(self.env, "motion_start_phase", self.cfg.motion_start_phase))
+                    )
+                    .float()
+                    .mean()
+                    .item()
+                )
+                if collection_start_phases is not None
+                else float("nan")
+            ),
+            "sampler/failure_rate_mean": sampler_stats.get("failure_rate_mean", float("nan")),
+            "sampler/failure_rate_max": sampler_stats.get("failure_rate_max", float("nan")),
+            "sampler/top_bin": sampler_stats.get("top_bin", float("nan")),
+            "sampler/entropy": sampler_stats.get("entropy", float("nan")),
+            "sampler/exposure_sum": sampler_stats.get("exposure_sum", float("nan")),
             "timing/collect_s": collect_time,
             "timing/update_s": update_time,
             "act/abs_mean": float(act_abs_tensor.mean().item()),

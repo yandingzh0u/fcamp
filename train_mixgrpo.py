@@ -208,7 +208,7 @@ parser.add_argument("--joint_torque_weight", type=float, default=1.0e-5, help="R
 parser.add_argument("--action_rate_weight", type=float, default=1.0e-1, help="Reward penalty weight for action delta.")
 parser.add_argument("--action_accel_weight", type=float, default=0.0, help="Reward penalty weight for second-order action delta.")
 parser.add_argument("--action_l2_weight", type=float, default=0.0, help="Reward penalty weight for residual action magnitude.")
-parser.add_argument("--max_episode_steps", type=int, default=1500, help="Official 30s time-out threshold for mimic env.")
+parser.add_argument("--max_episode_steps", type=int, default=-1, help="Episode time-out in steps. <=0 follows the motion clip length (recommended), so finishing the whole motion is the success bar.")
 parser.add_argument(
     "--startup_randomization",
     action=argparse.BooleanOptionalAction,
@@ -245,7 +245,13 @@ parser.add_argument(
     "--adaptive_uniform_ratio",
     type=float,
     default=0.1,
-    help="Uniform floor mixed into adaptive phase bins when --adaptive_motion_sampling is enabled.",
+    help="Exact probability mass reserved for uniform phase sampling when adaptive sampling is enabled.",
+)
+parser.add_argument(
+    "--motion_start_phase_ratio",
+    type=float,
+    default=0.25,
+    help="Exact per-update group fraction pinned to motion_start_phase (crawl default: 0.25).",
 )
 parser.add_argument("--adaptive_alpha", type=float, default=0.001, help="EMA update rate for adaptive failure bins.")
 parser.add_argument("--adaptive_kernel_size", type=int, default=1, help="Smoothing kernel width for adaptive failure bins.")
@@ -266,6 +272,7 @@ parser.add_argument("--log_every", type=int, default=1, help="Print metrics ever
 parser.add_argument("--validation_every", type=int, default=100, help="Run a validation rollout every N updates. 0 disables.")
 parser.add_argument("--validation_max_steps", type=int, default=1500, help="Max simulation steps per validation rollout.")
 parser.add_argument("--validation_start_phase", type=int, default=0, help="Reference motion phase for validation resets.")
+parser.add_argument("--validation_done_frac_early_stop", type=float, default=0.98, help="Stop a validation rollout once this fraction of envs have terminated (trims the long survivor tail).")
 parser.add_argument(
     "--validation_fixed_seed",
     type=int,
@@ -365,6 +372,7 @@ def main() -> None:
         motion_end_phase=args_cli.motion_end_phase,
         adaptive_motion_sampling=args_cli.adaptive_motion_sampling,
         adaptive_uniform_ratio=args_cli.adaptive_uniform_ratio,
+        motion_start_phase_ratio=args_cli.motion_start_phase_ratio,
         adaptive_alpha=args_cli.adaptive_alpha,
         adaptive_kernel_size=args_cli.adaptive_kernel_size,
         max_episode_steps=args_cli.max_episode_steps,
@@ -422,6 +430,7 @@ def main() -> None:
         validation_every=args_cli.validation_every,
         validation_max_steps=args_cli.validation_max_steps,
         validation_start_phase=args_cli.validation_start_phase,
+        validation_done_frac_early_stop=args_cli.validation_done_frac_early_stop,
         validation_fixed_seed=args_cli.validation_fixed_seed,
         validation_preserve_state=args_cli.validation_preserve_state,
         validation_observation_noise=args_cli.validation_observation_noise,

@@ -11,6 +11,7 @@ class MimicStepMixin:
         action_offsets: torch.Tensor,
         auto_reset: bool = False,
         reset_horizon: int = 1,
+        loop_motion: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         previous_action = self.last_action.clone()
         previous_previous_action = self.prev_action.clone()
@@ -31,7 +32,15 @@ class MimicStepMixin:
         # robot state corresponds to that next frame. Keeping phase at t (the old behaviour)
         # introduced a 1-frame mismatch in the reward/termination signal.
         self.phase_steps += 1
-        self._resample_finished_motions()
+        # Motion-end handling. Capture which envs reached the clip end this step.
+        self._motion_end_mask = self.phase_steps >= self.motion.num_frames
+        if loop_motion:
+            # Explicit infinite-playback mode only: silently teleport finished envs back into
+            # the clip so the rollout never stops. NOT used during training or validation,
+            # where reaching the clip end must register as a (timeout-style) done so episodes
+            # terminate cleanly and survival is measured against the real clip length.
+            self._motion_end_mask = torch.zeros_like(self._motion_end_mask)
+            self._resample_finished_motions()
 
         termination_phase_steps = self.phase_steps.clone()
         reward, reward_terms = self.compute_reward(action_offsets, previous_action, previous_previous_action)
@@ -39,10 +48,6 @@ class MimicStepMixin:
         terminal_observation = None
 
         if auto_reset:
-            failure_mask = done & (~done_terms["time_out"])
-            failed_env_ids = failure_mask.nonzero(as_tuple=False).squeeze(-1)
-            self._record_adaptive_motion_failures(failed_env_ids, termination_phase_steps)
-
             if bool(done.any()):
                 terminal_observation = self.get_observation().clone()
                 env_ids = done.nonzero(as_tuple=False).squeeze(-1)
@@ -54,7 +59,6 @@ class MimicStepMixin:
         if auto_reset and bool(done.any()):
             self.prev_action[done] = 0.0
             self.last_action[done] = 0.0
-        self._update_adaptive_motion_sampling()
         self._apply_interval_pushes()
         observation = self.get_observation()
         info = {

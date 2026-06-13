@@ -79,7 +79,7 @@ CRITIC_OBS_DIM = 286
 UNDESIRED_CONTACT_THRESHOLD = 1.0
 ANCHOR_Z_TERMINATION_THRESHOLD = 0.5
 ANCHOR_ORI_TERMINATION_THRESHOLD = 0.8
-EE_Z_TERMINATION_THRESHOLD = 0.25
+EE_Z_TERMINATION_THRESHOLD = 0.35
 RESET_ROOT_POSE_RANGE = (
     (-0.05, 0.05),
     (-0.05, 0.05),
@@ -199,11 +199,12 @@ class EnvConfig:
 @dataclass(slots=True)
 class MimicEnvConfig(EnvConfig):
     motion_file: str = str(DEFAULT_MOTION_FILE)
-    max_episode_steps: int = 1500
+    max_episode_steps: int = -1
     motion_start_phase: int = 0
     motion_end_phase: int = -1
     adaptive_motion_sampling: bool = True
     adaptive_uniform_ratio: float = 0.1
+    motion_start_phase_ratio: float = 0.25
     adaptive_alpha: float = 0.001
     adaptive_kernel_size: int = 1
     reset_noise: bool = True
