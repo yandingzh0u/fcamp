@@ -38,7 +38,8 @@ class G1MimicEnv(
         self.anchor_body_id = self.robot.body_names.index(cfg.anchor_body_name)
         self.ee_body_names = list(cfg.ee_body_names)
         self.ee_body_indices = [self.track_body_names.index(name) for name in cfg.ee_body_names]
-        self.termination_body_indices = list(self.ee_body_indices)
+        termination_names = getattr(cfg, "termination_body_names", None) or cfg.ee_body_names
+        self.termination_body_indices = [self.track_body_names.index(name) for name in termination_names]
         self.contact_sensor = self.scene["contact_forces"]
         from .config import CONTACT_ALLOWED_SUBSTRINGS
 

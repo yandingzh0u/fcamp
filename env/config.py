@@ -51,6 +51,15 @@ MIMIC_EE_BODY_NAMES = (
     "left_wrist_yaw_link",
     "right_wrist_yaw_link",
 )
+# Bodies whose z-tracking error actually triggers episode termination. The wrists are
+# intentionally excluded: the PD reference (zero-residual teacher) physically cannot hold
+# the wrists within EE_Z_TERMINATION_THRESHOLD during the crawl, so killing on wrist error
+# caps even a perfect teacher at ~35 steps. Wrist tracking is still rewarded (it stays in
+# the tracked-body reward set) and wrist z error is logged for diagnostics.
+MIMIC_TERMINATION_BODY_NAMES = (
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+)
 MIMIC_FOOT_BODY_NAMES = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
@@ -207,6 +216,7 @@ class MimicEnvConfig(EnvConfig):
     action_l2_weight: float = 0.0
     track_body_names: tuple[str, ...] = MIMIC_BODY_NAMES
     ee_body_names: tuple[str, ...] = MIMIC_EE_BODY_NAMES
+    termination_body_names: tuple[str, ...] = MIMIC_TERMINATION_BODY_NAMES
     foot_body_names: tuple[str, ...] = MIMIC_FOOT_BODY_NAMES
     anchor_body_name: str = MIMIC_ANCHOR_BODY_NAME
     # Deprecated compatibility field. Actor observations use the verified legacy input:
