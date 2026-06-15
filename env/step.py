@@ -14,7 +14,6 @@ class MimicStepMixin:
         loop_motion: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         previous_action = self.last_action.clone()
-        previous_previous_action = self.prev_action.clone()
         self._apply_action_targets(action_offsets)
         for _ in range(self.decimation):
             self.scene.write_data_to_sim()
@@ -43,7 +42,7 @@ class MimicStepMixin:
             self._resample_finished_motions()
 
         termination_phase_steps = self.phase_steps.clone()
-        reward, reward_terms = self.compute_reward(action_offsets, previous_action, previous_previous_action)
+        reward, reward_terms = self.compute_reward(action_offsets, previous_action)
         done, done_terms, debug_terms = self.compute_termination()
         terminal_observation = None
 
@@ -54,11 +53,15 @@ class MimicStepMixin:
                 reset_phases = self.sample_phase_indices(env_ids.numel(), horizon=max(1, reset_horizon))
                 self.reset_envs(env_ids, phase_indices=reset_phases)
 
-        self.prev_action = previous_action.clone()
         self.last_action = action_offsets.clone()
         if auto_reset and bool(done.any()):
-            self.prev_action[done] = 0.0
             self.last_action[done] = 0.0
+        # Maintain prev_action (the action one step before last_action) so the actor can observe
+        # the last inter-frame velocity (last_action - prev_action), the C1 boundary state the
+        # action parametrization integrates from. On reset both collapse to 0 (zero velocity).
+        self.prev_action = previous_action
+        if auto_reset and bool(done.any()):
+            self.prev_action[done] = 0.0
         self._apply_interval_pushes()
         observation = self.get_observation()
         info = {
@@ -85,15 +88,62 @@ class MimicStepMixin:
         velocity_range = torch.tensor(VELOCITY_RANGE, dtype=torch.float32, device=self.device)
         low = velocity_range[:, 0].unsqueeze(0)
         high = velocity_range[:, 1].unsqueeze(0)
-        velocity_delta = low + (high - low) * torch.rand((due_env_ids.numel(), 6), device=self.device)
+        velocity_delta = low + (high - low) * self._group_shared_push_rand(due_env_ids, 6)
         root_velocity = self.robot.data.root_vel_w.index_select(0, due_env_ids) + velocity_delta
         self.robot.write_root_velocity_to_sim(root_velocity, env_ids=due_env_ids)
 
         min_interval, max_interval = PUSH_INTERVAL_STEP_RANGE
-        self.next_push_step[due_env_ids] = self.episode_steps[due_env_ids] + torch.randint(
+        next_interval = self._group_shared_push_interval(due_env_ids, min_interval, max_interval)
+        self.next_push_step[due_env_ids] = self.episode_steps[due_env_ids] + next_interval
+
+    def _group_shared_push_interval(
+        self,
+        due_env_ids: torch.Tensor,
+        min_interval: int,
+        max_interval: int,
+    ) -> torch.Tensor:
+        """Next push interval (in steps), shared across a GRPO group.
+
+        The branches of a group are pushed in lockstep (their `next_push_step` is replicated
+        from the carrier and they share the impulse), so the *next* interval must also be
+        shared or the groups would desynchronize after the first push — which matters for long
+        rollouts / the tail window. With group_size <= 1 this is plain independent per-env
+        sampling.
+        """
+        group_size = int(getattr(self, "group_size", 1))
+        if group_size <= 1:
+            return torch.randint(
+                min_interval,
+                max_interval + 1,
+                (due_env_ids.numel(),),
+                dtype=torch.long,
+                device=self.device,
+            )
+        num_groups = (self.num_envs + group_size - 1) // group_size
+        group_interval = torch.randint(
             min_interval,
             max_interval + 1,
-            (due_env_ids.numel(),),
+            (num_groups,),
             dtype=torch.long,
             device=self.device,
         )
+        group_of_due = (due_env_ids // group_size).long()
+        return group_interval.index_select(0, group_of_due)
+
+    def _group_shared_push_rand(self, due_env_ids: torch.Tensor, dim: int) -> torch.Tensor:
+        """Per-due-env uniform[0,1) push samples that are shared across a GRPO group.
+
+        The branches of a group are kept on an identical physical state and are pushed in
+        lockstep (their `next_push_step` is replicated from the group leader), so a push is
+        due for either all branches of a group or none of them. To keep the same-state GRPO
+        comparison clean, every branch in a group must receive the *same* push impulse, so we
+        draw one sample per group index and gather it back to the due envs. With group_size
+        <= 1 this is plain independent per-env noise.
+        """
+        group_size = int(getattr(self, "group_size", 1))
+        if group_size <= 1:
+            return torch.rand((due_env_ids.numel(), dim), device=self.device)
+        num_groups = (self.num_envs + group_size - 1) // group_size
+        group_rand = torch.rand((num_groups, dim), device=self.device)
+        group_of_due = (due_env_ids // group_size).long()
+        return group_rand.index_select(0, group_of_due)

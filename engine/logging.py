@@ -35,8 +35,7 @@ class LoggingMixin:
             f"raw_max={metrics.get('group/reward_raw_max', float('nan')):.5f} "
             f"score_mean={metrics.get('group/score_reward_mean', float('nan')):.5f} "
             f"rtg_mean={metrics.get('group/reward_to_go_mean', float('nan')):.5f} "
-            f"grpo_score={metrics.get('group/grpo_score_mean', float('nan')):.5f} "
-            f"early_penalty={metrics.get('group/early_stop_penalty_mean', float('nan')):.5f}",
+            f"grpo_score={metrics.get('group/grpo_score_mean', float('nan')):.5f}",
             flush=True,
         )
         self._log_phase_and_step_rewards("PHASE", "CHUNK_REWARD", metrics)
@@ -63,11 +62,7 @@ class LoggingMixin:
             f"start_min={metrics.get('phase/start_min', float('nan')):.0f} "
             f"start_max={metrics.get('phase/start_max', float('nan')):.0f} "
             f"start_at_min={metrics.get('phase/start_at_min_frac', float('nan')):.5f} "
-            f"fail_rel_mean={metrics.get('rollout/first_failure_relative_phase_mean', float('nan')):.2f} "
-            f"sampler_fail={metrics.get('sampler/failure_rate_mean', float('nan')):.3f} "
-            f"sampler_max={metrics.get('sampler/failure_rate_max', float('nan')):.3f} "
-            f"sampler_top_bin={metrics.get('sampler/top_bin', float('nan')):.0f} "
-            f"sampler_entropy={metrics.get('sampler/entropy', float('nan')):.3f}",
+            f"fail_rel_mean={metrics.get('rollout/first_failure_relative_phase_mean', float('nan')):.2f}",
             flush=True,
         )
         print(
@@ -85,8 +80,6 @@ class LoggingMixin:
         print(
             f"[POLICY] loss={metrics['policy/loss']:.5f} "
             f"policy_loss={metrics['policy/policy_loss']:.5f} "
-            f"value_loss={metrics.get('policy/value_loss', float('nan')):.5f} "
-            f"entropy={metrics.get('policy/entropy', float('nan')):.5f} "
             f"kl={metrics.get('policy/kl_loss', float('nan')):.5f} "
             f"step_ratio={metrics.get('policy/step_ratio', float('nan')):.4f} "
             f"step_clip={metrics.get('policy/step_clip_frac', float('nan')):.4f} "
@@ -94,16 +87,8 @@ class LoggingMixin:
             f"post_clip={metrics.get('policy/post_clip_frac', metrics['policy/clip_frac']):.4f} "
             f"grad={metrics['policy/grad_norm']:.5f} "
             f"lr={metrics.get('policy/lr', float('nan')):.6f} "
-            f"critic_lr={metrics.get('policy/critic_lr', float('nan')):.6f} "
             f"sde_steps={metrics.get('policy/sde_train_steps', float('nan')):.0f} "
             f"opt_steps={metrics.get('policy/optimizer_steps', float('nan')):.0f}",
-            flush=True,
-        )
-        print(
-            f"[JOINT_KL] "
-            f"joint_kl={metrics.get('policy/joint_kl', float('nan')):.5f} "
-            f"joint_ratio={metrics.get('policy/joint_ratio', float('nan')):.4f} "
-            f"joint_clip={metrics.get('policy/joint_clip_frac', float('nan')):.4f}",
             flush=True,
         )
         self._log_policy_detail("POLICY_DETAIL", metrics, include_grpo=True)
@@ -212,9 +197,6 @@ class LoggingMixin:
         print(
             f"[TRAIN_COST] "
             f"action_rate={metrics.get('reward/action_rate_mean', float('nan')):.5f} "
-            f"action_accel={metrics.get('reward/action_accel_mean', float('nan')):.5f} "
-            f"action_l2={metrics.get('reward/action_l2_mean', float('nan')):.5f} "
-            f"joint_torque={metrics.get('reward/joint_torque_mean', float('nan')):.5f} "
             f"joint_limit={metrics.get('reward/joint_limit_mean', float('nan')):.5f} "
             f"undesired_contacts={metrics.get('reward/undesired_contacts_mean', float('nan')):.5f}",
             flush=True,
@@ -225,9 +207,6 @@ class LoggingMixin:
             f"penalty={metrics.get('reward_weighted/penalty', float('nan')):.5f} "
             f"total={metrics.get('reward_weighted/total', float('nan')):.5f} "
             f"act_rate={metrics.get('reward_weighted/action_rate', float('nan')):.5f} "
-            f"act_accel={metrics.get('reward_weighted/action_accel', float('nan')):.5f} "
-            f"act_l2={metrics.get('reward_weighted/action_l2', float('nan')):.5f} "
-            f"torque={metrics.get('reward_weighted/joint_torque', float('nan')):.5f} "
             f"contacts={metrics.get('reward_weighted/undesired_contacts', float('nan')):.5f}",
             flush=True,
         )
@@ -236,7 +215,7 @@ class LoggingMixin:
             f"abs_mean={metrics.get('act/abs_mean', float('nan')):.4f} "
             f"abs_p95={metrics.get('act/abs_p95', float('nan')):.4f} "
             f"abs_p99={metrics.get('act/abs_p99', float('nan')):.4f} "
-            f"abs_max={metrics.get('act/abs_max', float('nan')):.4f} "
+            f"abs_max_exec={metrics.get('act/abs_max', float('nan')):.4f} "
             f"abs_max_all={metrics.get('act/abs_max_all', float('nan')):.4f} "
             f"legs={metrics.get('act/legs_abs', float('nan')):.4f} "
             f"waist={metrics.get('act/waist_abs', float('nan')):.4f} "
@@ -253,6 +232,8 @@ class LoggingMixin:
             f"frame1_abs={metrics.get('act/frame1_abs_mean', float('nan')):.4f} "
             f"in_chunk_delta={metrics.get('act/in_chunk_delta_abs', float('nan')):.4f} "
             f"cross_chunk_delta={metrics.get('act/cross_chunk_delta_abs', float('nan')):.4f} "
+            f"in_chunk_accel={metrics.get('act/in_chunk_accel_abs', float('nan')):.4f} "
+            f"cross_chunk_accel={metrics.get('act/cross_chunk_accel_abs', float('nan')):.4f} "
             f"frame0_reward={metrics.get('reward/frame0_mean', float('nan')):.5f} "
             f"frame1_reward={metrics.get('reward/frame1_mean', float('nan')):.5f}",
             flush=True,

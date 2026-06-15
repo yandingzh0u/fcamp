@@ -34,15 +34,10 @@ class CheckpointMixin:
             "policy": self.policy.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "metrics": metrics,
-            # Resume continuity: the adaptive KL-controlled LR and the adaptive phase sampler
-            # state must survive a resume, otherwise the curriculum restarts from scratch and
-            # the LR snaps back to the initial value.
+            # Resume continuity: the adaptive KL-controlled LR must survive a resume, otherwise
+            # the LR snaps back to the initial value on reload.
             "learning_rate": float(getattr(self, "learning_rate", self.cfg.policy_lr)),
         }
-        if hasattr(self.env, "bin_failed_count"):
-            payload["adaptive_bin_failed_count"] = self.env.bin_failed_count.detach().cpu()
-        if hasattr(self.env, "bin_exposure_count"):
-            payload["adaptive_bin_exposure_count"] = self.env.bin_exposure_count.detach().cpu()
         try:
             payload["torch_rng_state"] = torch.random.get_rng_state()
             if torch.cuda.is_available():
@@ -60,7 +55,23 @@ class CheckpointMixin:
         if not checkpoint_path.is_file():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
         payload = torch.load(checkpoint_path, map_location=self.env.device)
-        self.policy.load_state_dict(payload["policy"])
+        try:
+            self.policy.load_state_dict(payload["policy"])
+        except RuntimeError as exc:
+            # Checkpoints from before the current architecture are NOT resumable and must be
+            # retrained from scratch. Several changes broke weight/layout compatibility:
+            #   * the actor observation gained the multi-contact support term (OBS_DIM 163->167),
+            #     and the contact features were inserted mid-vector (forcing policy_obs_dim back
+            #     would mis-align every downstream feature);
+            #   * the action parametrization changed to the anchored incremental-trajectory
+            #     coefficient latent (different velocity_net output semantics and basis).
+            raise RuntimeError(
+                f"Failed to load policy weights from {checkpoint_path}. This is expected for "
+                "checkpoints trained before the current architecture (support-contact observation "
+                "AND anchored incremental-trajectory action parametrization). The observation "
+                "layout and the action latent both changed, so old checkpoints are not resumable "
+                f"and must be retrained from scratch. Original error: {exc}"
+            ) from exc
         reset_optimizer = bool(getattr(self.cfg, "reset_optimizer_on_resume", False))
         if reset_optimizer:
             print(
@@ -83,31 +94,6 @@ class CheckpointMixin:
             param_group["lr"] = resume_lr
         if hasattr(self, "learning_rate"):
             self.learning_rate = resume_lr
-
-        # Restore adaptive phase-sampler history so the failure-weighted curriculum continues
-        # instead of restarting from a near-uniform cold state.
-        has_rate_state = "adaptive_bin_failed_count" in payload and "adaptive_bin_exposure_count" in payload
-        if not reset_optimizer and has_rate_state and hasattr(self.env, "bin_exposure_count"):
-            saved_bins = payload["adaptive_bin_failed_count"].to(self.env.bin_failed_count)
-            saved_exposure = payload["adaptive_bin_exposure_count"].to(self.env.bin_exposure_count)
-            if saved_bins.shape == self.env.bin_failed_count.shape and saved_exposure.shape == self.env.bin_exposure_count.shape:
-                self.env.bin_failed_count.copy_(saved_bins)
-                self.env.bin_exposure_count.copy_(saved_exposure)
-                print("[CHECKPOINT] restored adaptive sampler failure/exposure state.", flush=True)
-            else:
-                print(
-                    f"[CHECKPOINT] adaptive bin shape mismatch (saved {tuple(saved_bins.shape)} vs "
-                    f"env {tuple(self.env.bin_failed_count.shape)}); keeping fresh sampler state.",
-                    flush=True,
-                )
-        elif not reset_optimizer and "adaptive_bin_failed_count" in payload and hasattr(self.env, "bin_exposure_count"):
-            self.env.bin_failed_count.zero_()
-            self.env.bin_exposure_count.zero_()
-            print(
-                "[CHECKPOINT] legacy adaptive sampler state has no exposure counts; "
-                "starting the failure-rate sampler fresh.",
-                flush=True,
-            )
 
         # Restore RNG streams for reproducible continuation.
         if not reset_optimizer:

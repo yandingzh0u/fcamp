@@ -78,11 +78,12 @@ parser.add_argument(
 parser.add_argument(
     "--rollout_env_steps",
     type=int,
-    default=48,
+    default=120,
     help=(
         "Fixed environment frames per GRPO update. Effective chunks are "
         "rollout_env_steps // horizon and must divide exactly. "
-        "Set <=0 to use --chunks_per_rollout directly."
+        "Set <=0 to use --chunks_per_rollout directly. 120 = 10 chunks of horizon 12, "
+        "covering the ~74-frame death region while every frame is trained (no open-loop tail)."
     ),
 )
 parser.add_argument(
@@ -92,64 +93,15 @@ parser.add_argument(
     help="Number of env-frames each policy chunk advances; chunk reward = discounted sum across these frames.",
 )
 parser.add_argument(
-    "--frame_factorized",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help=(
-        "Frame-Factorized h>1: per-frame log_prob / reward / RTG / advantage / PPO ratio. "
-        "Atomic root-cause fix (design S2-S5). Default off keeps chunk-level behavior. "
-        "No-op when horizon=1 (numerically equivalent to current path)."
-    ),
-)
-parser.add_argument(
-    "--joint_kl_guard",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help=(
-        "Joint-KL safety guard. Only intervenes (forces lr down) when BOTH this and "
-        "--frame_factorized are set; otherwise it only reports joint_kl/joint_ratio metrics."
-    ),
-)
-parser.add_argument(
     "--basis_count",
     type=int,
     default=4,
     help=(
-        "Temporal-basis coefficient count for h>1 action chunks. The flow/log_prob run in a "
-        "basis_count*action_dim coefficient latent; a fixed low-frequency basis expands to the "
-        "horizon-frame chunk (smooth-trajectory prior). 0 = basis_count=horizon = legacy flat."
+        "Velocity-basis coefficient count for h>1 action chunks. The flow/log_prob run in a "
+        "basis_count*action_dim coefficient latent of low-frequency velocity modes; these are "
+        "integrated into a displacement trajectory (first frame 0) anchored to the previous "
+        "residual so cross-chunk continuity is intrinsic. Clamped to [1, horizon-1]. 0 = horizon-1."
     ),
-)
-parser.add_argument(
-    "--chunk_stitch_frames",
-    type=int,
-    default=0,
-    help=(
-        "Blend the first N decoded residual-action frames from the previous executed "
-        "last_action into the raw policy chunk. 0 disables."
-    ),
-)
-parser.add_argument(
-    "--chunk_stitch_mode",
-    choices=("none", "linear", "smoothstep"),
-    default="smoothstep",
-    help="Blend curve for --chunk_stitch_frames.",
-)
-parser.add_argument(
-    "--tail_bootstrap_steps",
-    type=int,
-    default=80,
-    help=(
-        "Roll out the deterministic policy for this many env steps after each GRPO window "
-        "to estimate a Monte-Carlo tail return as last_values for GAE/RTG. 0 disables. "
-        "Lets the policy see failures shortly after the window without adding a critic."
-    ),
-)
-parser.add_argument(
-    "--terminal_penalty",
-    type=float,
-    default=50.0,
-    help="Extra GRPO sample-score penalty for early termination inside a rollout. 50 dominates the +8/chunk in-life reward, so 'slow-sink-then-die' becomes RTG-negative vs trying to stay upright.",
 )
 parser.add_argument("--discount_gamma", type=float, default=0.99, help="Chunk return-to-go discount for GRPO advantages.")
 parser.add_argument(
@@ -167,13 +119,6 @@ parser.add_argument(
 parser.add_argument("--adv_clip_max", type=float, default=5.0, help="Clamp absolute advantages in the MixGRPO policy loss.")
 parser.add_argument("--desired_kl", type=float, default=0.06, help="Adaptive learning-rate KL target.")
 parser.add_argument("--kl_penalty_coef", type=float, default=0.0, help="KL penalty coefficient added to the policy loss. 0 disables (standard PPO clip only).")
-parser.add_argument("--entropy_coef", type=float, default=0.005, help="Entropy coefficient. Default matches Unitree PPO.")
-parser.add_argument(
-    "--value_loss_coef",
-    type=float,
-    default=0.0,
-    help="Optional critic value loss coefficient. Default 0 follows official MixGRPO pure actor update.",
-)
 parser.add_argument(
     "--num_mini_batches",
     type=int,
@@ -203,11 +148,7 @@ parser.add_argument(
     default=1.0,
     help="Multiplier on the env residual action scale. Values like 0.25 make the policy stay closer to the reference pose.",
 )
-parser.add_argument("--joint_acc_weight", type=float, default=2.5e-7, help="Reward penalty weight for joint acceleration.")
-parser.add_argument("--joint_torque_weight", type=float, default=1.0e-5, help="Reward penalty weight for joint torque.")
 parser.add_argument("--action_rate_weight", type=float, default=1.0e-1, help="Reward penalty weight for action delta.")
-parser.add_argument("--action_accel_weight", type=float, default=0.0, help="Reward penalty weight for second-order action delta.")
-parser.add_argument("--action_l2_weight", type=float, default=0.0, help="Reward penalty weight for residual action magnitude.")
 parser.add_argument("--max_episode_steps", type=int, default=-1, help="Episode time-out in steps. <=0 follows the motion clip length (recommended), so finishing the whole motion is the success bar.")
 parser.add_argument(
     "--startup_randomization",
@@ -236,31 +177,22 @@ parser.add_argument(
 parser.add_argument("--motion_start_phase", type=int, default=0, help="First reference phase sampled for training resets.")
 parser.add_argument("--motion_end_phase", type=int, default=-1, help="Last reference phase sampled for training resets. Negative uses motion end.")
 parser.add_argument(
-    "--adaptive_motion_sampling",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-    help="Sample training reset phases from failure-weighted bins. Default on; use --no-adaptive_motion_sampling for uniform phase sampling.",
-)
-parser.add_argument(
-    "--adaptive_uniform_ratio",
-    type=float,
-    default=0.1,
-    help="Exact probability mass reserved for uniform phase sampling when adaptive sampling is enabled.",
-)
-parser.add_argument(
     "--motion_start_phase_ratio",
     type=float,
     default=0.25,
-    help="Exact per-update group fraction pinned to motion_start_phase (crawl default: 0.25).",
+    help=(
+        "Per-update group fraction pinned exactly to phase 0; the remaining (1-ratio) is "
+        "stratified-uniform over the whole clip. Default 0.25 so the real deployment entry "
+        "(phase 0) is not starved to ~0.1% under pure uniform sampling, while still covering "
+        "the full motion. Not adaptive."
+    ),
 )
-parser.add_argument("--adaptive_alpha", type=float, default=0.001, help="EMA update rate for adaptive failure bins.")
-parser.add_argument("--adaptive_kernel_size", type=int, default=1, help="Smoothing kernel width for adaptive failure bins.")
 parser.add_argument("--motion_file", type=str, default="", help="Optional override for the dance npz path.")
 parser.add_argument("--run_name", type=str, default="", help="Optional run folder name under --run_root.")
 parser.add_argument("--run_root", type=str, default="runs", help="Root directory for automatic logs and checkpoints.")
 parser.add_argument("--checkpoint_dir", type=str, default="", help="Directory for saving checkpoints. Defaults to runs/<run_name>/checkpoints.")
 parser.add_argument("--log_file", type=str, default="", help="Path for train stdout/stderr log. Defaults to runs/<run_name>/logs/train.log.")
-parser.add_argument("--save_every", type=int, default=100, help="Save a checkpoint every N updates. 0 disables.")
+parser.add_argument("--save_every", type=int, default=50, help="Save a checkpoint every N updates. 0 disables.")
 parser.add_argument("--resume", type=str, default="", help="Optional checkpoint path to resume from.")
 parser.add_argument(
     "--reset_optimizer_on_resume",
@@ -269,7 +201,7 @@ parser.add_argument(
     help="Load policy weights from --resume but start a fresh optimizer state.",
 )
 parser.add_argument("--log_every", type=int, default=1, help="Print metrics every N updates.")
-parser.add_argument("--validation_every", type=int, default=100, help="Run a validation rollout every N updates. 0 disables.")
+parser.add_argument("--validation_every", type=int, default=50, help="Run a validation rollout every N updates. 0 disables.")
 parser.add_argument("--validation_max_steps", type=int, default=1500, help="Max simulation steps per validation rollout.")
 parser.add_argument("--validation_start_phase", type=int, default=0, help="Reference motion phase for validation resets.")
 parser.add_argument("--validation_done_frac_early_stop", type=float, default=0.98, help="Stop a validation rollout once this fraction of envs have terminated (trims the long survivor tail).")
@@ -370,29 +302,17 @@ def main() -> None:
         startup_randomization=args_cli.startup_randomization,
         motion_start_phase=args_cli.motion_start_phase,
         motion_end_phase=args_cli.motion_end_phase,
-        adaptive_motion_sampling=args_cli.adaptive_motion_sampling,
-        adaptive_uniform_ratio=args_cli.adaptive_uniform_ratio,
         motion_start_phase_ratio=args_cli.motion_start_phase_ratio,
-        adaptive_alpha=args_cli.adaptive_alpha,
-        adaptive_kernel_size=args_cli.adaptive_kernel_size,
         max_episode_steps=args_cli.max_episode_steps,
         motion_file=motion_file,
         reset_noise=args_cli.reset_noise,
         interval_pushes=args_cli.interval_pushes,
         observation_noise=args_cli.observation_noise,
-        joint_acc_weight=args_cli.joint_acc_weight,
-        joint_torque_weight=args_cli.joint_torque_weight,
         action_rate_weight=args_cli.action_rate_weight,
-        action_accel_weight=args_cli.action_accel_weight,
-        action_l2_weight=args_cli.action_l2_weight,
         action_dim=args_cli.action_dim,
         policy_obs_dim=args_cli.policy_obs_dim,
         horizon=args_cli.horizon,
         basis_count=args_cli.basis_count,
-        chunk_stitch_frames=args_cli.chunk_stitch_frames,
-        chunk_stitch_mode=args_cli.chunk_stitch_mode,
-        frame_factorized=args_cli.frame_factorized,
-        joint_kl_guard=args_cli.joint_kl_guard,
         actor_hidden_dims=tuple(args_cli.actor_hidden_dims),
         activation=args_cli.activation,
         flow_steps=args_cli.flow_steps,
@@ -405,15 +325,11 @@ def main() -> None:
         num_generations=args_cli.num_generations,
         rollout_env_steps=args_cli.rollout_env_steps,
         chunks_per_rollout=args_cli.chunks_per_rollout,
-        tail_bootstrap_steps=args_cli.tail_bootstrap_steps,
-        terminal_penalty=args_cli.terminal_penalty,
         discount_gamma=args_cli.discount_gamma,
         clip_range=args_cli.clip_range,
         adv_clip_max=args_cli.adv_clip_max,
         desired_kl=args_cli.desired_kl,
         kl_penalty_coef=args_cli.kl_penalty_coef,
-        entropy_coef=args_cli.entropy_coef,
-        value_loss_coef=args_cli.value_loss_coef,
         policy_epochs=args_cli.policy_epochs,
         num_mini_batches=args_cli.num_mini_batches,
         mini_batch_size=args_cli.mini_batch_size,

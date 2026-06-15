@@ -28,7 +28,7 @@ class ValidationMixin:
             validation_max_steps = max(validation_max_steps, target_steps + 1)
         return max(1, validation_max_steps)
 
-    def run_validation_rollout(self, fixed_seed: int | None = None) -> dict[str, float]:
+    def run_validation_rollout(self, fixed_seed: int | None = None, clean: bool = True) -> dict[str, float]:
         was_training = self.policy.training
         self.policy.eval()
         preserve_state = bool(getattr(self.cfg, "validation_preserve_state", False))
@@ -42,7 +42,22 @@ class ValidationMixin:
         cpu_rng_state = torch.random.get_rng_state()
         cuda_rng_state = None
         original_observation_noise = getattr(self.env.task_cfg, "observation_noise", True)
-        self.env.task_cfg.observation_noise = bool(getattr(self.cfg, "validation_observation_noise", False))
+        original_reset_noise = getattr(self.env.task_cfg, "reset_noise", True)
+        original_interval_pushes = getattr(self.env.task_cfg, "interval_pushes", True)
+        # Two validation modes:
+        #   clean=True  : pure deterministic playback — no observation noise, NO reset noise,
+        #                 NO interval pushes. Measures whether the action sequence itself was
+        #                 learned (this is what phase-0 deployment actually runs).
+        #   clean=False : robust validation — keeps the training-time perturbations to measure
+        #                 robustness. Lets us separate "didn't learn the motion" from "not robust".
+        if clean:
+            self.env.task_cfg.observation_noise = False
+            self.env.task_cfg.reset_noise = False
+            self.env.task_cfg.interval_pushes = False
+        else:
+            self.env.task_cfg.observation_noise = bool(getattr(self.cfg, "validation_observation_noise", False))
+            self.env.task_cfg.reset_noise = True
+            self.env.task_cfg.interval_pushes = True
         if torch.cuda.is_available() and env_device.type == "cuda":
             cuda_rng_state = torch.cuda.get_rng_state(env_device)
         if fixed_seed is not None and torch.cuda.is_available() and env_device.type == "cuda":
@@ -75,7 +90,7 @@ class ValidationMixin:
             "ee_z_error_max": torch.zeros(self.cfg.num_envs, device=self.env.device),
             "ee_z_error_mean": torch.zeros(self.cfg.num_envs, device=self.env.device),
             "anchor_z_error": torch.zeros(self.cfg.num_envs, device=self.env.device),
-            "anchor_gravity_z_error": torch.zeros(self.cfg.num_envs, device=self.env.device),
+            "anchor_tilt_error": torch.zeros(self.cfg.num_envs, device=self.env.device),
         }
         ee_body_count = len(self.env.ee_body_names)
         done_ee_z_error_record = torch.zeros(self.cfg.num_envs, ee_body_count, device=self.env.device)
@@ -167,6 +182,8 @@ class ValidationMixin:
                         break
         finally:
             self.env.task_cfg.observation_noise = original_observation_noise
+            self.env.task_cfg.reset_noise = original_reset_noise
+            self.env.task_cfg.interval_pushes = original_interval_pushes
             if training_snapshot is not None and hasattr(self, "_restore_env_state"):
                 self._restore_env_state(training_snapshot)
                 if training_observation is not None:
@@ -206,7 +223,9 @@ class ValidationMixin:
                 "validation/ee_z_max": float(done_debug_record["ee_z_error_max"][done].mean().item()),
                 "validation/ee_z_mean": float(done_debug_record["ee_z_error_mean"][done].mean().item()),
                 "validation/anchor_z": float(done_debug_record["anchor_z_error"][done].mean().item()),
-                "validation/anchor_gravity": float(done_debug_record["anchor_gravity_z_error"][done].mean().item()),
+                "validation/anchor_tilt_deg": float(
+                    done_debug_record["anchor_tilt_error"][done].mean().item() * (180.0 / 3.14159265)
+                ),
             })
             for index, body_name in enumerate(self.env.ee_body_names):
                 short_name = _short_body_name(body_name)

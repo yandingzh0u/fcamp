@@ -4,10 +4,8 @@ import torch
 
 from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
 
-from .adaptive_sampling import (
+from .phase_sampling import (
     allocate_sampling_counts,
-    build_adaptive_phase_probabilities,
-    compute_failure_rates,
     stratified_uniform_offsets,
 )
 from .config import (
@@ -67,6 +65,24 @@ class G1MimicEnv(
             dtype=torch.long,
             device=self.device,
         )
+        # Resolve the support-contact bodies the actor observes. For the hands the requested
+        # tracking body is the wrist (wrist_yaw_link), but the actual ground collider is the
+        # half-sphere `*_sphere_hand_link`. If the contact sensor exposes the sphere hand body
+        # we read THAT (so the hand-contact observation is real); otherwise the half-sphere was
+        # merged into the wrist rigid body (merge_fixed_joints) and the wrist body carries the
+        # contact force, so we fall back to the wrist. This prevents a silently-zero hand contact.
+        self.support_contact_body_names = self._resolve_support_contact_bodies(
+            list(getattr(cfg, "support_contact_body_names", cfg.foot_body_names))
+        )
+        self.support_contact_body_ids = torch.tensor(
+            [self.contact_sensor.body_names.index(name) for name in self.support_contact_body_names],
+            dtype=torch.long,
+            device=self.device,
+        )
+        # Generations-per-group for GRPO. Used to share per-step environment stochasticity
+        # (observation noise + interval pushes) across the branches of a group so the only
+        # difference between same-group branches is the policy's own action sampling.
+        self.group_size = max(1, int(getattr(cfg, "group_size", 1)))
         self.motion = MimicMotionReference(
             cfg.motion_file,
             self.track_body_ids,
@@ -76,7 +92,7 @@ class G1MimicEnv(
             action_joint_names=list(G1_29DOF_ACTION_NAMES),
             root_body_name="pelvis",
         )
-        self._init_adaptive_motion_sampling()
+        self._init_phase_sampling()
 
         # Adaptive episode cap: when max_episode_steps <= 0, the time-out follows the motion
         # length so "survive the whole clip" is the real success bar instead of an arbitrary
@@ -106,6 +122,13 @@ class G1MimicEnv(
         return CRITIC_OBS_DIM
 
     def sample_phase_indices(self, num_samples: int, horizon: int) -> torch.Tensor:
+        """Diagnostic-baseline phase sampler: fixed phase-0 coverage + stratified uniform.
+
+        Every call independently samples start phases with no adaptive/failure weighting and
+        no survivor carry-over. A fixed fraction (motion_start_phase_ratio) is pinned to the
+        clip start so the motion opening is always covered; the rest is stratified-uniform
+        over the full valid range so the whole clip gets near-complete coverage each update.
+        """
         if num_samples < 0:
             raise ValueError(f"num_samples must be >= 0, got {num_samples}")
         if num_samples == 0:
@@ -118,28 +141,10 @@ class G1MimicEnv(
         )
         if max_phase < min_phase:
             return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
-        if not self.adaptive_motion_sampling:
-            return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
 
-        failure_rates = compute_failure_rates(self.bin_failed_count, self.bin_exposure_count)
-        failure_rates = torch.nn.functional.pad(
-            failure_rates.unsqueeze(0).unsqueeze(0),
-            (0, self.adaptive_kernel_size - 1),
-            mode="replicate",
-        )
-        failure_rates = torch.nn.functional.conv1d(
-            failure_rates,
-            self.adaptive_kernel.view(1, 1, -1),
-        ).view(-1)
         candidate_phases = torch.arange(min_phase, max_phase + 1, dtype=torch.long, device=self.device)
-        adaptive_probabilities = build_adaptive_phase_probabilities(
-            failure_rates,
-            candidate_phases,
-            motion_num_frames=self.motion.num_frames,
-        )
-        start_count, uniform_count, adaptive_count = allocate_sampling_counts(
+        start_count, uniform_count = allocate_sampling_counts(
             num_samples,
-            uniform_ratio=self.adaptive_uniform_ratio,
             start_phase_ratio=self.motion_start_phase_ratio,
         )
         sampled_phases = []
@@ -152,9 +157,6 @@ class G1MimicEnv(
                 device=self.device,
             )
             sampled_phases.append(candidate_phases.index_select(0, uniform_offsets))
-        if adaptive_count > 0:
-            sampled_offsets = torch.multinomial(adaptive_probabilities, adaptive_count, replacement=True)
-            sampled_phases.append(candidate_phases.index_select(0, sampled_offsets))
         phases = torch.cat(sampled_phases)
         return phases.index_select(0, torch.randperm(num_samples, device=self.device))
 
@@ -250,65 +252,40 @@ class G1MimicEnv(
         action_targets = ref_joint_pos + self.action_scale * action_offsets
         self.robot.set_joint_position_target(action_targets, joint_ids=self.action_joint_ids)
 
-    def _init_adaptive_motion_sampling(self) -> None:
-        self.bin_count = int(self.motion.num_frames // (1.0 / self.dt)) + 1
-        self.bin_count = max(self.bin_count, 1)
-        self.bin_failed_count = torch.zeros(self.bin_count, dtype=torch.float32, device=self.device)
-        self.bin_exposure_count = torch.zeros(self.bin_count, dtype=torch.float32, device=self.device)
-        self.adaptive_motion_sampling = bool(self.task_cfg.adaptive_motion_sampling)
-        self.adaptive_kernel_size = max(1, int(self.task_cfg.adaptive_kernel_size))
-        self.adaptive_uniform_ratio = min(1.0, max(0.0, float(self.task_cfg.adaptive_uniform_ratio)))
+    def _resolve_support_contact_bodies(self, requested_names: list[str]) -> list[str]:
+        """Map each requested support body to a body the contact sensor actually exposes.
+
+        For wrist bodies, prefer the dedicated half-sphere hand collider (`*_sphere_hand_link`)
+        if the contact sensor reports it, because that is the link whose collision geometry
+        touches the ground during the crawl. If the sphere hand was merged into the wrist rigid
+        body at import (merge_fixed_joints), the sphere body will not exist as a separate sensor
+        body and the wrist carries the contact force, so we keep the wrist name. A hard failure
+        is raised only if neither candidate exists.
+        """
+        sensor_bodies = set(self.contact_sensor.body_names)
+        resolved: list[str] = []
+        for name in requested_names:
+            candidate = name
+            if "wrist_yaw_link" in name:
+                sphere_name = name.replace("wrist_yaw_link", "sphere_hand_link")
+                if sphere_name in sensor_bodies:
+                    candidate = sphere_name
+            if candidate not in sensor_bodies:
+                if name in sensor_bodies:
+                    candidate = name
+                else:
+                    raise KeyError(
+                        f"Support-contact body {name!r} (and fallback {candidate!r}) not found in "
+                        f"contact sensor bodies: {sorted(sensor_bodies)}"
+                    )
+            resolved.append(candidate)
+        print(f"[INFO] support_contact_bodies={resolved}", flush=True)
+        return resolved
+
+    def _init_phase_sampling(self) -> None:
+        # Clean diagnostic baseline: only the fixed phase-0 coverage fraction is configurable.
+        # No adaptive failure bins, no EMA, no kernel — every update samples phases the same way.
         self.motion_start_phase_ratio = min(1.0, max(0.0, float(self.task_cfg.motion_start_phase_ratio)))
-        self.adaptive_alpha = min(1.0, max(0.0, float(self.task_cfg.adaptive_alpha)))
-        kernel = torch.tensor([0.8**i for i in range(self.adaptive_kernel_size)], dtype=torch.float32, device=self.device)
-        self.adaptive_kernel = kernel / kernel.sum()
-
-    def update_adaptive_motion_statistics(
-        self,
-        start_phases: torch.Tensor,
-        failed: torch.Tensor,
-        *,
-        rollout_steps: int,
-    ) -> None:
-        if not self.adaptive_motion_sampling:
-            return
-        if start_phases.shape != failed.shape:
-            raise ValueError("start_phases and failed must have matching shapes")
-        if start_phases.numel() == 0:
-            return
-
-        start_bins = torch.clamp(
-            (start_phases.reshape(-1).long() * self.bin_count) // max(self.motion.num_frames, 1),
-            0,
-            self.bin_count - 1,
-        )
-        batch_exposure = torch.bincount(start_bins, minlength=self.bin_count).to(self.bin_exposure_count)
-        batch_failures = torch.zeros_like(self.bin_failed_count)
-        batch_failures.scatter_add_(0, start_bins, failed.reshape(-1).to(dtype=batch_failures.dtype))
-
-        effective_alpha = 1.0 - (1.0 - self.adaptive_alpha) ** max(1, int(rollout_steps))
-        self.bin_failed_count.mul_(1.0 - effective_alpha).add_(batch_failures, alpha=effective_alpha)
-        self.bin_exposure_count.mul_(1.0 - effective_alpha).add_(
-            batch_exposure,
-            alpha=effective_alpha,
-        )
-
-    def adaptive_sampling_stats(self) -> dict[str, float]:
-        rates = compute_failure_rates(self.bin_failed_count, self.bin_exposure_count)
-        probabilities = rates / rates.sum().clamp_min(1.0e-8)
-        entropy = -(probabilities * probabilities.clamp_min(1.0e-12).log()).sum()
-        if self.bin_count > 1:
-            entropy = entropy / torch.log(torch.tensor(float(self.bin_count), device=self.device))
-        else:
-            entropy = torch.ones_like(entropy)
-        top_rate, top_bin = rates.max(dim=0)
-        return {
-            "failure_rate_mean": float(rates.mean().item()),
-            "failure_rate_max": float(top_rate.item()),
-            "top_bin": float(top_bin.item()),
-            "entropy": float(entropy.item()),
-            "exposure_sum": float(self.bin_exposure_count.sum().item()),
-        }
 
     def _resample_finished_motions(self) -> None:
         env_ids = torch.where(self.phase_steps >= self.motion.num_frames)[0]

@@ -8,7 +8,6 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
-from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
 from .robots.g1 import G1_29DOF_ACTION_NAMES, G1_BASE_CFG, make_g1_cfg
@@ -64,21 +63,51 @@ MIMIC_FOOT_BODY_NAMES = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
 )
+# Support bodies whose contact state is fed to the actor. A crawl is a multi-contact gait:
+# the robot supports itself on feet, knees and hands, so the policy must observe all three
+# pairs (not just the feet) to coordinate the support transitions. Order is left/right
+# foot, left/right knee, left/right hand (wrist).
+MIMIC_SUPPORT_CONTACT_BODY_NAMES = (
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+    "left_knee_link",
+    "right_knee_link",
+    "left_wrist_yaw_link",
+    "right_wrist_yaw_link",
+)
 MIMIC_ANCHOR_BODY_NAME = "torso_link"
-# Body-name substrings whose ground/self contact is NOT penalized. Mirrors the official
-# holosoma crawl whitelist (feet, ankles, wrists, foot contact points, half-sphere hands)
-# so the robot may support itself on hands/knees/feet while crawling the slope.
+# Body-name substrings whose ground/self contact is NOT penalized. The crawl is a
+# hands+knees+feet gait, so the legitimate support contacts (feet/ankles, knees, wrists,
+# foot contact points and the half-sphere hands) are whitelisted; every other body contact
+# is still penalized as undesired. This now matches the comment's intent: knee_link is
+# included so a correct kneeling crawl is not punished.
 CONTACT_ALLOWED_SUBSTRINGS = (
     "ankle_roll_link",
+    "knee_link",
     "wrist_yaw_link",
     "foot_contact_point",
     "sphere_hand_link",
 )
-OBS_DIM = 163
+# 58 reference joint state + 3 anchor pos + 6 anchor ori + 1 anchor z err + 3 root lin vel
+# + 6 support contacts (feet/knees/hands) + 3 base ang vel + 29 joint pos rel
+# + 29 joint vel rel + 29 last_action (a_{t-1}) + 29 prev_action (a_{t-2}) = 196.
+# The decoder derives the latent velocity from (last_action, prev_action) internally; the
+# observation carries both action-space anchors, not an action-space velocity.
+OBS_DIM = 196
 CRITIC_OBS_DIM = 286
 UNDESIRED_CONTACT_THRESHOLD = 1.0
 ANCHOR_Z_TERMINATION_THRESHOLD = 0.5
-ANCHOR_ORI_TERMINATION_THRESHOLD = 0.8
+# Termination on the RELATIVE tilt angle (radians) between the robot and reference anchor
+# orientations: tilt_error = acos(dot(g_ref, g_robot)). Single physically-meaningful quantity
+# shared by termination, the tilt_quality reward term and the validation log.
+# 1.05 rad ~= 60 deg of robot-vs-reference tilt: 0.6 rad (34 deg) was too strict for a crawl
+# with hand-weight-bearing transitions; side-lying is ~90 deg and still terminates. Should be
+# re-calibrated to teacher_p99.9_tilt + 5..10 deg (kept within ~0.9-1.2 rad) once teacher
+# probe data exists.
+ANCHOR_TILT_TERMINATION_THRESHOLD = 1.05
+# Sigma (radians) of the tilt_quality reward term. 0.6 keeps a usable gradient out to the
+# ~60 deg death line (exp(-(1.05/0.6)^2) ~= 0.046), unlike sigma 0.4 which underflowed there.
+TILT_REWARD_SIGMA = 0.6
 EE_Z_TERMINATION_THRESHOLD = 0.35
 RESET_ROOT_POSE_RANGE = (
     (-0.05, 0.05),
@@ -137,21 +166,9 @@ G1_MIMIC_ACTION_SCALE_VALUES = _compute_g1_mimic_action_scale_values()
 
 @configclass
 class G1SceneCfg(InteractiveSceneCfg):
-    terrain = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="plane",
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-        ),
-        visual_material=sim_utils.MdlFileCfg(
-            mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Architecture/Shingles_01.mdl",
-            project_uvw=True,
-        ),
-    )
+    # No separate flat ground plane: the crawl motion is recorded on the slope terrain, so the
+    # slope (spawned per env below) IS the ground. A global z=0 plane would add a phantom floor
+    # under the ramp that the robot can rest on, breaking the contact contract.
     light = AssetBaseCfg(
         prim_path="/World/light",
         spawn=sim_utils.DistantLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
@@ -202,24 +219,23 @@ class MimicEnvConfig(EnvConfig):
     max_episode_steps: int = -1
     motion_start_phase: int = 0
     motion_end_phase: int = -1
-    adaptive_motion_sampling: bool = True
-    adaptive_uniform_ratio: float = 0.1
     motion_start_phase_ratio: float = 0.25
-    adaptive_alpha: float = 0.001
-    adaptive_kernel_size: int = 1
     reset_noise: bool = True
     interval_pushes: bool = True
     observation_noise: bool = True
-    joint_acc_weight: float = 2.5e-7
-    joint_torque_weight: float = 1.0e-5
     action_rate_weight: float = 1.0e-1
-    action_accel_weight: float = 0.0
-    action_l2_weight: float = 0.0
     track_body_names: tuple[str, ...] = MIMIC_BODY_NAMES
     ee_body_names: tuple[str, ...] = MIMIC_EE_BODY_NAMES
     termination_body_names: tuple[str, ...] = MIMIC_TERMINATION_BODY_NAMES
     foot_body_names: tuple[str, ...] = MIMIC_FOOT_BODY_NAMES
+    support_contact_body_names: tuple[str, ...] = MIMIC_SUPPORT_CONTACT_BODY_NAMES
     anchor_body_name: str = MIMIC_ANCHOR_BODY_NAME
+    # Number of GRPO generations per group. The trainer keeps all generations inside a
+    # group on an identical physical state, so the per-step environment stochasticity
+    # (observation noise, interval-push timing and push velocity) must also be shared
+    # within the group. The env reads this to broadcast those random draws group-wise.
+    # 1 disables sharing (every env independent), which is the correct non-GRPO behaviour.
+    group_size: int = 1
     # Deprecated compatibility field. Actor observations use the verified legacy input:
     # current reference only, no future reference frames.
     future_ref_steps: int = 0

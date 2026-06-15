@@ -4,9 +4,24 @@ import torch
 
 
 class EnvStateMixin:
+    def _contact_history_buffers(self) -> dict[str, torch.Tensor]:
+        """Return the contact sensor's rolling buffers keyed by attribute name (or {})."""
+        sensor = getattr(self.env, "contact_sensor", None)
+        if sensor is None:
+            return {}
+        data = getattr(sensor, "_data", None) or getattr(sensor, "data", None)
+        if data is None:
+            return {}
+        buffers: dict[str, torch.Tensor] = {}
+        for attr in ("net_forces_w", "net_forces_w_history", "force_matrix_w", "force_matrix_w_history"):
+            buffer = getattr(data, attr, None)
+            if buffer is not None:
+                buffers[attr] = buffer
+        return buffers
+
     def _snapshot_env_state(self) -> dict[str, torch.Tensor]:
         robot = self.env.robot
-        return {
+        snapshot = {
             "root_state_w": robot.data.root_state_w.clone(),
             "joint_pos": robot.data.joint_pos.clone(),
             "joint_vel": robot.data.joint_vel.clone(),
@@ -20,9 +35,11 @@ class EnvStateMixin:
             "last_action": self.env.last_action.clone(),
             "prev_action": self.env.prev_action.clone(),
             "next_push_step": self.env.next_push_step.clone(),
-            "bin_failed_count": self.env.bin_failed_count.clone(),
-            "bin_exposure_count": self.env.bin_exposure_count.clone(),
         }
+        snapshot["contact_history"] = {
+            attr: buffer.clone() for attr, buffer in self._contact_history_buffers().items()
+        }
+        return snapshot
 
     def _restore_env_state(self, snapshot: dict[str, torch.Tensor]) -> None:
         env_ids = torch.arange(self.env.num_envs, device=self.env.device, dtype=torch.long)
@@ -48,6 +65,11 @@ class EnvStateMixin:
         self.env.default_joint_vel = snapshot["default_joint_vel"].clone()
         self.env.default_action_joint_pos = snapshot["default_action_joint_pos"].clone()
         self.env.default_action_joint_vel = snapshot["default_action_joint_vel"].clone()
-        self.env.bin_failed_count = snapshot["bin_failed_count"].clone()
-        self.env.bin_exposure_count = snapshot["bin_exposure_count"].clone()
+        contact_history = snapshot.get("contact_history", {})
+        if contact_history:
+            live_buffers = self._contact_history_buffers()
+            for attr, saved in contact_history.items():
+                buffer = live_buffers.get(attr)
+                if buffer is not None:
+                    buffer.copy_(saved)
         self.env.scene.update(self.env.physics_dt)

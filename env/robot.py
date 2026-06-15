@@ -44,6 +44,7 @@ class G1Env:
 
         self.sim.set_camera_view(cfg.camera_eye, cfg.camera_target)
         self.sim.reset()
+        self._bind_slope_physics_material()
         if cfg.startup_randomization:
             self._apply_official_startup_events()
 
@@ -91,6 +92,36 @@ class G1Env:
         joint_pos = self.robot.data.joint_pos.index_select(1, self.action_joint_ids)
         joint_vel = self.robot.data.joint_vel.index_select(1, self.action_joint_ids)
         return joint_pos, joint_vel
+
+    def _bind_slope_physics_material(self) -> None:
+        """Bind a deterministic high-friction, zero-restitution material to every env's slope.
+
+        The crawl terrain is spawned per-env as a static USD (AssetBaseCfg), whose spawner does
+        not accept a physics_material. We removed the global ground plane, so the slope is the
+        only ground; without an explicit material it would use sim defaults. Spawn one rigid-body
+        material prim and bind it (nested) to all slope prims so hands/knees/feet grip the ramp
+        and contacts do not bounce. No terrain domain randomization.
+        """
+        try:
+            material_path = "/World/SlopePhysicsMaterial"
+            material_cfg = sim_utils.RigidBodyMaterialCfg(
+                friction_combine_mode="multiply",
+                restitution_combine_mode="multiply",
+                static_friction=1.0,
+                dynamic_friction=1.0,
+                restitution=0.0,
+            )
+            material_cfg.func(material_path, material_cfg)
+            # bind_physics_material needs concrete prim paths, not a regex, so resolve the
+            # per-env slope prims first and bind the material to each (nested over its colliders).
+            slope_paths = sim_utils.find_matching_prim_paths("/World/envs/env_.*/Slope")
+            if not slope_paths:
+                print("[WARN] No slope prims matched for physics material binding.", flush=True)
+            for slope_path in slope_paths:
+                sim_utils.bind_physics_material(slope_path, material_path)
+            print(f"[INFO] Bound slope physics material to {len(slope_paths)} prims.", flush=True)
+        except Exception as exc:
+            print(f"[WARN] Failed to bind slope physics material: {exc}", flush=True)
 
     def _apply_official_startup_events(self) -> None:
         self._randomize_joint_default_pos()

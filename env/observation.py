@@ -104,8 +104,11 @@ class MimicObservationMixin:
         )
         anchor_z_err = (reference["anchor_pos_w"][:, 2] - context["robot_anchor_pos_w"][:, 2]).unsqueeze(-1)
         net_contact_forces = self.contact_sensor.data.net_forces_w_history
-        foot_contact = (
-            torch.max(torch.norm(net_contact_forces[:, :, self.foot_contact_body_ids], dim=-1), dim=1)[0]
+        # Multi-contact support state fed to the actor. Crawling is a feet+knees+hands gait,
+        # so the policy needs to see every support pair (not just the feet) to coordinate the
+        # support-transition the validation clip requires.
+        support_contact = (
+            torch.max(torch.norm(net_contact_forces[:, :, self.support_contact_body_ids], dim=-1), dim=1)[0]
             > 1.0
         ).to(dtype=motion_anchor_ori_b.dtype)
         joint_pos_rel = context["robot_joint_pos"] - self.default_action_joint_pos
@@ -124,11 +127,12 @@ class MimicObservationMixin:
                 motion_anchor_ori_b,
                 anchor_z_err,
                 root_lin_vel_b,
-                foot_contact,
+                support_contact,
                 base_ang_vel,
                 joint_pos_rel,
                 joint_vel_rel,
                 self.last_action,
+                self.prev_action,
             ],
             dim=-1,
         )
@@ -179,4 +183,25 @@ class MimicObservationMixin:
     def _add_uniform_noise(self, value: torch.Tensor, n_min: float, n_max: float) -> torch.Tensor:
         if hasattr(self, "task_cfg") and not getattr(self.task_cfg, "observation_noise", True):
             return value
-        return value + torch.empty_like(value).uniform_(n_min, n_max)
+        return value + self._group_shared_uniform(value, n_min, n_max)
+
+    def _group_shared_uniform(self, value: torch.Tensor, n_min: float, n_max: float) -> torch.Tensor:
+        """Draw uniform noise that is identical across the generations of each GRPO group.
+
+        GRPO compares the returns of `group_size` branches that start from an identical
+        physical state; the only thing that should differ between them is the policy's own
+        action sampling. If each branch drew its own observation noise the group-relative
+        advantage would also reflect environment-noise differences, breaking the same-state
+        comparison assumption. With group_size > 1 we draw one noise sample per group (over
+        the leading branch dimension) and broadcast it to every branch in that group.
+        """
+        group_size = int(getattr(self, "group_size", 1))
+        if group_size <= 1 or value.shape[0] % group_size != 0:
+            return torch.empty_like(value).uniform_(n_min, n_max)
+        num_groups = value.shape[0] // group_size
+        group_noise = torch.empty(
+            (num_groups, *value.shape[1:]),
+            dtype=value.dtype,
+            device=value.device,
+        ).uniform_(n_min, n_max)
+        return group_noise.repeat_interleave(group_size, dim=0)

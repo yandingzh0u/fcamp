@@ -188,8 +188,6 @@ def main() -> None:
         activation=train_cfg.get("activation", "elu"),
         action_squash_scale=action_squash_scale,
         basis_count=int(train_cfg.get("basis_count", 0)),
-        chunk_stitch_frames=int(train_cfg.get("chunk_stitch_frames", 0)),
-        chunk_stitch_mode=str(train_cfg.get("chunk_stitch_mode", "smoothstep")),
     ).to(env.device)
     policy.load_state_dict(payload["policy"])
     policy.eval()
@@ -210,8 +208,8 @@ def main() -> None:
     print(
         f"[INFO] horizon={train_cfg['horizon']} action_dim={train_cfg['action_dim']} "
         f"flow_steps={flow_steps} action_squash_scale={action_squash_scale} "
-        f"chunk_stitch_frames={policy.chunk_stitch_frames} "
-        f"chunk_stitch_mode={policy.chunk_stitch_mode}",
+        f"basis_count={policy.basis_count} "
+        f"action_parametrization=anchored_incremental_trajectory",
         flush=True,
     )
     print(
@@ -265,7 +263,7 @@ def main() -> None:
                 f"reward={float(reward.mean().item()):.5f} "
                 f"done={float(done.float().mean().item()):.5f} "
                 f"height={float(info['debug_terms']['robot_anchor_height'].mean().item()):.5f} "
-                f"tilt={float(info['debug_terms']['robot_anchor_tilt'].mean().item()):.5f} "
+                f"tilt={float(info['debug_terms']['anchor_tilt_error'].mean().item()):.5f} "
                 f"ee_z_max={float(info['debug_terms']['ee_z_error_max'].mean().item()):.5f} "
                 f"term_z_max={float(info['debug_terms']['termination_z_error_max'].mean().item()):.5f} "
                 f"anchor_z={float(info['debug_terms']['anchor_z_error'].mean().item()):.5f} "

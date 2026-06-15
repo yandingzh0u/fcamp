@@ -39,20 +39,12 @@ def flow_grpo_step(
     deterministic: bool = False,
     sample_noise: torch.Tensor | None = None,
     sample_noise_std: float = 1.0,
-    horizon: int = 1,
-    per_frame: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """One MixGRPO SDE-ODE transition.
 
-    The returned log_prob is the transition score for one flow step.
-
-    - per_frame=False (default): joint chunk score, shape (B,). This is the legacy path and
-      is byte-identical to the original implementation (sum over every latent dimension).
-    - per_frame=True: per-frame score, shape (B, horizon). The latent residual is reshaped
-      to (B, horizon, action_dim) and summed ONLY over action_dim. Because the SDE transition
-      noise is independent per latent dimension, the joint density is exactly the product of
-      per-frame marginals, so `per_frame_logp.sum(dim=1)` equals the joint (B,) score to
-      floating-point tolerance. This is the mathematical basis of Frame-Factorized h>1.
+    The returned log_prob is the joint chunk transition score for one flow step, shape (B,)
+    (summed over every latent dimension). The flow policy is a joint policy pi(a0..a_{h-1}|s),
+    so the chunk-level joint score is the correct PPO log-prob.
     """
     sigma = sigmas[index].to(model_output.device)
     sigma_prev = sigmas[index + 1].to(model_output.device)
@@ -73,13 +65,5 @@ def flow_grpo_step(
     std = torch.as_tensor(std, device=model_output.device, dtype=torch.float32).clamp(min=1.0e-6)
     log_prob = -residual.square() / (2.0 * std.square())
     log_prob = log_prob - torch.log(std) - 0.5 * math.log(2.0 * math.pi)
-    if per_frame and int(horizon) > 1:
-        # (B, chunk_dim) -> (B, horizon, action_dim) -> sum over action_dim -> (B, horizon)
-        batch = log_prob.shape[0]
-        log_prob = log_prob.reshape(batch, int(horizon), -1).sum(dim=-1)
-    else:
-        log_prob = log_prob.sum(dim=tuple(range(1, log_prob.ndim)))
-        if per_frame:
-            # horizon == 1: present as (B, 1) so callers always see a frame axis.
-            log_prob = log_prob.unsqueeze(-1)
+    log_prob = log_prob.sum(dim=tuple(range(1, log_prob.ndim)))
     return prev_sample, log_prob
