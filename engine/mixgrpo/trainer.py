@@ -286,7 +286,39 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         self.env.last_action[target_env_ids] = self.env.last_action.index_select(0, source_for_target)
         self.env.prev_action[target_env_ids] = self.env.prev_action.index_select(0, source_for_target)
         self.env.next_push_step[target_env_ids] = self.env.next_push_step.index_select(0, source_for_target)
+        self._replicate_group_contact_history(target_env_ids, source_for_target)
         self.env.scene.update(self.env.physics_dt)
+
+    def _replicate_group_contact_history(
+        self,
+        target_env_ids: torch.Tensor,
+        source_for_target: torch.Tensor,
+    ) -> None:
+        """Copy the contact-sensor buffers from each group's source branch to its other
+        branches. GRPO requires every branch in a group to start from an IDENTICAL state;
+        the contact-force history (and air/contact-time buffers) are part of that state and
+        feed the foot-contact observation term and the undesired-contact reward. Without
+        this copy, sibling branches start with mismatched contact history even though their
+        root/joint state was synchronized, violating the same-state assumption.
+        """
+        contact_sensor = getattr(self.env, "contact_sensor", None)
+        if contact_sensor is None:
+            return
+        data = contact_sensor.data
+        for attr in (
+            "net_forces_w",
+            "net_forces_w_history",
+            "force_matrix_w",
+            "force_matrix_w_history",
+            "last_air_time",
+            "current_air_time",
+            "last_contact_time",
+            "current_contact_time",
+        ):
+            buffer = getattr(data, attr, None)
+            if buffer is None:
+                continue
+            buffer[target_env_ids] = buffer.index_select(0, source_for_target)
 
     def _compute_group_relative_advantages(self, rewards: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
         if rewards.ndim != 2:
@@ -1618,9 +1650,35 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
             group_data = self._collect_rollout(current_obs)
             update_sampler = getattr(self.env, "update_adaptive_motion_statistics", None)
             if callable(update_sampler):
-                sampler_failed = (group_data["first_done_phase"] >= 0) & (~group_data["first_done_timeout"])
+                # Adaptive phase sampling must reinforce the phases where the robot actually
+                # DIES, not the phases where collection happened to start. Previously this
+                # binned by collection_start_phases, so a branch that started at phase 500 and
+                # died at phase 540 reinforced bin(500) and never bin(540) — the hard part of
+                # the clip was never up-weighted. We now bin by the phase each branch reached
+                # at the end of its life: the exact death phase for failed branches, and the
+                # final phase reached for survivors. Exposure and failure share this single
+                # phase axis so per-bin failure_rate = deaths / lives-ending-in-bin is a clean
+                # "how often does the robot fail to get past region X" signal.
+                first_done_phase = group_data["first_done_phase"]
+                sampler_failed = (first_done_phase >= 0) & (~group_data["first_done_timeout"])
+                live_frames_total = group_data.get("live_frames")
+                if live_frames_total is not None:
+                    live_frames_total = live_frames_total.sum(dim=-1)
+                else:
+                    live_frames_total = torch.zeros_like(group_data["collection_start_phases"])
+                survivor_reached_phase = (
+                    group_data["collection_start_phases"] + live_frames_total.to(dtype=torch.long)
+                ).clamp(min=0, max=max(0, int(self.env.motion.num_frames) - 1))
+                death_phase_clamped = first_done_phase.clamp(
+                    min=0, max=max(0, int(self.env.motion.num_frames) - 1)
+                )
+                sampler_phases = torch.where(
+                    first_done_phase >= 0,
+                    death_phase_clamped,
+                    survivor_reached_phase,
+                )
                 update_sampler(
-                    group_data["collection_start_phases"],
+                    sampler_phases,
                     sampler_failed,
                     rollout_steps=self._training_rollout_horizon(),
                 )

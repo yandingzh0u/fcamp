@@ -179,4 +179,21 @@ class MimicObservationMixin:
     def _add_uniform_noise(self, value: torch.Tensor, n_min: float, n_max: float) -> torch.Tensor:
         if hasattr(self, "task_cfg") and not getattr(self.task_cfg, "observation_noise", True):
             return value
+        generation_count = int(getattr(self.task_cfg, "num_generations", 1)) if hasattr(self, "task_cfg") else 1
+        if (
+            generation_count > 1
+            and value.shape[0] == self.num_envs
+            and self.num_envs % generation_count == 0
+        ):
+            # GRPO same-state contract: draw one noise sample per group and share it across
+            # the group's generation branches. Sibling branches start from the identical
+            # group state, so giving them identical observation noise means the ONLY
+            # intra-group difference is the SDE action noise (what GRPO's group-relative
+            # advantage is supposed to isolate). Per-env independent noise would inject a
+            # second, uncontrolled source of variation into the group baseline.
+            group_count = self.num_envs // generation_count
+            group_shape = (group_count, *value.shape[1:])
+            group_noise = torch.empty(group_shape, dtype=value.dtype, device=value.device).uniform_(n_min, n_max)
+            noise = group_noise.repeat_interleave(generation_count, dim=0)
+            return value + noise
         return value + torch.empty_like(value).uniform_(n_min, n_max)

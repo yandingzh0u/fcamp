@@ -8,7 +8,6 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
-from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
 from .robots.g1 import G1_29DOF_ACTION_NAMES, G1_BASE_CFG, make_g1_cfg
@@ -25,7 +24,10 @@ DEFAULT_MOTION_FILE = (
 
 # Crawl terrain imported from the holosoma crawl_slope task. The crawl motion is recorded
 # in this terrain's frame (the robot climbs the ramp), so the slope is spawned at each
-# env origin and acts as the ground for that env.
+# env origin and acts as the SOLE ground for that env. There is intentionally NO global
+# flat /World/ground plane: holosoma's load_obj path is a single mesh terrain, not a
+# plane+mesh double ground. Spawning both made the robot rest on a phantom flat plane that
+# the crawl motion was never recorded against.
 SLOPE_USD_FILE = PROJECT_ROOT / "assets" / "motions" / "g1_crawl" / "terrain_slope.usd"
 SLOPE_OFFSET = (0.0, 0.0, 0.0)
 
@@ -79,6 +81,15 @@ CRITIC_OBS_DIM = 286
 UNDESIRED_CONTACT_THRESHOLD = 1.0
 ANCHOR_Z_TERMINATION_THRESHOLD = 0.5
 ANCHOR_ORI_TERMINATION_THRESHOLD = 0.8
+# Hard torso-orientation gate. The robot's torso (anchor) projected-gravity vector must
+# stay within this angle of the REFERENCE torso projected-gravity vector. Projected gravity
+# is yaw-invariant, so this measures full tilt deviation (pitch+roll) from the reference
+# crawl posture in ANY direction while ignoring heading. This is the hard "must stay in the
+# crawl posture" constraint: lying flat / rolling onto the back / collapsing sideways all
+# push this angle past threshold even when the limb z-tracking can still be faked, closing
+# the "lie down and still match limb heights" loophole. ~0.8 rad (~46 deg) leaves healthy
+# margin over normal crawl tracking error while catching a collapse to the ground.
+ANCHOR_GRAVITY_ANGLE_TERMINATION_THRESHOLD = 0.8
 EE_Z_TERMINATION_THRESHOLD = 0.35
 RESET_ROOT_POSE_RANGE = (
     (-0.05, 0.05),
@@ -137,21 +148,10 @@ G1_MIMIC_ACTION_SCALE_VALUES = _compute_g1_mimic_action_scale_values()
 
 @configclass
 class G1SceneCfg(InteractiveSceneCfg):
-    terrain = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="plane",
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-        ),
-        visual_material=sim_utils.MdlFileCfg(
-            mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Architecture/Shingles_01.mdl",
-            project_uvw=True,
-        ),
-    )
+    # No global flat plane. The per-env Slope mesh below is the only ground; the crawl
+    # motion was recorded climbing this slope. Environment origins are still defined by the
+    # scene's GridCloner (env_spacing), so removing the TerrainImporter does not break env
+    # placement.
     light = AssetBaseCfg(
         prim_path="/World/light",
         spawn=sim_utils.DistantLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
@@ -210,6 +210,12 @@ class MimicEnvConfig(EnvConfig):
     reset_noise: bool = True
     interval_pushes: bool = True
     observation_noise: bool = True
+    # GRPO group size. When > 1, observation noise is drawn once per group and shared by
+    # all generation branches in that group, so sibling branches that start from the
+    # identical group state also observe the identical noisy observation (the only
+    # intra-group difference is the SDE action noise). 1 keeps fully independent per-env
+    # noise (non-GRPO / single-branch behavior).
+    num_generations: int = 1
     joint_acc_weight: float = 2.5e-7
     joint_torque_weight: float = 1.0e-5
     action_rate_weight: float = 1.0e-1

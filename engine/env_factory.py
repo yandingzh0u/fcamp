@@ -28,6 +28,7 @@ def make_mimic_env(cfg) -> G1MimicEnv:
             reset_noise=cfg.reset_noise,
             interval_pushes=cfg.interval_pushes,
             observation_noise=getattr(cfg, "observation_noise", True),
+            num_generations=int(getattr(cfg, "num_generations", 1)),
             joint_acc_weight=getattr(cfg, "joint_acc_weight", 2.5e-7),
             joint_torque_weight=getattr(cfg, "joint_torque_weight", 1.0e-5),
             action_rate_weight=getattr(cfg, "action_rate_weight", 1.0e-1),
