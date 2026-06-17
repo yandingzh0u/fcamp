@@ -33,6 +33,20 @@ class G1Env:
             dt=self.physics_dt,
             render_interval=self.decimation * max(1, int(getattr(cfg, "render_every", 1))),
         )
+        # Align the ground physics contract with the official holosoma crawl scene. The
+        # official load_obj terrain binds an explicit RigidBodyMaterialCfg(static=1.0,
+        # dynamic=1.0, restitution=0.0) to the slope mesh. Our per-env slope is spawned via
+        # UsdFileCfg, and spawn_from_usd does NOT apply UsdFileCfg.physics_material to the
+        # collision mesh, so without this the slope silently inherited the simulation default
+        # friction of 0.5 -- half the official value. Crawling up a ramp is extremely
+        # friction-sensitive, so this is a physics-contract mismatch, not a tuning knob. The
+        # robot keeps its own (randomized) per-shape material; the slope, having no material
+        # of its own, now falls back to this 1.0/1.0/0.0 default exactly like the official mesh.
+        sim_cfg.physics_material = sim_utils.RigidBodyMaterialCfg(
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        )
         sim_cfg.physx.gpu_max_rigid_patch_count = 10 * 2**15
         self.sim = SimulationContext(sim_cfg)
 

@@ -53,14 +53,18 @@ MIMIC_EE_BODY_NAMES = (
     "left_wrist_yaw_link",
     "right_wrist_yaw_link",
 )
-# Bodies whose z-tracking error actually triggers episode termination. The wrists are
-# intentionally excluded: the PD reference (zero-residual teacher) physically cannot hold
-# the wrists within EE_Z_TERMINATION_THRESHOLD during the crawl, so killing on wrist error
-# caps even a perfect teacher at ~35 steps. Wrist tracking is still rewarded (it stays in
-# the tracked-body reward set) and wrist z error is logged for diagnostics.
+# Bodies whose z-tracking error triggers episode termination. Aligned with the official
+# holosoma BadTrackingZOnly `bad_motion_body_pos_body_names`, which is feet + wrists. The
+# wrists were previously dropped here on the theory that the PD teacher could not hold them
+# under EE_Z_TERMINATION_THRESHOLD -- but that was measured BEFORE the scene physics was
+# aligned to the official contract (slope friction 0.5->1.0, self-collision off->on). With
+# the official scene restored we go back to the official termination set and let a teacher
+# probe decide feasibility rather than silently weakening the task.
 MIMIC_TERMINATION_BODY_NAMES = (
     "left_ankle_roll_link",
     "right_ankle_roll_link",
+    "left_wrist_yaw_link",
+    "right_wrist_yaw_link",
 )
 MIMIC_FOOT_BODY_NAMES = (
     "left_ankle_roll_link",
@@ -79,18 +83,13 @@ CONTACT_ALLOWED_SUBSTRINGS = (
 OBS_DIM = 163
 CRITIC_OBS_DIM = 286
 UNDESIRED_CONTACT_THRESHOLD = 1.0
+# Official holosoma BadTrackingZOnly thresholds (g1_29dof_wbt_termination):
+#   bad_ref_pos_threshold       = 0.5  -> ANCHOR_Z_TERMINATION_THRESHOLD
+#   bad_ref_ori_threshold       = 0.8  -> ANCHOR_ORI_TERMINATION_THRESHOLD (z-only grav)
+#   bad_motion_body_pos_threshold = 0.25 -> EE_Z_TERMINATION_THRESHOLD
 ANCHOR_Z_TERMINATION_THRESHOLD = 0.5
 ANCHOR_ORI_TERMINATION_THRESHOLD = 0.8
-# Hard torso-orientation gate. The robot's torso (anchor) projected-gravity vector must
-# stay within this angle of the REFERENCE torso projected-gravity vector. Projected gravity
-# is yaw-invariant, so this measures full tilt deviation (pitch+roll) from the reference
-# crawl posture in ANY direction while ignoring heading. This is the hard "must stay in the
-# crawl posture" constraint: lying flat / rolling onto the back / collapsing sideways all
-# push this angle past threshold even when the limb z-tracking can still be faked, closing
-# the "lie down and still match limb heights" loophole. ~0.8 rad (~46 deg) leaves healthy
-# margin over normal crawl tracking error while catching a collapse to the ground.
-ANCHOR_GRAVITY_ANGLE_TERMINATION_THRESHOLD = 0.8
-EE_Z_TERMINATION_THRESHOLD = 0.35
+EE_Z_TERMINATION_THRESHOLD = 0.25
 RESET_ROOT_POSE_RANGE = (
     (-0.05, 0.05),
     (-0.05, 0.05),

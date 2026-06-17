@@ -5,7 +5,6 @@ import torch
 from isaaclab.utils.math import quat_apply_inverse
 
 from .config import (
-    ANCHOR_GRAVITY_ANGLE_TERMINATION_THRESHOLD,
     ANCHOR_ORI_TERMINATION_THRESHOLD,
     ANCHOR_Z_TERMINATION_THRESHOLD,
     EE_Z_TERMINATION_THRESHOLD,
@@ -22,20 +21,17 @@ class MimicTerminationMixin:
 
         anchor_z_error = torch.abs(reference["anchor_pos_w"][:, 2] - context["robot_anchor_pos_w"][:, 2])
         anchor_gravity_z_error = (motion_projected_gravity_b[:, 2] - robot_projected_gravity_b[:, 2]).abs()
-        # Full projected-gravity vector angle between robot torso and reference torso. Both
-        # projected-gravity vectors are unit length (GRAVITY_VEC_W is normalized), so the
-        # angle is acos(dot). This is yaw-invariant and captures tilt in EVERY direction,
-        # unlike anchor_gravity_z_error which only sees the z-component (a sideways roll keeps
-        # z ~ similar yet is clearly "off-posture"). This is the hard gate that forbids the
-        # robot from lying down / collapsing while still faking limb-height tracking.
+        # Full projected-gravity vector angle kept as a DIAGNOSTIC only (logged), no longer a
+        # termination gate. The official holosoma BadTrackingZOnly terminates purely on the
+        # z-component of projected gravity (anchor_gravity_z_error > 0.8); the previously added
+        # full-angle hard gate was non-official and was itself killing validation, so it is
+        # removed from the done condition to restore the official task feasibility region.
         anchor_gravity_dot = torch.sum(motion_projected_gravity_b * robot_projected_gravity_b, dim=-1)
         anchor_gravity_angle = torch.acos(torch.clamp(anchor_gravity_dot, -1.0, 1.0))
         robot_anchor_height = context["robot_anchor_pos_w"][:, 2]
         robot_anchor_tilt = torch.acos(torch.clamp(-robot_projected_gravity_b[:, 2], -1.0, 1.0)).abs()
         anchor_pos_bad = anchor_z_error > ANCHOR_Z_TERMINATION_THRESHOLD
-        anchor_ori_bad = (anchor_gravity_z_error > ANCHOR_ORI_TERMINATION_THRESHOLD) | (
-            anchor_gravity_angle > ANCHOR_GRAVITY_ANGLE_TERMINATION_THRESHOLD
-        )
+        anchor_ori_bad = anchor_gravity_z_error > ANCHOR_ORI_TERMINATION_THRESHOLD
         ee_z_error = torch.abs(
             context["body_pos_relative_w"][:, self.ee_body_indices, 2]
             - context["robot_body_pos_w"][:, self.ee_body_indices, 2]
