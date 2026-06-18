@@ -146,6 +146,24 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--onpolicy_state_bank",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help=(
+        "Enable the on-policy state bank. Periodically rolls the current policy from phase 0 "
+        "and banks the REAL drifted simulator states, then starts a fraction of training "
+        "groups from those states instead of clean reference resets. Fixes the train/"
+        "validation state-distribution mismatch (training only saw clean phase resets; "
+        "validation rolls continuously from phase 0)."
+    ),
+)
+parser.add_argument("--onpolicy_state_ratio", type=float, default=0.5, help="Fraction of GRPO groups per update started from a banked on-policy state.")
+parser.add_argument("--onpolicy_refresh_every", type=int, default=25, help="Re-roll/refresh the on-policy state bank every N updates.")
+parser.add_argument("--onpolicy_bank_rollout_steps", type=int, default=480, help="Env steps to roll from phase 0 when building the bank (must exceed the death region).")
+parser.add_argument("--onpolicy_bank_min_phase", type=int, default=80, help="Only bank on-policy states at/after this phase (early phases covered by the phase-0 course).")
+parser.add_argument("--onpolicy_bank_capacity", type=int, default=16384, help="Max number of banked on-policy state snapshots (memory bound).")
+parser.add_argument("--onpolicy_bank_min_size", type=int, default=256, help="Minimum bank population before on-policy starts are used (else clean resets; bank self-fills as policy improves).")
+parser.add_argument(
     "--terminal_penalty",
     type=float,
     default=50.0,
@@ -406,6 +424,13 @@ def main() -> None:
         rollout_env_steps=args_cli.rollout_env_steps,
         chunks_per_rollout=args_cli.chunks_per_rollout,
         tail_bootstrap_steps=args_cli.tail_bootstrap_steps,
+        onpolicy_state_bank=args_cli.onpolicy_state_bank,
+        onpolicy_state_ratio=args_cli.onpolicy_state_ratio,
+        onpolicy_refresh_every=args_cli.onpolicy_refresh_every,
+        onpolicy_bank_rollout_steps=args_cli.onpolicy_bank_rollout_steps,
+        onpolicy_bank_min_phase=args_cli.onpolicy_bank_min_phase,
+        onpolicy_bank_capacity=args_cli.onpolicy_bank_capacity,
+        onpolicy_bank_min_size=args_cli.onpolicy_bank_min_size,
         terminal_penalty=args_cli.terminal_penalty,
         discount_gamma=args_cli.discount_gamma,
         clip_range=args_cli.clip_range,

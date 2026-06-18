@@ -34,6 +34,8 @@ def make_mimic_env(cfg) -> G1MimicEnv:
             action_rate_weight=getattr(cfg, "action_rate_weight", 1.0e-1),
             action_accel_weight=getattr(cfg, "action_accel_weight", 0.0),
             action_l2_weight=getattr(cfg, "action_l2_weight", 0.0),
+            term_z_weight=getattr(cfg, "term_z_weight", 3.0),
+            term_z_sigma=getattr(cfg, "term_z_sigma", 0.12),
             future_ref_steps=future_ref_steps,
         )
     )

@@ -54,6 +54,20 @@ class MimicRewardMixin:
             dim=-1,
         )
         body_pos_reward = torch.exp(-body_pos_error.mean(-1) / (0.3**2))
+        # Dense reward on the SAME quantity the hard termination gate checks: the MAX z-error
+        # over the termination bodies (ankles + wrists). termination kills on
+        #   any(|ref_z - robot_z| > EE_Z_TERMINATION_THRESHOLD)  over these bodies,
+        # which is equivalent to  max(z_err) > threshold. Optimizing the mean over 14 bodies
+        # lets a single wrist breach the gate while the mean still looks great, so the policy
+        # gets a contradictory signal (dense: "fine", done: "dead"). This term aligns the
+        # objective with the success condition by rewarding exp(-(max_term_z_err/sigma)^2).
+        term_z_err = torch.abs(
+            context["body_pos_relative_w"][:, self.termination_body_indices, 2]
+            - context["robot_body_pos_w"][:, self.termination_body_indices, 2]
+        )
+        max_term_z_err = term_z_err.max(dim=-1).values
+        term_z_sigma = float(getattr(self.task_cfg, "term_z_sigma", 0.12))
+        term_z_reward = torch.exp(-(max_term_z_err / term_z_sigma) ** 2)
         body_ori_error = quat_error_magnitude(
             context["body_quat_relative_w"],
             context["robot_body_quat_w"],
@@ -91,6 +105,7 @@ class MimicRewardMixin:
         action_rate_weight = float(getattr(self.task_cfg, "action_rate_weight", 1.0e-1))
         action_accel_weight = float(getattr(self.task_cfg, "action_accel_weight", 0.0))
         action_l2_weight = float(getattr(self.task_cfg, "action_l2_weight", 0.0))
+        term_z_weight = float(getattr(self.task_cfg, "term_z_weight", 3.0))
 
         reward = (
             -joint_acc_weight * joint_acc
@@ -102,6 +117,7 @@ class MimicRewardMixin:
             + 2.0 * anchor_pos_reward
             + 2.0 * anchor_ori_reward
             + 1.0 * body_pos_reward
+            + term_z_weight * term_z_reward
             + 1.0 * body_ori_reward
             + 1.0 * body_lin_vel_reward
             + 1.0 * body_ang_vel_reward
@@ -119,6 +135,8 @@ class MimicRewardMixin:
             "anchor_pos_reward": anchor_pos_reward,
             "anchor_ori_reward": anchor_ori_reward,
             "body_pos_reward": body_pos_reward,
+            "term_z_reward": term_z_reward,
+            "max_term_z_err": max_term_z_err,
             "body_ori_reward": body_ori_reward,
             "body_lin_vel_reward": body_lin_vel_reward,
             "body_ang_vel_reward": body_ang_vel_reward,

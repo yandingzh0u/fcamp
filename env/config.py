@@ -220,6 +220,15 @@ class MimicEnvConfig(EnvConfig):
     action_rate_weight: float = 1.0e-1
     action_accel_weight: float = 0.0
     action_l2_weight: float = 0.0
+    # Dense reward weight for the MAX z-tracking error over the termination bodies (ankles +
+    # wrists), i.e. the exact quantity the hard termination gate checks. The rest of the
+    # tracking reward optimizes a MEAN over 14 bodies, which dilutes a single wrist breaching
+    # the 0.25 m termination threshold (mean stays ~0.95 while right_wrist_z hits 0.26 and
+    # the episode dies). This term makes the dense objective and the success condition the
+    # same quantity: term_z_reward = exp(-(max_term_z_err / sigma)^2). Weight 3.0 sits in the
+    # 2-4 band so it is not drowned by the averaged body terms.
+    term_z_weight: float = 3.0
+    term_z_sigma: float = 0.12
     track_body_names: tuple[str, ...] = MIMIC_BODY_NAMES
     ee_body_names: tuple[str, ...] = MIMIC_EE_BODY_NAMES
     termination_body_names: tuple[str, ...] = MIMIC_TERMINATION_BODY_NAMES

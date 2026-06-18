@@ -12,6 +12,7 @@ from ..checkpoint import CheckpointMixin
 from .config import MixGRPOConfig
 from ..env_factory import make_mimic_env
 from ..env_state import EnvStateMixin
+from ..onpolicy_state_bank import OnPolicyStateBankMixin
 from .inference import deterministic_sde_ode_actions
 from ..logging import LoggingMixin
 from ..returns import compute_frame_level_reward_to_go
@@ -19,7 +20,7 @@ from .sampling import flow_grpo_step
 from ..validation import ValidationMixin
 
 
-class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMixin):
+class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, OnPolicyStateBankMixin, EnvStateMixin):
     def __init__(self, simulation_app, cfg: MixGRPOConfig):
         self.simulation_app = simulation_app
         self.cfg = cfg
@@ -80,6 +81,7 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         )
         self.learning_rate = float(cfg.policy_lr)
         self._init_train_episode_stats()
+        self._init_onpolicy_state_bank()
         self.current_observation = self._reset_training_envs()
 
         if self.checkpoint_dir is not None:
@@ -1530,6 +1532,14 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
         reset_phases = phase_indices.repeat_interleave(generation_count)
         env_ids = torch.arange(self.env.num_envs, device=self.env.device, dtype=torch.long)
         self.env.reset_envs(env_ids, phase_indices=reset_phases)
+        # On-policy state bank: overwrite a fraction of group ANCHOR envs (env 0 of each group)
+        # with real policy-induced drifted states captured by rolling from phase 0. The
+        # subsequent _replicate_group_reset_state then copies each anchor (clean OR on-policy)
+        # to its group's other branches, so the GRPO same-state contract is preserved while
+        # the training start distribution now includes the long-horizon on-policy states that
+        # validation actually encounters. Groups not chosen keep the clean reference reset,
+        # which retains the phase-0 start course.
+        self._apply_onpolicy_group_starts(generation_count)
         self._replicate_group_reset_state(self.num_grpo_groups, generation_count)
         return self.env.get_observation()
 
@@ -1637,6 +1647,14 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, EnvStateMix
                 break
 
             t0 = time.perf_counter()
+            # Refresh the on-policy state bank on a fixed schedule by rolling the current
+            # policy from phase 0 (snapshot/restore around it so training state is untouched).
+            # NOTE: refresh only on the periodic schedule, never "because the bank is empty" —
+            # early in training the policy cannot reach mid phases so the bank stays empty for
+            # many updates, and refreshing every update would roughly double wall-clock for no
+            # benefit. An empty bank simply falls back to clean resets until it self-fills.
+            if self.onpolicy_bank_enabled and (update_idx % self.onpolicy_refresh_every == 0):
+                self._refresh_onpolicy_state_bank(update_idx)
             current_obs = self._resample_group_starts()
             # Every update force-resets all envs, ending their in-progress episodes. Clear the
             # per-env reward/length accumulators so train/mean_episode_length reflects steps

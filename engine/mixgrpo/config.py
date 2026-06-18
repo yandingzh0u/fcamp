@@ -32,6 +32,11 @@ class MixGRPOConfig:
     action_rate_weight: float = 1.0e-1
     action_accel_weight: float = 0.0
     action_l2_weight: float = 0.0
+    # Dense reward on the MAX z-error over termination bodies (ankles + wrists) -- the exact
+    # quantity the hard termination gate checks -- so the objective and success condition
+    # match. See MimicEnvConfig.term_z_weight for the rationale.
+    term_z_weight: float = 3.0
+    term_z_sigma: float = 0.12
 
     action_dim: int = 29
     policy_obs_dim: int = 0
@@ -86,6 +91,17 @@ class MixGRPOConfig:
     # occur shortly after the window closes — without adding a critic.
     tail_bootstrap_steps: int = 0
     terminal_penalty: float = 50.0
+    # On-policy state bank (fixes train/validation state-distribution mismatch). When enabled,
+    # the policy is periodically rolled from phase 0 and the real drifted simulator states are
+    # banked, then a fraction of training group starts restore these states instead of clean
+    # reference resets. See engine/onpolicy_state_bank.py.
+    onpolicy_state_bank: bool = False
+    onpolicy_state_ratio: float = 0.5
+    onpolicy_refresh_every: int = 25
+    onpolicy_bank_rollout_steps: int = 480
+    onpolicy_bank_min_phase: int = 80
+    onpolicy_bank_capacity: int = 16384
+    onpolicy_bank_min_size: int = 256
     discount_gamma: float = 0.99
     clip_range: float = 0.3
     adv_clip_max: float = 5.0
