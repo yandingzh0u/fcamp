@@ -103,9 +103,25 @@ class MimicObservationMixin:
             reference,
         )
         anchor_z_err = (reference["anchor_pos_w"][:, 2] - context["robot_anchor_pos_w"][:, 2]).unsqueeze(-1)
+        # Signed z-error of the termination bodies (ankles + wrists) -- the EXACT quantity the
+        # termination gate checks (terminal.py: |ref_z - robot_z| > EE_Z_TERMINATION_THRESHOLD).
+        # The actor previously only saw anchor_z_err + foot_contact, so at the chunk start it
+        # was blind to how close the wrists/ankles were to the death line (the dominant crawl
+        # death cause). Feed the signed margin so the policy can react before the gate fires.
+        termination_z_err = (
+            context["body_pos_relative_w"][:, self.termination_body_indices, 2]
+            - context["robot_body_pos_w"][:, self.termination_body_indices, 2]
+        )
         net_contact_forces = self.contact_sensor.data.net_forces_w_history
         foot_contact = (
             torch.max(torch.norm(net_contact_forces[:, :, self.foot_contact_body_ids], dim=-1), dim=1)[0]
+            > 1.0
+        ).to(dtype=motion_anchor_ori_b.dtype)
+        # Contact state of the termination bodies (ankles + wrists). Wrist contact (the
+        # half-sphere hands touching the slope) is part of the support during crawl and is
+        # directly tied to the wrist-z release that kills the episode at the stand-up phase.
+        termination_contact = (
+            torch.max(torch.norm(net_contact_forces[:, :, self.termination_contact_body_ids], dim=-1), dim=1)[0]
             > 1.0
         ).to(dtype=motion_anchor_ori_b.dtype)
         joint_pos_rel = context["robot_joint_pos"] - self.default_action_joint_pos
@@ -113,6 +129,7 @@ class MimicObservationMixin:
         motion_anchor_pos_b = self._add_uniform_noise(motion_anchor_pos_b, -0.02, 0.02)
         motion_anchor_ori_b = self._add_uniform_noise(motion_anchor_ori_b, -0.05, 0.05)
         anchor_z_err = self._add_uniform_noise(anchor_z_err, -0.01, 0.01)
+        termination_z_err = self._add_uniform_noise(termination_z_err, -0.01, 0.01)
         root_lin_vel_b = self._add_uniform_noise(self.robot.data.root_lin_vel_b, -0.1, 0.1)
         base_ang_vel = self._add_uniform_noise(self.robot.data.root_ang_vel_b, -0.2, 0.2)
         joint_pos_rel = self._add_uniform_noise(joint_pos_rel, -0.01, 0.01)
@@ -123,8 +140,10 @@ class MimicObservationMixin:
                 motion_anchor_pos_b,
                 motion_anchor_ori_b,
                 anchor_z_err,
+                termination_z_err,
                 root_lin_vel_b,
                 foot_contact,
+                termination_contact,
                 base_ang_vel,
                 joint_pos_rel,
                 joint_vel_rel,

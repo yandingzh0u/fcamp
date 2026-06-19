@@ -73,6 +73,30 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, OnPolicySta
         # Latent / noise / transition-log_prob dimensionality (coefficient space).
         self.chunk_dim = self.policy.chunk_dim
 
+        # Frame-aware chunk PPO requires an IDENTITY temporal basis: the per-frame transition
+        # log-prob splits the latent noise as (B, chunk_dim) -> (B, horizon, action_dim), which
+        # is only a valid factorization when chunk_dim == horizon * action_dim (basis_count ==
+        # horizon, or basis_count == 0 which the policy maps to identity). With a low-frequency
+        # basis (e.g. basis_count=4) the latent is a coefficient vector that does NOT factor
+        # per frame, so per-frame log-probs would be a wrong mathematical object. Fail fast
+        # instead of silently training on it.
+        if bool(getattr(cfg, "frame_factorized", False)):
+            expected_identity_dim = int(cfg.horizon) * int(cfg.action_dim)
+            if self.chunk_dim != expected_identity_dim:
+                raise ValueError(
+                    "frame_factorized requires an identity temporal basis: "
+                    f"chunk_dim ({self.chunk_dim}) must equal horizon*action_dim "
+                    f"({expected_identity_dim}). Set --basis_count 0 or --basis_count {int(cfg.horizon)} "
+                    f"(got basis_count={int(getattr(cfg, 'basis_count', 0))})."
+                )
+            if int(getattr(cfg, "chunk_stitch_frames", 0)) != 0:
+                raise ValueError(
+                    "frame_factorized requires chunk_stitch_frames=0: stitching makes the "
+                    "executed front frames partially independent of the current latent, so the "
+                    "per-frame log-prob/advantage would be attributed to the wrong action. "
+                    f"Got chunk_stitch_frames={int(getattr(cfg, 'chunk_stitch_frames', 0))}."
+                )
+
         self.optimizer = torch.optim.Adam(
             self.policy.parameters(),
             lr=cfg.policy_lr,
@@ -419,11 +443,12 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, OnPolicySta
         obs_prep = self.policy._prepare_observation(obs)
         batch_size = obs.shape[0]
         steps = int(self.cfg.flow_steps)
-        # Loss is always chunk-level (joint sample) PPO. The flow policy is a JOINT policy
-        # pi(a0..a_{h-1}|s); per-frame log-prob splitting is a biased gradient estimator for
-        # it (FPO/DPPO use chunk-level PPO with one joint log-ratio + one chunk advantage).
-        # frame_factorized is kept only for per-frame DIAGNOSTICS, never for the policy loss.
-        per_frame = False
+        # Frame-aware chunk PPO: when frame_factorized is enabled the SDE transition log-prob
+        # is split per executed frame (B, horizon, flow_steps) so credit/blame lands on the
+        # real physical frame that lived/died, not the whole 12-frame chunk. This is only
+        # mathematically valid with an identity temporal basis (chunk_dim == horizon *
+        # action_dim); a startup guard enforces basis_count == horizon when this is on.
+        per_frame = bool(getattr(self.cfg, "frame_factorized", False))
         sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=obs.device, dtype=obs.dtype)
         latent = initial_noise.to(device=obs.device, dtype=obs.dtype) * float(self.cfg.init_noise_std)
         all_latents = [latent.detach()]
@@ -505,8 +530,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, OnPolicySta
             raise ValueError("step_indices must be a non-empty 1-D tensor")
 
         obs_prep = self.policy._prepare_observation(obs)
-        # Always chunk-level for the loss (see _sde_ode_rollout_actions note).
-        per_frame = False
+        # Match the rollout: per-frame transition log-probs when frame_factorized is on.
+        per_frame = bool(getattr(self.cfg, "frame_factorized", False))
         sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=obs.device, dtype=obs.dtype)
         log_probs = []
         for step_tensor in step_indices.to(device=obs.device, dtype=torch.long):
@@ -726,9 +751,15 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, OnPolicySta
                 chunk_live_frames = chunk_live_frames + contrib
                 # Per-frame raw (undiscounted) buffers for frame-level RTG (Task 4 / S3).
                 chunk_reward_frames.append(reward_t.detach().to(dtype=chunk_reward.dtype))
-                chunk_done_frames.append((alive_before_frame & done_t).detach())
-                chunk_alive_frames.append(alive_before_frame.detach())
                 timeout_frame = info_t["done_terms"]["time_out"].bool()
+                # done_frame feeds frame-level RTG, which treats any True as a *failure* and
+                # subtracts terminal_penalty at that frame. Reaching the motion end / episode
+                # time-out is SUCCESS, not failure, so exclude timeout here (mirrors the
+                # chunk-level died_mask = first_done_chunk<chunks & ~first_done_timeout). Without
+                # this, branches that successfully tracked to the clip end get penalized, which
+                # actively punishes learning to finish the late phases.
+                chunk_done_frames.append((alive_before_frame & done_t & ~timeout_frame).detach())
+                chunk_alive_frames.append(alive_before_frame.detach())
                 new_done_in_chunk = alive_before_frame & done_t
                 if bool(new_done_in_chunk.any()):
                     chunk_done = chunk_done | new_done_in_chunk
@@ -996,9 +1027,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, OnPolicySta
         advantages: torch.Tensor,
         alive_frame: torch.Tensor | None = None,
     ) -> dict[str, float]:
-        # Policy loss is always chunk-level (joint sample). frame_factorized never enters the
-        # loss (it is a biased estimator for the joint flow policy); kept for diagnostics only.
-        frame_factorized = False
+        # Frame-aware chunk PPO. When enabled, the loss is per executed frame: a chunk that
+        # dies at frame f only lets frames 0..f enter the surrogate (alive_frame mask) and the
+        # death penalty lands on the real death frame, instead of one chunk-level advantage
+        # being smeared over all 12 frames. Requires identity basis (enforced at startup).
+        frame_factorized = bool(getattr(self.cfg, "frame_factorized", False))
         sample_count = obs.shape[0]
         if actions.ndim != 2:
             raise ValueError("MixGRPO PPO update expects one action sample per env step.")
@@ -1587,6 +1620,16 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, OnPolicySta
             flush=True,
         )
         print(
+            f"[INFO] onpolicy_state_bank={getattr(self.cfg, 'onpolicy_state_bank', False)} "
+            f"state_ratio={getattr(self.cfg, 'onpolicy_state_ratio', 0.0)} "
+            f"refresh_every={getattr(self.cfg, 'onpolicy_refresh_every', 0)} "
+            f"bank_rollout_steps={getattr(self.cfg, 'onpolicy_bank_rollout_steps', 0)} "
+            f"bank_min_phase={getattr(self.cfg, 'onpolicy_bank_min_phase', 0)} "
+            f"bank_hard_ratio={getattr(self.cfg, 'onpolicy_bank_hard_ratio', 0.0)} "
+            f"bank_hard_window={getattr(self.cfg, 'onpolicy_bank_hard_window', 0)}",
+            flush=True,
+        )
+        print(
             f"[INFO] action_scale_multiplier={getattr(self.cfg, 'action_scale_multiplier', 1.0)} "
             f"reward_weights joint_acc={getattr(self.cfg, 'joint_acc_weight', 2.5e-7)} "
             f"torque={getattr(self.cfg, 'joint_torque_weight', 1.0e-5)} "
@@ -1608,8 +1651,8 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, OnPolicySta
             flush=True,
         )
         print(
-            f"[INFO] ppo_objective=chunk_level(joint_sample) "
-            f"frame_factorized_diagnostics_only={self.cfg.frame_factorized} "
+            f"[INFO] ppo_objective={'frame_aware(per_frame)' if self.cfg.frame_factorized else 'chunk_level(joint_sample)'} "
+            f"frame_factorized={self.cfg.frame_factorized} "
             f"basis_count={self.policy.basis_count} latent_dim={self.policy.chunk_dim} "
             f"action_chunk_dim={self.action_chunk_dim} "
             f"chunk_stitch_frames={self.policy.chunk_stitch_frames} "
@@ -1788,10 +1831,11 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, OnPolicySta
             valid_flat = group_data["valid_mask"].reshape(env_count * rollout_branch_count * chunks)
             update_flat = valid_flat
 
-            # Loss/advantage are always chunk-level (joint sample) PPO. Frame-level RTG/
-            # advantage is a biased estimator for the joint flow policy and is disabled in the
-            # loss path; per-frame quantities remain available only as diagnostics.
-            frame_factorized = False
+            # Frame-aware chunk credit assignment. When enabled, returns/advantages are
+            # computed per physical frame (real time axis T = chunks * horizon) so the death
+            # frame is blamed precisely; otherwise one advantage per chunk. Requires identity
+            # basis (enforced at startup) so per-frame log-probs are mathematically valid.
+            frame_factorized = bool(getattr(self.cfg, "frame_factorized", False))
             if frame_factorized:
                 # --- Frame-Factorized credit assignment (Task 5 / S4) --------------------
                 # Frame-level RTG over the real time axis T = chunks * horizon, then
@@ -2045,6 +2089,10 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, OnPolicySta
         mid_chunk_index = min(max(chunk_count_for_metrics // 2, 0), chunk_count_for_metrics - 1)
         sampler_stats_fn = getattr(self.env, "adaptive_sampling_stats", None)
         sampler_stats = sampler_stats_fn() if callable(sampler_stats_fn) else {}
+        legs_idx = list(range(0, 12))
+        waist_idx = [12, 13, 14]
+        arms_idx = list(range(15, 29))
+
         metrics = {
             **update_metrics,
             "algo/name": "mixgrpo",
@@ -2193,28 +2241,28 @@ class MixGRPOTrainer(ValidationMixin, CheckpointMixin, LoggingMixin, OnPolicySta
             "act/abs_max_all": float(group_data.get("metric_action_abs_max_all", 0.0)),
             "act/abs_p95": float(torch.quantile(act_abs_tensor.flatten(), 0.95).item()),
             "act/abs_p99": float(torch.quantile(act_abs_tensor.flatten(), 0.99).item()),
-            "act/legs_abs": float(act_abs[[0, 1, 3, 4, 6, 7, 9, 10, 13, 14, 17, 18]].mean().item()),
-            "act/waist_abs": float(act_abs[[2, 5, 8]].mean().item()),
-            "act/arms_abs": float(act_abs[[11, 12, 15, 16, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]].mean().item()),
+            "act/legs_abs": float(act_abs[legs_idx].mean().item()),
+            "act/waist_abs": float(act_abs[waist_idx].mean().item()),
+            "act/arms_abs": float(act_abs[arms_idx].mean().item()),
             "latent/final_abs_mean": (
                 float(valid_final_latents.abs().mean().item()) if valid_final_latents.numel() > 0 else 0.0
             ),
             "latent/final_abs_max": (
                 float(valid_final_latents.abs().max().item()) if valid_final_latents.numel() > 0 else 0.0
             ),
-            "act/l_shoulder_pitch": float(act_abs[11].item()),
-            "act/r_shoulder_pitch": float(act_abs[12].item()),
-            "act/l_shoulder_roll": float(act_abs[15].item()),
-            "act/r_shoulder_roll": float(act_abs[16].item()),
-            "act/l_shoulder_yaw": float(act_abs[19].item()),
-            "act/r_shoulder_yaw": float(act_abs[20].item()),
-            "act/l_elbow": float(act_abs[21].item()),
-            "act/r_elbow": float(act_abs[22].item()),
-            "act/l_wrist_roll": float(act_abs[23].item()),
-            "act/r_wrist_roll": float(act_abs[24].item()),
-            "act/l_wrist_pitch": float(act_abs[25].item()),
-            "act/r_wrist_pitch": float(act_abs[26].item()),
-            "act/l_wrist_yaw": float(act_abs[27].item()),
+            "act/l_shoulder_pitch": float(act_abs[15].item()),
+            "act/r_shoulder_pitch": float(act_abs[22].item()),
+            "act/l_shoulder_roll": float(act_abs[16].item()),
+            "act/r_shoulder_roll": float(act_abs[23].item()),
+            "act/l_shoulder_yaw": float(act_abs[17].item()),
+            "act/r_shoulder_yaw": float(act_abs[24].item()),
+            "act/l_elbow": float(act_abs[18].item()),
+            "act/r_elbow": float(act_abs[25].item()),
+            "act/l_wrist_roll": float(act_abs[19].item()),
+            "act/r_wrist_roll": float(act_abs[26].item()),
+            "act/l_wrist_pitch": float(act_abs[20].item()),
+            "act/r_wrist_pitch": float(act_abs[27].item()),
+            "act/l_wrist_yaw": float(act_abs[21].item()),
             "act/r_wrist_yaw": float(act_abs[28].item()),
             "act/first_abs_mean": act_first_mean,
             "act/last_abs_mean": act_last_mean,

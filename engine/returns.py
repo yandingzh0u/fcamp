@@ -20,7 +20,8 @@ def compute_frame_level_reward_to_go(
 
     Shapes (E = grpo groups, G = generations):
       reward_frame : (E, G, chunks, horizon)  raw (undiscounted) per-frame reward
-      done_frame   : (E, G, chunks, horizon)  bool, alive_before_frame & done_t
+      done_frame   : (E, G, chunks, horizon)  bool, alive_before_frame & done_t & ~timeout
+                                               (FAILURE-only; timeout/motion-end excluded)
       alive_frame  : (E, G, chunks, horizon)  float/bool, alive entering the frame
       last_values  : (E*G,) or (E, G)         tail bootstrap value (0 for dead branches)
     Returns:
@@ -43,8 +44,9 @@ def compute_frame_level_reward_to_go(
 
     first_life = reward_T * alive_T
 
-    # Death frame = first True along T. died = any done in window (incl. timeout, to match
-    # the chunk-level first_done_chunk < chunks convention exactly).
+    # Death frame = first True along T. done_frame is FAILURE-only (timeout / motion-end
+    # already excluded by the caller), so every True here is a real failure that should eat
+    # the terminal_penalty. Reaching the clip end is success and carries no penalty.
     died = done_T.any(dim=-1)
     # argmax on a bool tensor returns the first True index (0 if none, but masked by died).
     death_t = done_T.to(dtype=torch.int64).argmax(dim=-1)

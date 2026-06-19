@@ -49,11 +49,15 @@ class MixGRPOConfig:
     flow_steps: int = 4
     action_squash_scale: float = 5.0
 
-    # DEPRECATED for the loss path. The flow policy is a JOINT policy pi(a0..a_{h-1}|s);
-    # per-frame PPO is a biased gradient estimator (FPO/DPPO use chunk-level PPO: one joint
-    # log-ratio + one chunk advantage). The training objective is ALWAYS chunk-level now.
-    # This flag is retained only so per-frame DIAGNOSTICS can be logged; it does NOT change
-    # the loss/advantage/log-prob path regardless of value.
+    # Frame-aware chunk PPO. When True, the policy loss, log-prob, RTG, and advantage are all
+    # computed PER EXECUTED FRAME instead of per whole chunk: a chunk that dies at frame f only
+    # lets frames 0..f enter the surrogate (alive mask) and the terminal penalty lands on the
+    # real death frame. This fixes the mismatch between frame-level physical death (e.g. wrist
+    # z gate at one frame) and chunk-level credit assignment. REQUIRES an identity temporal
+    # basis (basis_count == horizon, or basis_count == 0 which the policy maps to identity) so
+    # the per-frame log-prob factorization is mathematically valid, and chunk_stitch_frames==0
+    # so executed front frames are not partially independent of the current latent; both are
+    # enforced by a startup guard in the trainer.
     frame_factorized: bool = False
     # joint_kl_guard: currently inert (the guard lived in the removed frame-level loss path).
     joint_kl_guard: bool = False
@@ -67,7 +71,7 @@ class MixGRPOConfig:
     # previous executed residual action (the last_action observation term) into the raw
     # decoded chunk over this many frames. This fixes cross-chunk target discontinuities
     # without adding future reference context.
-    chunk_stitch_frames: int = 0
+    chunk_stitch_frames: int = 4
     chunk_stitch_mode: str = "smoothstep"
 
     init_noise_std: float = 0.8
@@ -98,10 +102,18 @@ class MixGRPOConfig:
     onpolicy_state_bank: bool = False
     onpolicy_state_ratio: float = 0.5
     onpolicy_refresh_every: int = 25
-    onpolicy_bank_rollout_steps: int = 480
+    # 0/short values are resolved to the full motion clip by OnPolicyStateBankMixin. A capped
+    # bank reintroduces the train/validation distribution gap once validation survives past it.
+    onpolicy_bank_rollout_steps: int = 0
     onpolicy_bank_min_phase: int = 80
     onpolicy_bank_capacity: int = 16384
     onpolicy_bank_min_size: int = 256
+    # Fraction of bank starts sampled from the latest/highest-phase bank window instead of
+    # uniformly over the whole bank. A full-clip bank can still miss the validation death wall
+    # if the lethal transition is only a few frames wide, because uniform replay spreads those
+    # states across hundreds of earlier phases.
+    onpolicy_bank_hard_ratio: float = 0.5
+    onpolicy_bank_hard_window: int = 96
     discount_gamma: float = 0.99
     clip_range: float = 0.3
     adv_clip_max: float = 5.0

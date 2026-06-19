@@ -29,10 +29,25 @@ class OnPolicyStateBankMixin:
         self.onpolicy_state_ratio = float(getattr(cfg, "onpolicy_state_ratio", 0.5))
         # Refresh the bank (re-roll the current policy from phase 0) every N updates.
         self.onpolicy_refresh_every = max(1, int(getattr(cfg, "onpolicy_refresh_every", 25)))
-        # How many env-steps to roll from phase 0 when building the bank. Should comfortably
-        # exceed the phase region where the policy currently dies so the bank actually
-        # contains the hard drifted states (e.g. 300-430).
-        self.onpolicy_bank_rollout_steps = int(getattr(cfg, "onpolicy_bank_rollout_steps", 480))
+        # How many env-steps to roll from phase 0 when building the bank. A fixed cap is a
+        # hidden curriculum ceiling: once validation survives beyond the cap, training again
+        # sees only clean resets for later phases. Default/short requests therefore expand to
+        # the full motion clip.
+        requested_rollout_steps = int(getattr(cfg, "onpolicy_bank_rollout_steps", 0))
+        motion = getattr(self.env, "motion", None)
+        motion_frames = int(getattr(motion, "num_frames", 0) or 0)
+        full_motion_steps = max(1, motion_frames - 1) if motion_frames > 0 else 0
+        if full_motion_steps > 0:
+            self.onpolicy_bank_rollout_steps = full_motion_steps
+            if self.onpolicy_bank_enabled and 0 < requested_rollout_steps < full_motion_steps:
+                print(
+                    f"[STATE_BANK] requested_rollout_steps={requested_rollout_steps} is shorter "
+                    f"than full_motion_steps={full_motion_steps}; using the full clip to avoid "
+                    "a late-phase distribution gap.",
+                    flush=True,
+                )
+        else:
+            self.onpolicy_bank_rollout_steps = max(1, requested_rollout_steps)
         # Only bank states at/after this phase: early phases are already covered well by the
         # clean phase-0 start course, the value of on-policy states is in the drifted mid/late
         # region.
@@ -46,6 +61,11 @@ class OnPolicyStateBankMixin:
         # this size we fall back to clean resets for the whole update; the bank self-fills as
         # the policy learns to reach deeper phases (natural curriculum).
         self.onpolicy_bank_min_size = int(getattr(cfg, "onpolicy_bank_min_size", 256))
+        # Uniform replay over a full-clip bank still undersamples a narrow death wall. Draw a
+        # configurable fraction of bank starts from the latest/highest-phase bank window so the
+        # policy gets repeated gradients exactly where validation currently collapses.
+        self.onpolicy_bank_hard_ratio = max(0.0, min(1.0, float(getattr(cfg, "onpolicy_bank_hard_ratio", 0.5))))
+        self.onpolicy_bank_hard_window = max(0, int(getattr(cfg, "onpolicy_bank_hard_window", 96)))
         self._onpolicy_bank: dict[str, torch.Tensor] | None = None
         self._onpolicy_bank_size = 0
 
@@ -87,10 +107,20 @@ class OnPolicyStateBankMixin:
             self.current_observation = self.env.get_observation()
         if self._onpolicy_bank_size > 0:
             phases = self._onpolicy_bank["phase_steps"]
+            phases_f = phases.float()
+            phase_p50 = float(torch.quantile(phases_f, 0.50).item())
+            phase_p90 = float(torch.quantile(phases_f, 0.90).item())
+            phase_p99 = float(torch.quantile(phases_f, 0.99).item())
+            phase_max = int(phases.max().item())
+            hard_cutoff = max(0, phase_max - self.onpolicy_bank_hard_window)
+            hard_count = int((phases >= hard_cutoff).sum().item()) if self.onpolicy_bank_hard_window > 0 else 0
             print(
                 f"[STATE_BANK] update={update_idx} refreshed size={self._onpolicy_bank_size} "
-                f"phase_min={int(phases.min())} phase_mean={float(phases.float().mean()):.1f} "
-                f"phase_max={int(phases.max())}",
+                f"rollout_steps={self.onpolicy_bank_rollout_steps} "
+                f"phase_min={int(phases.min())} phase_mean={float(phases_f.mean()):.1f} "
+                f"phase_p50={phase_p50:.1f} phase_p90={phase_p90:.1f} phase_p99={phase_p99:.1f} "
+                f"phase_max={phase_max} hard_cutoff={hard_cutoff} hard_count={hard_count} "
+                f"hard_ratio={self.onpolicy_bank_hard_ratio:.2f}",
                 flush=True,
             )
         else:
@@ -178,10 +208,30 @@ class OnPolicyStateBankMixin:
 
         group_ids = torch.randperm(num_groups, device=device)[:num_onpolicy]
         anchor_env_ids = group_ids * generation_count
-        # Sample banked snapshots (with replacement) for these groups.
-        bank_idx = torch.randint(0, self._onpolicy_bank_size, (num_onpolicy,), device=device)
 
         bank = self._onpolicy_bank
+        assert bank is not None
+        # Sample banked snapshots (with replacement) for these groups. A fraction is drawn from
+        # the highest-phase window so the current validation death wall is not averaged away by
+        # hundreds of earlier, already-solved phases.
+        bank_idx = torch.randint(0, self._onpolicy_bank_size, (num_onpolicy,), device=device)
+        hard_count = int(round(num_onpolicy * self.onpolicy_bank_hard_ratio))
+        if hard_count > 0 and self.onpolicy_bank_hard_window > 0:
+            phases_all = bank["phase_steps"]
+            phase_max = int(phases_all.max().item())
+            hard_cutoff = max(0, phase_max - self.onpolicy_bank_hard_window)
+            hard_indices = (phases_all >= hard_cutoff).nonzero(as_tuple=False).squeeze(-1)
+            if hard_indices.numel() > 0:
+                hard_count = min(hard_count, num_onpolicy)
+                hard_pick = torch.randint(0, int(hard_indices.numel()), (hard_count,), device=device)
+                hard_bank_idx = hard_indices.index_select(0, hard_pick)
+                if hard_count == num_onpolicy:
+                    bank_idx = hard_bank_idx
+                else:
+                    uniform_count = num_onpolicy - hard_count
+                    uniform_bank_idx = torch.randint(0, self._onpolicy_bank_size, (uniform_count,), device=device)
+                    bank_idx = torch.cat([hard_bank_idx, uniform_bank_idx], dim=0)
+                    bank_idx = bank_idx[torch.randperm(num_onpolicy, device=device)]
         root_state_local = bank["root_state_local"].index_select(0, bank_idx)
         joint_pos_full = bank["joint_pos"].index_select(0, bank_idx)
         joint_vel_full = bank["joint_vel"].index_select(0, bank_idx)

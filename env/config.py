@@ -80,7 +80,7 @@ CONTACT_ALLOWED_SUBSTRINGS = (
     "foot_contact_point",
     "sphere_hand_link",
 )
-OBS_DIM = 163
+OBS_DIM = 171
 CRITIC_OBS_DIM = 286
 UNDESIRED_CONTACT_THRESHOLD = 1.0
 # Official holosoma BadTrackingZOnly thresholds (g1_29dof_wbt_termination):

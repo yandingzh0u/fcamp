@@ -98,7 +98,8 @@ parser.add_argument(
     help=(
         "Frame-Factorized h>1: per-frame log_prob / reward / RTG / advantage / PPO ratio. "
         "Atomic root-cause fix (design S2-S5). Default off keeps chunk-level behavior. "
-        "No-op when horizon=1 (numerically equivalent to current path)."
+        "No-op when horizon=1. REQUIRES --basis_count 0 (or =horizon) and "
+        "--chunk_stitch_frames 0 (enforced by a startup guard)."
     ),
 )
 parser.add_argument(
@@ -123,10 +124,11 @@ parser.add_argument(
 parser.add_argument(
     "--chunk_stitch_frames",
     type=int,
-    default=0,
+    default=4,
     help=(
         "Blend the first N decoded residual-action frames from the previous executed "
-        "last_action into the raw policy chunk. 0 disables."
+        "last_action into the raw policy chunk. 0 disables. Default 4 removes the h=12 "
+        "cross-chunk PD target jump that shows up as visible standing jitter."
     ),
 )
 parser.add_argument(
@@ -159,10 +161,34 @@ parser.add_argument(
 )
 parser.add_argument("--onpolicy_state_ratio", type=float, default=0.5, help="Fraction of GRPO groups per update started from a banked on-policy state.")
 parser.add_argument("--onpolicy_refresh_every", type=int, default=25, help="Re-roll/refresh the on-policy state bank every N updates.")
-parser.add_argument("--onpolicy_bank_rollout_steps", type=int, default=480, help="Env steps to roll from phase 0 when building the bank (must exceed the death region).")
+parser.add_argument(
+    "--onpolicy_bank_rollout_steps",
+    type=int,
+    default=0,
+    help=(
+        "Env steps to roll from phase 0 when building the bank. 0 means the full motion clip; "
+        "shorter values are expanded to the full clip to avoid a late-phase distribution gap."
+    ),
+)
 parser.add_argument("--onpolicy_bank_min_phase", type=int, default=80, help="Only bank on-policy states at/after this phase (early phases covered by the phase-0 course).")
 parser.add_argument("--onpolicy_bank_capacity", type=int, default=16384, help="Max number of banked on-policy state snapshots (memory bound).")
 parser.add_argument("--onpolicy_bank_min_size", type=int, default=256, help="Minimum bank population before on-policy starts are used (else clean resets; bank self-fills as policy improves).")
+parser.add_argument(
+    "--onpolicy_bank_hard_ratio",
+    type=float,
+    default=0.5,
+    help=(
+        "Fraction of on-policy bank starts drawn from the highest-phase bank window. "
+        "Keeps the narrow validation death wall from being diluted by uniform replay over "
+        "hundreds of earlier bank phases."
+    ),
+)
+parser.add_argument(
+    "--onpolicy_bank_hard_window",
+    type=int,
+    default=96,
+    help="Phase width below bank phase_max used for hard on-policy bank replay.",
+)
 parser.add_argument(
     "--terminal_penalty",
     type=float,
@@ -284,7 +310,11 @@ parser.add_argument(
     "--reset_optimizer_on_resume",
     action="store_true",
     default=False,
-    help="Load policy weights from --resume but start a fresh optimizer state.",
+    help=(
+        "Load policy weights from --resume but start a fresh Adam moment state. The checkpoint "
+        "learning rate, adaptive sampler state, and RNG are still restored for curriculum "
+        "continuity."
+    ),
 )
 parser.add_argument("--log_every", type=int, default=1, help="Print metrics every N updates.")
 parser.add_argument("--validation_every", type=int, default=100, help="Run a validation rollout every N updates. 0 disables.")
@@ -431,6 +461,8 @@ def main() -> None:
         onpolicy_bank_min_phase=args_cli.onpolicy_bank_min_phase,
         onpolicy_bank_capacity=args_cli.onpolicy_bank_capacity,
         onpolicy_bank_min_size=args_cli.onpolicy_bank_min_size,
+        onpolicy_bank_hard_ratio=args_cli.onpolicy_bank_hard_ratio,
+        onpolicy_bank_hard_window=args_cli.onpolicy_bank_hard_window,
         terminal_penalty=args_cli.terminal_penalty,
         discount_gamma=args_cli.discount_gamma,
         clip_range=args_cli.clip_range,

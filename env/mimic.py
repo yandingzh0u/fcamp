@@ -67,6 +67,15 @@ class G1MimicEnv(
             dtype=torch.long,
             device=self.device,
         )
+        # Contact-sensor ids for the termination bodies (ankles + wrists). The actor needs to
+        # see the current contact state of the exact bodies whose z-error kills the episode,
+        # otherwise its chunk-start observation is blind to how close the wrists/ankles are to
+        # the termination gate (the dominant death cause in crawl).
+        self.termination_contact_body_ids = torch.tensor(
+            [self.contact_sensor.body_names.index(name) for name in termination_names],
+            dtype=torch.long,
+            device=self.device,
+        )
         self.motion = MimicMotionReference(
             cfg.motion_file,
             self.track_body_ids,

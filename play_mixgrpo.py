@@ -12,6 +12,14 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Play a trained MixGRPO checkpoint in IsaacLab.")
 parser.add_argument("--checkpoint", type=str, default="", help="Path to a saved MixGRPO checkpoint (.pt).")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to play.")
+parser.add_argument(
+    "--env_spacing",
+    type=float,
+    default=2.5,
+    help="Grid spacing between environments (meters). The crawl slope is a large per-env mesh, "
+    "so the default 2.5 makes neighboring slopes visually overlap when playing multiple envs. "
+    "Increase (e.g. 8 or 12) to spread them apart for clean visualization.",
+)
 parser.add_argument("--max_steps", type=int, default=0, help="Optional hard stop. 0 means run until the app closes.")
 parser.add_argument("--start_phase", type=int, default=-1, help="Motion phase index used for reset. Negative uses motion_start_phase.")
 parser.add_argument("--flow_steps", type=int, default=-1, help="Override checkpoint flow_steps. -1 keeps checkpoint value.")
@@ -20,6 +28,21 @@ parser.add_argument(
     type=float,
     default=-1.0,
     help="Override checkpoint action squash scale. Negative keeps checkpoint value; old checkpoints without this field use a near-identity scale.",
+)
+parser.add_argument(
+    "--chunk_stitch_frames",
+    type=int,
+    default=-1,
+    help=(
+        "Override checkpoint chunk stitching. Negative keeps checkpoint value; use e.g. 4 "
+        "to test an old h=12 checkpoint with boundary smoothing."
+    ),
+)
+parser.add_argument(
+    "--chunk_stitch_mode",
+    choices=("", "none", "linear", "smoothstep"),
+    default="",
+    help="Override checkpoint chunk stitch mode. Empty keeps checkpoint value.",
 )
 parser.add_argument(
     "--eval_initial_noise",
@@ -137,6 +160,14 @@ def main() -> None:
         action_scale_multiplier = float(args_cli.action_scale_multiplier)
     else:
         action_scale_multiplier = float(train_cfg.get("action_scale_multiplier", 1.0))
+    if args_cli.chunk_stitch_frames >= 0:
+        chunk_stitch_frames = int(args_cli.chunk_stitch_frames)
+    else:
+        chunk_stitch_frames = int(train_cfg.get("chunk_stitch_frames", 0))
+    if args_cli.chunk_stitch_mode:
+        chunk_stitch_mode = str(args_cli.chunk_stitch_mode)
+    else:
+        chunk_stitch_mode = str(train_cfg.get("chunk_stitch_mode", "smoothstep"))
     startup_randomization = (
         bool(train_cfg.get("startup_randomization", True))
         if args_cli.startup_randomization is None
@@ -162,6 +193,7 @@ def main() -> None:
         MimicEnvConfig(
             device=args_cli.device,
             num_envs=args_cli.num_envs,
+            env_spacing=float(args_cli.env_spacing),
             sim_dt=sim_dt,
             render=not args_cli.headless,
             render_every=max(1, args_cli.render_every),
@@ -188,8 +220,8 @@ def main() -> None:
         activation=train_cfg.get("activation", "elu"),
         action_squash_scale=action_squash_scale,
         basis_count=int(train_cfg.get("basis_count", 0)),
-        chunk_stitch_frames=int(train_cfg.get("chunk_stitch_frames", 0)),
-        chunk_stitch_mode=str(train_cfg.get("chunk_stitch_mode", "smoothstep")),
+        chunk_stitch_frames=chunk_stitch_frames,
+        chunk_stitch_mode=chunk_stitch_mode,
     ).to(env.device)
     policy.load_state_dict(payload["policy"])
     policy.eval()

@@ -72,13 +72,11 @@ class CheckpointMixin:
         else:
             raise KeyError(f"Checkpoint {checkpoint_path} has no optimizer state.")
 
-        # Learning rate: only force back to the configured initial LR when explicitly resetting
-        # the optimizer. Otherwise restore the adaptive (KL-controlled) LR so the resume is
-        # seamless instead of slamming the LR ~25x higher and shocking the policy.
-        if reset_optimizer:
-            resume_lr = float(self.cfg.policy_lr)
-        else:
-            resume_lr = float(payload.get("learning_rate", self.cfg.policy_lr))
+        # Learning rate is part of the policy trust-region state, not just Adam state. Even
+        # when the user asks for a fresh optimizer, keep the KL-controlled LR from the
+        # checkpoint so resume does not slam the policy with the initial LR.
+        checkpoint_lr = float(payload.get("learning_rate", self.cfg.policy_lr))
+        resume_lr = min(float(self.cfg.policy_lr), checkpoint_lr)
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = resume_lr
         if hasattr(self, "learning_rate"):
@@ -87,7 +85,7 @@ class CheckpointMixin:
         # Restore adaptive phase-sampler history so the failure-weighted curriculum continues
         # instead of restarting from a near-uniform cold state.
         has_rate_state = "adaptive_bin_failed_count" in payload and "adaptive_bin_exposure_count" in payload
-        if not reset_optimizer and has_rate_state and hasattr(self.env, "bin_exposure_count"):
+        if has_rate_state and hasattr(self.env, "bin_exposure_count"):
             saved_bins = payload["adaptive_bin_failed_count"].to(self.env.bin_failed_count)
             saved_exposure = payload["adaptive_bin_exposure_count"].to(self.env.bin_exposure_count)
             if saved_bins.shape == self.env.bin_failed_count.shape and saved_exposure.shape == self.env.bin_exposure_count.shape:
@@ -100,7 +98,7 @@ class CheckpointMixin:
                     f"env {tuple(self.env.bin_failed_count.shape)}); keeping fresh sampler state.",
                     flush=True,
                 )
-        elif not reset_optimizer and "adaptive_bin_failed_count" in payload and hasattr(self.env, "bin_exposure_count"):
+        elif "adaptive_bin_failed_count" in payload and hasattr(self.env, "bin_exposure_count"):
             self.env.bin_failed_count.zero_()
             self.env.bin_exposure_count.zero_()
             print(
@@ -109,15 +107,15 @@ class CheckpointMixin:
                 flush=True,
             )
 
-        # Restore RNG streams for reproducible continuation.
-        if not reset_optimizer:
-            try:
-                if "torch_rng_state" in payload:
-                    torch.random.set_rng_state(payload["torch_rng_state"].cpu())
-                if "cuda_rng_state" in payload and torch.cuda.is_available():
-                    torch.cuda.set_rng_state(payload["cuda_rng_state"].cpu(), self.env.device)
-            except Exception as exc:
-                print(f"[CHECKPOINT] WARN: could not restore RNG state: {exc}", flush=True)
+        # Restore RNG streams for reproducible continuation. A fresh optimizer should not
+        # imply a fresh data/curriculum stream.
+        try:
+            if "torch_rng_state" in payload:
+                torch.random.set_rng_state(payload["torch_rng_state"].cpu())
+            if "cuda_rng_state" in payload and torch.cuda.is_available():
+                torch.cuda.set_rng_state(payload["cuda_rng_state"].cpu(), self.env.device)
+        except Exception as exc:
+            print(f"[CHECKPOINT] WARN: could not restore RNG state: {exc}", flush=True)
 
         self.start_update = int(payload.get("update_idx", 0)) + 1
         print(
