@@ -1,0 +1,58 @@
+"""Environment snapshot / restore. Algorithm-agnostic.
+
+Used by validation (preserve training state across an eval rollout) and by the MixGRPO
+on-policy state bank. Operates only through the env's public state tensors + _write_robot_state.
+"""
+from __future__ import annotations
+
+import torch
+
+
+def snapshot_env_state(env) -> dict[str, torch.Tensor]:
+    robot = env.robot
+    return {
+        "root_state_w": robot.data.root_state_w.clone(),
+        "joint_pos": robot.data.joint_pos.clone(),
+        "joint_vel": robot.data.joint_vel.clone(),
+        "default_root_state": env.default_root_state.clone(),
+        "default_joint_pos": env.default_joint_pos.clone(),
+        "default_joint_vel": env.default_joint_vel.clone(),
+        "default_action_joint_pos": env.default_action_joint_pos.clone(),
+        "default_action_joint_vel": env.default_action_joint_vel.clone(),
+        "phase_steps": env.phase_steps.clone(),
+        "episode_steps": env.episode_steps.clone(),
+        "last_action": env.last_action.clone(),
+        "prev_action": env.prev_action.clone(),
+        "next_push_step": env.next_push_step.clone(),
+        "bin_failed_count": env.bin_failed_count.clone(),
+        "bin_exposure_count": env.bin_exposure_count.clone(),
+    }
+
+
+def restore_env_state(env, snapshot: dict[str, torch.Tensor]) -> None:
+    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    root_state = snapshot["root_state_w"]
+    root_pos_local = root_state[:, :3] - env.scene.env_origins
+    env.scene.reset(env_ids=env_ids)
+    env._write_robot_state(
+        root_pos=root_pos_local,
+        root_quat=root_state[:, 3:7],
+        root_lin_vel=root_state[:, 7:10],
+        root_ang_vel=root_state[:, 10:13],
+        joint_pos=snapshot["joint_pos"][:, env.action_joint_ids],
+        joint_vel=snapshot["joint_vel"][:, env.action_joint_ids],
+        env_ids=env_ids,
+    )
+    env.phase_steps = snapshot["phase_steps"].clone()
+    env.episode_steps = snapshot["episode_steps"].clone()
+    env.last_action = snapshot["last_action"].clone()
+    env.prev_action = snapshot.get("prev_action", torch.zeros_like(env.last_action)).clone()
+    env.next_push_step = snapshot["next_push_step"].clone()
+    env.default_root_state = snapshot["default_root_state"].clone()
+    env.default_joint_pos = snapshot["default_joint_pos"].clone()
+    env.default_joint_vel = snapshot["default_joint_vel"].clone()
+    env.default_action_joint_pos = snapshot["default_action_joint_pos"].clone()
+    env.default_action_joint_vel = snapshot["default_action_joint_vel"].clone()
+    env.bin_failed_count = snapshot["bin_failed_count"].clone()
+    env.bin_exposure_count = snapshot["bin_exposure_count"].clone()
+    env.scene.update(env.physics_dt)

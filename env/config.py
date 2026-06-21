@@ -234,6 +234,3 @@ class MimicEnvConfig(EnvConfig):
     termination_body_names: tuple[str, ...] = MIMIC_TERMINATION_BODY_NAMES
     foot_body_names: tuple[str, ...] = MIMIC_FOOT_BODY_NAMES
     anchor_body_name: str = MIMIC_ANCHOR_BODY_NAME
-    # Deprecated compatibility field. Actor observations use the verified legacy input:
-    # current reference only, no future reference frames.
-    future_ref_steps: int = 0
