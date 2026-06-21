@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from .mixgrpo import MixGRPO
+from .ppo import PPO
 
 _REGISTRY = {
     "mixgrpo": MixGRPO,
+    "ppo": PPO,
 }
 
 

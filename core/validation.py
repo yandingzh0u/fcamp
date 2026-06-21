@@ -23,11 +23,16 @@ def short_body_name(body_name: str) -> str:
 
 
 def validation_max_steps(train_cfg, env) -> int:
+    """VAL horizon = the full motion clip length (validate over the whole dataset), unless the
+    user explicitly requests a longer survival target. validation_max_steps in the config is
+    only a floor/explicit override; it must NOT cap VAL below the clip length (that would stop
+    validation before the motion ends)."""
+    motion = getattr(env, "motion", None)
+    motion_frames = int(getattr(motion, "num_frames", 0) or 0)
     steps = int(train_cfg.validation_max_steps)
+    if motion_frames > 0:
+        steps = max(steps, motion_frames)
     target = int(train_cfg.target_validation_steps)
-    max_episode_steps = int(getattr(env.task_cfg, "max_episode_steps", steps) or steps)
-    if max_episode_steps > 0:
-        steps = min(steps, max_episode_steps)
     if target > 0:
         steps = max(steps, target + 1)
     return max(1, steps)
@@ -51,6 +56,13 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
     cuda_rng_state = None
     original_obs_noise = getattr(env.task_cfg, "observation_noise", True)
     env.task_cfg.observation_noise = bool(tcfg.validation_observation_noise)
+    # Validate over the WHOLE motion clip: lift the training episode-length time-out so envs
+    # are not force-timed-out at max_episode_steps (e.g. 500) before the motion ends (959).
+    # Survival is then bounded only by the real tracking-failure terminations + motion end.
+    original_max_episode_steps = int(getattr(env.task_cfg, "max_episode_steps", -1))
+    motion_frames = int(getattr(getattr(env, "motion", None), "num_frames", 0) or 0)
+    if motion_frames > 0:
+        env.task_cfg.max_episode_steps = motion_frames
     if torch.cuda.is_available() and env_device.type == "cuda":
         cuda_rng_state = torch.cuda.get_rng_state(env_device)
     if fixed_seed is not None:
@@ -145,6 +157,7 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
                     break
     finally:
         env.task_cfg.observation_noise = original_obs_noise
+        env.task_cfg.max_episode_steps = original_max_episode_steps
         if training_snapshot is not None:
             restore_env_state(env, training_snapshot)
             trainer.current_observation = training_observation if training_observation is not None else env.get_observation()

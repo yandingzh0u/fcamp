@@ -50,9 +50,14 @@ class MimicStepMixin:
         if auto_reset:
             if bool(done.any()):
                 terminal_observation = self.get_observation().clone()
+                terminal_critic_observation = self.get_critic_observation().clone()
                 env_ids = done.nonzero(as_tuple=False).squeeze(-1)
                 reset_phases = self.sample_phase_indices(env_ids.numel(), horizon=max(1, reset_horizon))
                 self.reset_envs(env_ids, phase_indices=reset_phases)
+            else:
+                terminal_critic_observation = None
+        else:
+            terminal_critic_observation = None
 
         self.prev_action = previous_action.clone()
         self.last_action = action_offsets.clone()
@@ -71,6 +76,8 @@ class MimicStepMixin:
         if terminal_observation is not None:
             info["final_observation"] = terminal_observation
             info["_final_observation"] = done.clone()
+        if terminal_critic_observation is not None:
+            info["final_critic_observation"] = terminal_critic_observation
         return observation, reward, done, info
 
     def _apply_interval_pushes(self) -> None:

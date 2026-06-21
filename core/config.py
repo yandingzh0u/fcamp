@@ -99,6 +99,17 @@ class AlgoCfg:
     max_grad_norm: float = 1.0
     policy_lr: float = 1.0e-3
 
+    # --- PPO (actor-critic) specific. Unused by MixGRPO. ---
+    num_steps_per_env: int = 24
+    num_learning_epochs: int = 5
+    gae_lambda: float = 0.95
+    value_loss_coef: float = 1.0
+    actor_learning_rate: float = 1.0e-3
+    critic_learning_rate: float = 1.0e-3
+    weight_decay: float = 0.0
+    empirical_normalization: bool = True
+    init_at_random_ep_len: bool = True
+
 
 @dataclass
 class TrainCfg:
