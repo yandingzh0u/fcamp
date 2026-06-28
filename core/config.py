@@ -110,6 +110,11 @@ class AlgoCfg:
     empirical_normalization: bool = True
     init_at_random_ep_len: bool = True
 
+    # --- FPO++ specific. Unused by MixGRPO / PPO. ---
+    fpo_num_mc: int = 16            # Monte-Carlo (tau, eps) samples per action for the CFM ratio (paper Eq. 10).
+    fpo_delta_clip: float = 0.0     # Clamp |L_old - L_new| before exp() (App. C.23); <=0 disables.
+    fpo_cfm_loss_clamp: float = 0.0  # Clamp each CFM loss to [0, this] before the ratio diff; <=0 disables.
+
 
 @dataclass
 class TrainCfg:

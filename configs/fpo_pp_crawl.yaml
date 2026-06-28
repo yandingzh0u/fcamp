@@ -1,0 +1,109 @@
+# FPO++ (Flow Policy Optimization++) on the G1 crawl task.
+#
+# Paper-faithful first config (arXiv:2602.02481, motion-tracking Table A.2):
+#   flow_steps=50, fpo_num_mc=16, lr=3e-4, weight_decay=1e-4, clip_range=0.01,
+#   gamma=0.99, gae_lambda=0.95, num_learning_epochs=5, num_mini_batches=4,
+#   AdamW betas=(0.9,0.95) (set in code), running observation normalization on.
+#
+# basis_count == horizon gives the IDENTITY temporal basis, i.e. the CFM loss / flow ratio is
+# taken in the true per-frame action-chunk space (strict paper formulation). basis_count is
+# auto-clamped to horizon by FlowMatchingPolicy, so keep them equal for the paper-faithful run.
+# Set basis_count < horizon later to experiment with the smoother "latent FPO++" variant.
+#
+# CFM ratio scale: the CFM loss is the MEAN squared error over the chunk dims (see cfm_loss in
+# algorithms/fpo_pp.py), not the raw sum. A sum over D makes exp(l_old - l_new) scale with
+# dimensionality and explode (the fpo_pp_30 run hit ratio_max ~785, clip_frac ~0.9); the mean
+# keeps the exponent O(1) so delta_clip / clip_range act on a sane scale.
+#
+# Memory note: the rollout stores a per-sample noise buffer of shape
+#   (chunks_per_rollout, num_envs, fpo_num_mc, basis_count*action_dim).
+# With these defaults (6 chunks * 8192 envs * 16 mc * 232 dims) that is ~730 MB on the rollout
+# device. If you OOM, lower num_envs, fpo_num_mc, or rollout_env_steps.
+#
+# Single source of defaults. Override any leaf with --set a.b=c.
+
+algo_name: fpo_pp
+
+env:
+  device: cuda:0
+  num_envs: 8192
+  sim_dt: 0.02
+  fix_root_link: false
+  startup_randomization: true
+  action_scale_multiplier: 1.0
+  motion_file: ""          # "" resolves to the packaged crawl motion
+  max_episode_steps: -1    # <=0 follows the motion clip length
+  motion_start_phase: 0
+  motion_end_phase: -1
+  reset_noise: true
+  interval_pushes: true
+  observation_noise: true
+  adaptive_motion_sampling: true
+  adaptive_uniform_ratio: 0.1
+  motion_start_phase_ratio: 0.25
+  adaptive_alpha: 0.001
+  adaptive_kernel_size: 1
+  joint_acc_weight: 2.5e-7
+  joint_torque_weight: 1.0e-5
+  action_rate_weight: 0.1
+  action_accel_weight: 0.0
+  action_l2_weight: 0.0
+  term_z_weight: 3.0
+  term_z_sigma: 0.12
+
+algo:
+  # network / flow policy
+  action_dim: 29
+  horizon: 8
+  actor_hidden_dims: [512, 256, 128]
+  activation: elu
+  action_squash_scale: 5.0
+  basis_count: 8               # == horizon -> identity basis (paper-faithful action-chunk space)
+  chunk_stitch_frames: 0       # no cross-chunk stitching for the strict paper version
+  chunk_stitch_mode: none
+  num_generations: 1           # FPO++ has no GRPO groups
+  # flow integration
+  flow_steps: 50               # deterministic Euler steps (Table A.2)
+  init_noise_std: 1.0          # informational; Euler uses standard N(0, I) noise
+  eval_initial_noise: zero
+  # rollout (chunks_per_rollout = rollout_env_steps // horizon)
+  rollout_env_steps: 48        # horizon=8 -> 6 action chunks per rollout
+  chunks_per_rollout: 6        # fallback when rollout_env_steps <= 0
+  discount_gamma: 0.99
+  # FPO++ objective
+  fpo_num_mc: 16               # Monte-Carlo (tau, eps) samples per action (Eq. 10)
+  # With the mean-over-dim CFM loss the exponent is O(1), so delta_clip is now a rarely-hit safety
+  # rail rather than the primary control. cfm_loss_clamp off (mean already bounds scale).
+  fpo_delta_clip: 3.0          # safety clamp on |L_old - L_new| before exp() -> ratio in [0.05, 20]
+  fpo_cfm_loss_clamp: 0.0      # off; the mean reduction already keeps per-sample loss O(1)
+  clip_range: 0.01             # back to paper value (Table A.2); mean-scale ratio sits near 1
+  # actor-critic optimization
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  gae_lambda: 0.95
+  value_loss_coef: 1.0
+  policy_lr: 3.0e-4
+  weight_decay: 1.0e-4
+  max_grad_norm: 1.0
+  empirical_normalization: true
+  init_at_random_ep_len: true
+
+train:
+  seed: 0
+  max_updates: 1000
+  log_every: 1
+  save_every: 100
+  checkpoint_dir: ""
+  resume: ""
+  reset_optimizer_on_resume: false
+  validation_every: 0
+  validation_max_steps: 500
+  validation_start_phase: 0
+  validation_fixed_seed: -1
+  validation_preserve_state: true
+  validation_observation_noise: false
+  validation_done_frac_early_stop: 0.98
+  target_validation_steps: 0
+  success_checkpoint_name: success_10s.pt
+  debug_probe: false
+  debug_probe_every: 1
