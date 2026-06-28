@@ -48,9 +48,6 @@ algo:
   actor_hidden_dims: [512, 256, 128]
   activation: elu
   action_squash_scale: 5.0
-  basis_count: 4
-  chunk_stitch_frames: 4
-  chunk_stitch_mode: smoothstep
   # flow / SDE exploration
   flow_steps: 4
   sde_eta: 0.7

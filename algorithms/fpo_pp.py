@@ -117,7 +117,7 @@ class FPOPP(Algorithm):
         ).to(device)
         self.actor.train()
         self.critic = Critic(self.critic_obs_dim, tuple(cfg.actor_hidden_dims), cfg.activation).to(device)
-        # chunk_dim == action_dim (no temporal basis); kept for log/metric parity with the harness.
+        # chunk_dim == action_dim; kept for log/metric parity with the harness.
         self.chunk_dim = self.num_act
 
         self.empirical_normalization = bool(cfg.empirical_normalization)
@@ -734,7 +734,7 @@ class FPOPP(Algorithm):
         print(f"[INFO] motion_file={env.task_cfg.motion_file}", flush=True)
         print(
             f"[INFO] algo=fpo_pp actor_obs_dim={self.actor_obs_dim} critic_obs_dim={self.critic_obs_dim} "
-            f"action_dim={self.num_act} horizon={self.horizon} basis_count=1 "
+            f"action_dim={self.num_act} horizon={self.horizon} "
             f"chunk_dim={self.chunk_dim} num_envs={env.num_envs} num_steps_per_env={self.num_steps_per_env} "
             f"flow_steps={self.flow_steps} num_mc={self.num_mc} actor_scale={self.actor.actor_scale} "
             f"action_perturb_std={self.actor.action_perturb_std} timestep_embed_dim={self.actor.timestep_embed_dim} "

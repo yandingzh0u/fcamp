@@ -2,7 +2,7 @@
 #
 # SINGLE-STEP actor-critic, matching the official amazon-far/fpo-control robot structure:
 # PPO single-step rollout + single-step flow actor + CFM ratio + ASPO. One flow-generated action
-# per env step (horizon == 1, basis_count == 1 -> chunk_dim == action_dim == 29). There is NO
+# per env step (horizon == 1 -> chunk_dim == action_dim == 29). There is NO
 # action chunk, no terminal_penalty death shaping; deaths/timeouts use the validated PPO per-step
 # mechanics (timeout value bootstrap + done truncation in GAE, gamma=0.99 NOT gamma^H).
 #
@@ -55,17 +55,13 @@ algo:
   # action = actor_scale * x_t. Velocity net input = [obs, embed(t) (timestep_embed_dim), x_t].
   action_dim: 29
   horizon: 1
-  basis_count: 1               # informational; FPO++ flow acts directly in action space
-  chunk_stitch_frames: 0
-  chunk_stitch_mode: none
   actor_hidden_dims: [1024, 512, 256]
   activation: elu
   action_squash_scale: 5.0     # unused by the official Flow actor (kept for config compatibility)
-  actor_scale: 0.5             # action = actor_scale * x_t. <1 shrinks the EARLY random offset
-                               # (untrained flow ~ N(0,I)); the env is ref_joint_pos + action_scale*
-                               # offset, so offset~0 is the imitation prior. CFM target is x_t itself
-                               # (=action/actor_scale), so the flow training is unchanged -- this is
-                               # purely a gentler env-facing offset gain. Set 1.0 for pure official.
+  actor_scale: 1.0             # action = actor_scale * x_t (official, linear). MUST stay 1.0: CFM uses
+                               # scaled_action = action/actor_scale, so actor_scale<1 inflates the
+                               # effective action_perturb_std (0.1/scale) in the CFM target and
+                               # pollutes the ratio/KL/CFM-loss scale -- it is NOT a harmless gain.
   mlp_output_scale: 1.0        # scale on the raw velocity-net output (official)
   timestep_embed_dim: 8        # sinusoidal cos/sin timestep embedding width (official)
   cfm_loss_reduction: mean     # reduction over the action dim (official G1 tracking)
@@ -81,10 +77,12 @@ algo:
   # rollout
   num_steps_per_env: 48        # official G1 tracking; spans past the average death horizon
   discount_gamma: 0.99
-  # survival objective: a non-timeout death gets -terminal_penalty in its reward (enters GAE
-  # directly). The crawl task has no env-level termination reward, so per-step bootstrap alone
-  # under-credits death. Mirrors MixGRPO. Set 0.0 to recover pure official-tracking behaviour.
-  terminal_penalty: 50.0
+  # terminal_penalty: 0.0 = OFFICIAL RL logic. The FPO collect does NOT inject any extra death
+  # penalty into the reward; env dense reward enters storage as-is, timeout does value bootstrap,
+  # and a failure `done` only truncates GAE. PPO/MixGRPO already prove the env reward+termination
+  # is learnable, so FPO must not modify the MDP reward. (>0 re-enables the -penalty*failure
+  # injection in collect(); left configurable but off by default.)
+  terminal_penalty: 0.0
   # FPO++ objective (official G1 motion-tracking values)
   fpo_num_mc: 16               # Monte-Carlo (eps, t) samples per action (Eq. 10)
   fpo_delta_clip: 3.0          # STE clamp on log-ratio (l_old - l_new) before exp() (cfm_diff_clamp_max)

@@ -61,9 +61,6 @@ class AlgoCfg:
     actor_hidden_dims: tuple[int, ...] = (512, 256, 128)
     activation: str = "elu"
     action_squash_scale: float = 5.0
-    basis_count: int = 4
-    chunk_stitch_frames: int = 4
-    chunk_stitch_mode: str = "smoothstep"
     # flow / SDE exploration
     flow_steps: int = 4
     sde_eta: float = 0.7

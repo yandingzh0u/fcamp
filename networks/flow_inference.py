@@ -53,10 +53,7 @@ def deterministic_sde_ode_actions(
             sample_noise=zero_step_noise,
         )
 
-    return policy._action_transform(
-        latent,
-        start_action=observation[..., -policy.action_dim :],
-    ).view(
+    return policy._action_transform(latent).view(
         initial_noise.shape[0],
         policy.horizon,
         policy.action_dim,

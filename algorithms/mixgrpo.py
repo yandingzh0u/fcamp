@@ -53,9 +53,6 @@ class MixGRPO(Algorithm):
             activation=cfg.activation,
             init_noise_std=cfg.init_noise_std,
             action_squash_scale=cfg.action_squash_scale,
-            basis_count=int(cfg.basis_count),
-            chunk_stitch_frames=int(cfg.chunk_stitch_frames),
-            chunk_stitch_mode=str(cfg.chunk_stitch_mode),
         ).to(env.device)
         self.chunk_dim = self._policy.chunk_dim
 
@@ -162,7 +159,7 @@ class MixGRPO(Algorithm):
             step_log_probs.append(log_prob)
         if not step_log_probs:
             raise RuntimeError("SDE-ODE rollout produced no trainable transition log-probs.")
-        actions = self._policy._action_transform(latent, start_action=obs[..., -self.cfg.action_dim:])
+        actions = self._policy._action_transform(latent)
         stacked_log_probs = torch.stack(step_log_probs, dim=1)  # (B, num_sde_steps)
         return actions, torch.stack(all_latents, dim=1), stacked_log_probs
 
@@ -1598,10 +1595,8 @@ class MixGRPO(Algorithm):
         )
         print(
             f"[INFO] ppo_objective=chunk_level(joint_sample) "
-            f"basis_count={self._policy.basis_count} latent_dim={self._policy.chunk_dim} "
-            f"action_chunk_dim={self.action_chunk_dim} "
-            f"chunk_stitch_frames={self._policy.chunk_stitch_frames} "
-            f"chunk_stitch_mode={self._policy.chunk_stitch_mode}",
+            f"latent_dim={self._policy.chunk_dim} "
+            f"action_chunk_dim={self.action_chunk_dim}",
             flush=True,
         )
         print(

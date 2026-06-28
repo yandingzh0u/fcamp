@@ -124,8 +124,7 @@ def _cfg(num_micro_batches=1):
     # Single-step FPO++ (official-aligned): horizon=1, flow acts directly in action space.
     return types.SimpleNamespace(
         action_dim=3, horizon=1, actor_hidden_dims=(32, 32), activation="elu",
-        init_noise_std=1.0, action_squash_scale=5.0, basis_count=1,
-        chunk_stitch_frames=0, chunk_stitch_mode="none",
+        init_noise_std=1.0, action_squash_scale=5.0,
         actor_scale=1.0, mlp_output_scale=1.0, timestep_embed_dim=8,
         cfm_loss_reduction="mean", action_perturb_std=0.1, cfm_loss_t_inverse_cdf_beta=1.0,
         empirical_normalization=True, policy_lr=1e-4, weight_decay=1e-4,
