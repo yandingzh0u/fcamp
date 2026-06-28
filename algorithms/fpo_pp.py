@@ -1,39 +1,31 @@
-"""FPO++ (Flow Policy Optimization++) algorithm plugin.
+"""FPO++ (Flow Policy Optimization++) algorithm plugin -- official-aligned single-step actor.
 
-Paper-faithful implementation of FPO++ from "Flow Policy Gradients for Robot Control"
-(arXiv:2602.02481). FPO++ trains a flow-matching policy with a PPO-style actor-critic, but
-replaces the action log-likelihood ratio with a *conditional flow matching (CFM) loss ratio*:
+Faithful port of the amazon-far/fpo-control robot implementation, specifically the G1
+whole-body motion-tracking configuration (`G1FlatMotionTrackingFlowPPORunnerCfg`):
 
-    rho_i = exp( L_CFM_old_i - L_CFM_new_i )                         (paper Eq. 3 / 10)
+  PPO single-step rollout  +  single-step Flow actor  +  CFM-loss ratio  +  ASPO trust region
+  +  adaptive-KL learning rate.
 
-evaluated per Monte-Carlo (tau_i, eps_i) pair (per-sample ratio, paper Eq. 10), and combines a
-PPO clip (positive advantages) with the SPO trust region (negative advantages) into the
-Asymmetric SPO (ASPO) objective (paper Eq. 11/12/13).
+Differences from the earlier draft (the root causes this rewrite fixes):
 
-This is intentionally distinct from `algorithms/mixgrpo.py`, which uses an SDE-trajectory
-transition log_prob ratio. FPO++ does NOT use likelihoods at all.
+  * The actor has NO tanh squash. The executed action is LINEAR in the flow endpoint,
+    a = actor_scale * x_t (+ a small `action_perturb_std` Gaussian during training). The CFM
+    loss -- and therefore the FPO ratio rho_i = exp(l_old_i - l_new_i) -- is computed on the
+    *executed* action `a` itself (scaled back by a / actor_scale). Previously the CFM loss
+    lived on the pre-tanh latent `z` while the advantage belonged to a = squash(z); since the
+    FPO ratio is an approximate (not true) likelihood ratio, the tanh Jacobian does not cancel,
+    mis-aligning the gradient. See networks/fpo_actor.py.
+  * num_steps_per_env = 48 (official tracking) so a rollout spans past the average death horizon
+    and the per-step GAE (gamma=0.99) carries the death signal (no explicit terminal penalty).
+  * Adaptive learning rate driven by the flow-endpoint KL drift
+    kl = mean((x1_pred_new - x1_pred_old)^2), targeting desired_kl, exactly as the official code.
+  * Official update knobs: ASPO, symmetric CFM-loss clamp, negative-advantage CFM clamp,
+    straight-through (STE) clamp on the log-ratio, symmetric advantage clamp, UNCLIPPED value loss.
 
-Key pieces (all in flow / chunk-coefficient space of the existing FlowMatchingPolicy):
-  * Deterministic Euler integration of the learned velocity field for exploration / inference.
-    Training draws the initial noise eps ~ N(0, I); evaluation uses eps = 0 ("zero-sampling",
-    paper Sec. III-D).
-  * CFM loss with linear interpolation a^tau = tau*a + (1-tau)*eps and velocity target a - eps
-    (paper Eq. 5/6/8).
-  * A standard PPO critic + chunk-level GAE + clipped value loss (the paper's motion-tracking
-    appendix uses a critic, GAE, minibatches, and learning epochs).
-  * Chunk rollout (execute H frames per action chunk with alive-masking), reused from the
-    MixGRPO collection pattern, but with continuous rolling (auto_reset) like PPO instead of
-    GRPO group resets.
+The flow time convention follows the official code: t=1 is noise, t=0 is the action.
 
-The flow / CFM math lives in module-level pure functions (`euler_integrate`, `cfm_loss`,
-`fpo_pp_ratio`, `aspo_objective`) so it can be unit-tested without IsaacLab.
-
-Note (paper-faithfulness vs. trajectory parametrization): the CFM loss is computed in the
-flow's native space, which is the policy's `chunk_dim = basis_count * action_dim` coefficient
-space. With `basis_count == horizon` the temporal basis is the identity, so this is exactly the
-per-frame action-chunk space the paper operates in. With `basis_count < horizon` the CFM ratio
-is taken in the lower-dim coefficient/latent manifold ("latent FPO++"), which is no longer the
-strict paper formulation.
+`fpo_pp_ratio`, `aspo_objective`, `clamp_ste` are module-level pure functions so the FPO math
+is unit-testable without IsaacLab; the flow + CFM math lives in `networks/fpo_actor.FPOActor`.
 """
 from __future__ import annotations
 
@@ -44,102 +36,39 @@ from torch import nn
 
 from algorithms.base import Algorithm
 from core.logging import log_shared_tracking, log_shared_update_diagnostics
-from networks.flow_policy import FlowMatchingPolicy
+from networks.fpo_actor import FPOActor
 from networks.mlp_actor_critic import Critic, EmpiricalNormalization
 
 
-# ---------------------------------------------------------------------------- flow / CFM math
-def euler_integrate(policy: FlowMatchingPolicy, observation: torch.Tensor, x0: torch.Tensor, steps: int) -> torch.Tensor:
-    """Deterministic forward Euler integration of the learned velocity field.
+# ---------------------------------------------------------------------------- FPO objective math
+def clamp_ste(x: torch.Tensor, *, min: float | None = None, max: float | None = None) -> torch.Tensor:
+    """Straight-through clamp: forward uses the clamped value, backward passes identity gradient.
 
-    Flow convention (paper Eq. 5/6): time tau in [0, 1], tau=0 -> noise, tau=1 -> action;
-    a^tau = tau*a + (1-tau)*eps, so d a^tau / d tau = a - eps. We integrate tau: 0 -> 1 with
-    x_{k+1} = x_k + v_theta(x_k, tau_k; o) * dt, dt = 1/steps. x0 is the initial noise eps
-    (eps ~ N(0, I) for exploration, eps = 0 for zero-sampling).
-
-    Returns the flow endpoint a (the chunk-coefficient latent), shape == x0.shape.
+    Matches the official `clamp_ste` used on the log-ratio: clamping bounds the *value* fed to
+    exp() (numerical safety) without killing the gradient when a sample sits at the bound.
     """
-    if steps < 1:
-        raise ValueError(f"steps must be >= 1, got {steps}")
-    batch = x0.shape[0]
-    x = x0
-    dt = 1.0 / steps
-    for k in range(steps):
-        tau = torch.full((batch,), k * dt, device=x0.device, dtype=x0.dtype)
-        velocity = policy.velocity_field(observation, x, tau)
-        x = x + velocity * dt
-    return x
-
-
-def cfm_loss(
-    policy: FlowMatchingPolicy,
-    observation: torch.Tensor,
-    action_latent: torch.Tensor,
-    tau: torch.Tensor,
-    eps: torch.Tensor,
-    *,
-    loss_clamp: float = 0.0,
-) -> torch.Tensor:
-    """Per-Monte-Carlo-sample conditional flow matching loss (paper Eq. 8).
-
-        a^tau_i  = tau_i * a + (1 - tau_i) * eps_i
-        target_i = a - eps_i
-        l_i      = mean_d ( v_theta(a^tau_i, tau_i; o) - target_i )^2     # mean over chunk dims
-
-    IMPORTANT (ratio scale): the CFM loss is the MEAN squared error over the chunk dimension
-    (D = basis_count * action_dim), NOT the raw sum. The FPO++ ratio is exp(l_old - l_new); a
-    plain sum over D (=232..348 here) makes the exponent scale with dimensionality, so tiny
-    per-dim velocity changes blow the ratio up to e^6+ (observed ratio_max ~785 / clip_frac ~0.9
-    in the fpo_pp_30 run). Averaging over D keeps the exponent dimension-invariant and O(1), so
-    delta_clip / clip_range act on a sane scale. This matches the standard flow-matching MSE
-    convention; the paper's ||.||^2 notation is the per-sample objective, implemented as the mean.
-
-    Args:
-        observation:   (B, obs_dim) policy observation (already normalized by the caller).
-        action_latent: (B, D) flow endpoint a (chunk-coefficient latent).
-        tau:           (B, M) flow steps in [0, 1].
-        eps:           (B, M, D) noises ~ N(0, I).
-        loss_clamp:    if > 0, clamp each CFM loss to [0, loss_clamp] before it is used in the
-                       ratio difference (paper App. C.23: clamping CFM losses aids stability).
-
-    Returns:
-        (B, M) per-sample mean-squared CFM losses.
-    """
-    B, M = tau.shape
-    D = action_latent.shape[-1]
-    if eps.shape != (B, M, D):
-        raise ValueError(f"eps must be {(B, M, D)}, got {tuple(eps.shape)}")
-    obs_rep = observation.unsqueeze(1).expand(B, M, observation.shape[-1]).reshape(B * M, observation.shape[-1])
-    a = action_latent.unsqueeze(1).expand(B, M, D)
-    tau_e = tau.unsqueeze(-1)
-    a_tau = (tau_e * a + (1.0 - tau_e) * eps).reshape(B * M, D)
-    target = (a - eps).reshape(B * M, D)
-    tau_flat = tau.reshape(B * M)
-    pred = policy.velocity_field(obs_rep, a_tau, tau_flat)
-    loss = ((pred - target) ** 2).mean(-1).reshape(B, M)
-    if loss_clamp > 0.0:
-        loss = loss.clamp(min=0.0, max=float(loss_clamp))
-    return loss
+    clamped = x.clamp(min=min, max=max)
+    return x + (clamped - x).detach()
 
 
 def fpo_pp_ratio(old_cfm: torch.Tensor, new_cfm: torch.Tensor, delta_clip: float) -> torch.Tensor:
-    """Per-sample FPO++ ratio (paper Eq. 10): rho_i = exp(l_old_i - l_new_i).
+    """Per-sample FPO++ ratio rho_i = exp(l_old_i - l_new_i) (paper Eq. 10).
 
-    The difference is clamped before exponentiation (paper App. C.23) for numerical stability.
-    delta_clip <= 0 disables the clamp.
+    The difference is STE-clamped to <= delta_clip (the official `cfm_diff_clamp_max`) before
+    exp() for numerical stability. delta_clip <= 0 disables the clamp.
     """
     diff = old_cfm - new_cfm
     if delta_clip > 0.0:
-        diff = diff.clamp(min=-float(delta_clip), max=float(delta_clip))
+        diff = clamp_ste(diff, max=float(delta_clip))
     return torch.exp(diff)
 
 
 def aspo_objective(ratio: torch.Tensor, advantage: torch.Tensor, clip: float) -> torch.Tensor:
-    """Asymmetric SPO objective (paper Eq. 11/12).
+    """Asymmetric SPO objective (paper Eq. 11/12), to be MAXIMIZED.
 
-    PPO clip for advantage >= 0, SPO trust region for advantage < 0. `advantage` broadcasts
-    against `ratio` (e.g. ratio (B, M), advantage (B, 1)). Returns the per-element objective
-    psi_ASPO(rho, A) (to be maximized).
+    advantage >= 0 -> PPO clip: min(r*A, clip(r, 1-e, 1+e)*A)
+    advantage <  0 -> SPO:      r*A - |A|/(2e) * (r - 1)^2
+    `advantage` broadcasts against `ratio` (e.g. ratio (B, M), advantage (B, 1)).
     """
     if clip <= 0.0:
         raise ValueError(f"ASPO/PPO clip must be > 0, got {clip}")
@@ -157,27 +86,39 @@ class FPOPP(Algorithm):
         env = self.env
         if env.action_dim != cfg.action_dim:
             raise ValueError(f"Expected env action_dim {env.action_dim}, got {cfg.action_dim}")
+        # FPO++ is a SINGLE-STEP actor-critic (one flow action per env step). The flow acts
+        # directly in the env action space; there is no temporal action chunk. horizon != 1 is
+        # rejected -- that was the earlier chunk-based draft.
+        if int(cfg.horizon) != 1:
+            raise ValueError(
+                f"FPO++ requires horizon=1 (single-step flow actor), got horizon={cfg.horizon}. "
+                "Set algo.horizon=1 in the config."
+            )
         self.num_act = int(cfg.action_dim)
-        self.horizon = max(1, int(cfg.horizon))
+        self.horizon = 1
+        self.num_steps_per_env = max(1, int(cfg.num_steps_per_env))
         self.actor_obs_dim = env.observation_dim
         self.critic_obs_dim = env.critic_observation_dim
         device = env.device
 
-        self.actor = FlowMatchingPolicy(
+        self.flow_steps = max(1, int(cfg.flow_steps))
+        self.actor = FPOActor(
             obs_dim=self.actor_obs_dim,
             action_dim=self.num_act,
-            horizon=self.horizon,
             hidden_dims=tuple(cfg.actor_hidden_dims),
             activation=cfg.activation,
-            init_noise_std=cfg.init_noise_std,
-            action_squash_scale=cfg.action_squash_scale,
-            basis_count=cfg.basis_count,
-            chunk_stitch_frames=cfg.chunk_stitch_frames,
-            chunk_stitch_mode=cfg.chunk_stitch_mode,
+            actor_scale=float(cfg.actor_scale),
+            mlp_output_scale=float(cfg.mlp_output_scale),
+            timestep_embed_dim=int(cfg.timestep_embed_dim),
+            cfm_loss_reduction=str(cfg.cfm_loss_reduction),
+            sampling_steps=self.flow_steps,
+            action_perturb_std=float(cfg.action_perturb_std),
+            cfm_loss_t_inverse_cdf_beta=float(cfg.cfm_loss_t_inverse_cdf_beta),
         ).to(device)
+        self.actor.train()
         self.critic = Critic(self.critic_obs_dim, tuple(cfg.actor_hidden_dims), cfg.activation).to(device)
-
-        self.chunk_dim = self.actor.chunk_dim
+        # chunk_dim == action_dim (no temporal basis); kept for log/metric parity with the harness.
+        self.chunk_dim = self.num_act
 
         self.empirical_normalization = bool(cfg.empirical_normalization)
         if self.empirical_normalization:
@@ -187,22 +128,46 @@ class FPOPP(Algorithm):
             self.actor_obs_normalizer = nn.Identity()
             self.critic_obs_normalizer = nn.Identity()
 
-        # Single AdamW over actor + critic (paper Table A.2: one LR, AdamW betas (0.9, 0.95)).
+        # ONE AdamW object (so the harness checkpoints a single optimizer) but TWO param groups:
+        #   group "actor"  -> adaptive-KL learning rate (moves at runtime)
+        #   group "critic" -> fixed value_lr
+        # Crucially the actor and critic gradients are CLIPPED SEPARATELY in update() (see below),
+        # so the value head's large early gradient -- inflated by the terminal_penalty death credit
+        # -- can no longer dominate a shared global grad-norm and squash the actor's tiny gradient.
         self.learning_rate = float(cfg.policy_lr)
+        _value_lr = float(getattr(cfg, "value_lr", 0.0) or 0.0)
+        self.critic_learning_rate = _value_lr if _value_lr > 0.0 else self.learning_rate
         self._optimizer = torch.optim.AdamW(
-            list(self.actor.parameters()) + list(self.critic.parameters()),
-            lr=self.learning_rate,
-            betas=(0.9, 0.95),
+            [
+                {"params": list(self.actor.parameters()), "lr": self.learning_rate, "name": "actor"},
+                {"params": list(self.critic.parameters()), "lr": self.critic_learning_rate, "name": "critic"},
+            ],
+            betas=(0.9, 0.999),
             weight_decay=float(cfg.weight_decay),
         )
 
         self.num_mc = max(1, int(cfg.fpo_num_mc))
-        self.flow_steps = max(1, int(cfg.flow_steps))
-        self.delta_clip = float(cfg.fpo_delta_clip)
-        self.cfm_loss_clamp = float(cfg.fpo_cfm_loss_clamp)
+        # Official update knobs (G1 tracking values shown in comments).
+        self.cfm_diff_clamp_max = float(cfg.fpo_delta_clip)        # STE clamp on log-ratio (3.0)
+        self.cfm_loss_clamp = float(cfg.fpo_cfm_loss_clamp)        # symmetric CFM clamp (3.0)
+        self.cfm_loss_clamp_neg_adv = bool(cfg.cfm_loss_clamp_neg_adv)          # True
+        self.cfm_loss_clamp_neg_adv_max = float(cfg.cfm_loss_clamp_neg_adv_max)  # 20.0
+        self.adv_clamp = float(cfg.fpo_adv_clamp)                 # symmetric advantage clamp (5.0)
+        self.schedule = str(cfg.schedule)                        # "adaptive"
+        self.desired_kl = float(cfg.desired_kl)                  # 1e-4
+        self.trust_region_mode = str(cfg.trust_region_mode)      # "aspo"
+        self.num_micro_batches = max(1, int(cfg.num_micro_batches))  # gradient-accum microbatches
+        self.storage_action_noise_std = float(cfg.storage_action_noise_std)  # 0.0
+        # Survival objective: non-timeout deaths get -terminal_penalty in their reward so the
+        # failure enters GAE directly (the crawl task has no env-level termination reward and a
+        # rollout often does not see the death, so bootstrap truncation alone is too weak). This
+        # mirrors MixGRPO's terminal_penalty. Set 0 to disable (pure official tracking behaviour).
+        self.terminal_penalty = float(cfg.terminal_penalty)
+        self.lr_min = 1e-5
+        self.lr_max = 1e-2
+
         self.max_episode_steps = int(getattr(env.task_cfg, "max_episode_steps", -1))
         self._init_train_episode_stats()
-
         self._policy_module = nn.ModuleDict({"actor": self.actor, "critic": self.critic})
 
     @property
@@ -225,6 +190,8 @@ class FPOPP(Algorithm):
             return
         self.learning_rate = float(payload.get("learning_rate", self.learning_rate))
         for group in self._optimizer.param_groups:
+            if group.get("name") == "critic":
+                continue  # critic LR is fixed (value_lr), only the actor group is adaptive
             group["lr"] = self.learning_rate
         if self.empirical_normalization:
             if payload.get("actor_obs_normalizer") is not None:
@@ -241,9 +208,9 @@ class FPOPP(Algorithm):
         self._train_length_buffer: deque[float] = deque(maxlen=100)
         self._train_completed_episodes = 0
 
-    def _record_episode_stats(self, rewards, dones, step_counts) -> None:
+    def _record_episode_stats(self, rewards, dones) -> None:
         self._train_reward_sum += rewards.to(dtype=torch.float32)
-        self._train_episode_length += step_counts.to(dtype=torch.float32)
+        self._train_episode_length += 1.0
         done_ids = dones.nonzero(as_tuple=False).squeeze(-1)
         if done_ids.numel() == 0:
             return
@@ -260,18 +227,6 @@ class FPOPP(Algorithm):
     def _norm_critic(self, obs, update=True):
         return self.critic_obs_normalizer(obs, update=update) if self.empirical_normalization else obs
 
-    # ------------------------------------------------------------------ flow sampling
-    def _sample_action_chunk(self, actor_obs_n, raw_obs, x0):
-        """Euler-integrate the flow to the endpoint latent and transform to an action chunk.
-
-        Returns (action_chunk (N, H, A), action_latent (N, chunk_dim)).
-        """
-        latent = euler_integrate(self.actor, actor_obs_n, x0, self.flow_steps)
-        start_action = raw_obs[..., -self.num_act:]
-        action_flat = self.actor._action_transform(latent, start_action=start_action)
-        action_chunk = action_flat.view(actor_obs_n.shape[0], self.horizon, self.num_act)
-        return action_chunk, latent
-
     # ------------------------------------------------------------------ resets
     def initial_reset(self) -> torch.Tensor:
         obs = self.env.reset()
@@ -282,27 +237,33 @@ class FPOPP(Algorithm):
         return obs
 
     def reset_for_update(self, update_idx: int) -> torch.Tensor:
-        # FPO++ rolls continuously (auto_reset inside the chunk); nothing to re-sample per update.
+        # FPO++ rolls continuously (auto_reset inside step); nothing to re-sample per update.
         return self._obs
 
     # ------------------------------------------------------------------ rollout
     def collect(self, current_obs: torch.Tensor) -> dict:
+        """Single-step on-policy rollout (mirrors the official FPO.act / process_env_step).
+
+        Per env step: evaluate the critic, sample one flow action a = actor_scale*Euler(noise)
+        (+ action_perturb), draw M Monte-Carlo (eps, t) pairs and cache the old CFM loss and
+        flow-endpoint x1_pred (the ratio + KL references) of the EXECUTED action, then
+        env.step(auto_reset=True). Timeouts use the value bootstrap; done truncation happens in GAE.
+        """
         env = self.env
         device = env.device
         N = env.num_envs
-        H = self.horizon
         M = self.num_mc
-        D = self.chunk_dim
-        T = self._chunks_per_rollout()
+        A = self.num_act
+        T = self.num_steps_per_env
         gamma = float(self.cfg.discount_gamma)
 
-        raw_obs_buf = torch.zeros(T, N, self.actor_obs_dim, device=device)
         actor_obs_buf = torch.zeros(T, N, self.actor_obs_dim, device=device)
         critic_obs_buf = torch.zeros(T, N, self.critic_obs_dim, device=device)
-        latent_buf = torch.zeros(T, N, D, device=device)
-        tau_buf = torch.zeros(T, N, M, device=device)
-        eps_buf = torch.zeros(T, N, M, D, device=device)
+        actions_buf = torch.zeros(T, N, A, device=device)
+        cfm_t_buf = torch.zeros(T, N, M, 1, device=device)
+        cfm_eps_buf = torch.zeros(T, N, M, A, device=device)
         old_cfm_buf = torch.zeros(T, N, M, device=device)
+        x1_pred_buf = torch.zeros(T, N, M, A, device=device)
         values_buf = torch.zeros(T, N, 1, device=device)
         rewards_buf = torch.zeros(T, N, 1, device=device)
         dones_buf = torch.zeros(T, N, 1, dtype=torch.bool, device=device)
@@ -314,108 +275,137 @@ class FPOPP(Algorithm):
         first_chunk_infos: list[dict] = []
         action_abs_max = 0.0
 
+        # First-failure bookkeeping across the rollout (death phase / cause), for diagnostics and
+        # adaptive motion sampling. Per env: the first termination in this rollout window.
+        ever_done = torch.zeros(N, dtype=torch.bool, device=device)
+        first_done_step = torch.full((N,), T, dtype=torch.long, device=device)
+        first_done_phase = torch.full((N,), -1, dtype=torch.long, device=device)
+        first_done_ee_body = torch.zeros(N, dtype=torch.bool, device=device)
+        first_done_anchor_pos = torch.zeros(N, dtype=torch.bool, device=device)
+        first_done_anchor_ori = torch.zeros(N, dtype=torch.bool, device=device)
+        first_done_timeout = torch.zeros(N, dtype=torch.bool, device=device)
+        start_phase = None
+        _ps = getattr(env, "phase_steps", None)
+        if torch.is_tensor(_ps):
+            start_phase = _ps.detach().clone().long()
+
         with torch.no_grad():
             for t in range(T):
-                chunk_start_obs = obs
                 actor_obs_n = self._norm_actor(obs)
                 critic_obs_n = self._norm_critic(critic_obs)
                 value = self.critic.evaluate(critic_obs_n).detach()
 
-                x0 = torch.randn(N, D, device=device)
-                action_chunk, latent = self._sample_action_chunk(actor_obs_n, obs, x0)
-                action_abs_max = max(action_abs_max, float(action_chunk.abs().max().item()))
+                action = self.actor.act(actor_obs_n).detach()  # (N, A), linear scale + perturb
+                if self.storage_action_noise_std > 0.0:
+                    action = action + self.storage_action_noise_std * torch.randn_like(action)
+                action_abs_max = max(action_abs_max, float(action.abs().max().item()))
 
-                tau = torch.rand(N, M, device=device)
-                eps = torch.randn(N, M, D, device=device)
-                old_cfm = cfm_loss(self.actor, actor_obs_n, latent, tau, eps, loss_clamp=self.cfm_loss_clamp).detach()
+                cfm_eps = torch.randn(N, M, A, device=device)
+                cfm_t = self.actor.sample_cfm_timesteps(N, M, device=device)
+                old_cfm, x1_pred, _ = self.actor.get_cfm_loss(actor_obs_n, action, cfm_eps, cfm_t)
+                old_cfm = old_cfm.detach()
+                x1_pred = x1_pred.detach()
 
-                # ---- execute H frames (alive-masked); auto_reset only on the last frame ----
-                chunk_reward = torch.zeros(N, device=device, dtype=actor_obs_n.dtype)
-                chunk_done = torch.zeros(N, dtype=torch.bool, device=device)
-                chunk_timeout = torch.zeros(N, dtype=torch.bool, device=device)
-                chunk_live = torch.zeros(N, device=device, dtype=actor_obs_n.dtype)
-                timeout_bootstrap_value = torch.zeros(N, device=device, dtype=actor_obs_n.dtype)
-                timeout_bootstrap_discount = torch.zeros(N, device=device, dtype=actor_obs_n.dtype)
-                alive = torch.ones(N, dtype=torch.bool, device=device)
-                for f in range(H):
-                    alive_before = alive.clone()
-                    action_f = action_chunk[:, f, :]
-                    if bool((~alive_before).any()):
-                        action_f = torch.where(alive_before.unsqueeze(-1), action_f, torch.zeros_like(action_f))
-                    last_frame = f == H - 1
-                    next_obs, reward, done, info = env.step(
-                        action_f,
-                        auto_reset=last_frame,
-                        reset_horizon=max(1, (T - t - 1) * H + (H - f)),
-                    )
-                    if t == 0 and f == 0:
-                        first_chunk_infos.append(info)
-                    rollout_info_items.append((info, alive_before.detach()))
-                    contrib = alive_before.to(dtype=chunk_reward.dtype)
-                    chunk_reward = chunk_reward + (gamma ** f) * reward.to(dtype=chunk_reward.dtype) * contrib
-                    chunk_live = chunk_live + contrib
-                    timeout_f = info["done_terms"]["time_out"].bool()
-                    new_done = alive_before & done
-                    new_timeout = new_done & timeout_f
-                    chunk_done = chunk_done | new_done
-                    chunk_timeout = chunk_timeout | new_timeout
-                    if bool(new_timeout.any()):
-                        if last_frame and "final_critic_observation" in info:
-                            timeout_critic_obs = info["final_critic_observation"]
-                        else:
-                            timeout_critic_obs = env.get_critic_observation()
-                        timeout_critic_obs = self._norm_critic(timeout_critic_obs, update=False)
-                        timeout_values = self.critic.evaluate(timeout_critic_obs).detach().squeeze(1)
-                        timeout_bootstrap_value[new_timeout] = timeout_values[new_timeout]
-                        timeout_bootstrap_discount[new_timeout] = float(gamma ** (f + 1))
-                    for key, val in info["done_terms"].items():
-                        b = val.bool()
-                        done_terms_union[key] = b.clone() if key not in done_terms_union else (done_terms_union[key] | b)
-                    alive = alive & ~done
-                    obs = next_obs
-                    critic_obs = env.get_critic_observation()
+                next_obs, reward, done, info = env.step(action, auto_reset=True)
+                next_critic_obs = env.get_critic_observation()
 
-                # Timeout value bootstrap (truncation, not failure): add gamma^k * V(final state).
-                if bool(chunk_timeout.any()):
-                    chunk_reward = chunk_reward + timeout_bootstrap_discount * timeout_bootstrap_value
+                done_b = done.bool()
+                time_outs = info["done_terms"]["time_out"]
+                time_outs_b = time_outs.bool()
+                # Survival objective: a non-timeout death is a bad trajectory. Subtract
+                # terminal_penalty from its reward so the death enters GAE directly. Timeouts are
+                # truncations, NOT failures, and keep the value bootstrap below instead.
+                failure = done_b & ~time_outs_b
+                if self.terminal_penalty != 0.0 and bool(failure.any()):
+                    reward = reward - self.terminal_penalty * failure.to(reward.dtype)
 
-                raw_obs_buf[t] = chunk_start_obs
+                # Record the first termination per env (phase + cause) for [FIRST_FAILURE] /
+                # adaptive phase sampling.
+                newly_done = (~ever_done) & done_b
+                if bool(newly_done.any()):
+                    ids = newly_done.nonzero(as_tuple=False).squeeze(-1)
+                    first_done_step[ids] = t
+                    first_done_timeout[ids] = time_outs_b[ids]
+                    dterms = info["done_terms"]
+                    if "ee_body_bad" in dterms:
+                        first_done_ee_body[ids] = dterms["ee_body_bad"].bool()[ids]
+                    if "anchor_pos_bad" in dterms:
+                        first_done_anchor_pos[ids] = dterms["anchor_pos_bad"].bool()[ids]
+                    if "anchor_ori_bad" in dterms:
+                        first_done_anchor_ori[ids] = dterms["anchor_ori_bad"].bool()[ids]
+                    tps = info.get("termination_phase_steps")
+                    if torch.is_tensor(tps):
+                        first_done_phase[ids] = tps.long().to(device)[ids]
+                    ever_done[ids] = True
+
+                # Timeout value bootstrap: add gamma * V(final_state) for envs that timed out.
+                final_rewards = torch.zeros_like(reward)
+                if bool(time_outs.any()) and "final_critic_observation" in info:
+                    fco = self._norm_critic(info["final_critic_observation"], update=False)
+                    final_values = self.critic.evaluate(fco).detach().squeeze(1)
+                    final_rewards = final_rewards + gamma * final_values * time_outs.to(dtype=reward.dtype)
+
                 actor_obs_buf[t] = actor_obs_n
                 critic_obs_buf[t] = critic_obs_n
-                latent_buf[t] = latent
-                tau_buf[t] = tau
-                eps_buf[t] = eps
+                actions_buf[t] = action
+                cfm_t_buf[t] = cfm_t
+                cfm_eps_buf[t] = cfm_eps
                 old_cfm_buf[t] = old_cfm
+                x1_pred_buf[t] = x1_pred
                 values_buf[t] = value
-                rewards_buf[t] = chunk_reward.view(-1, 1)
-                dones_buf[t] = chunk_done.view(-1, 1)
-                self._record_episode_stats(chunk_reward, chunk_done, chunk_live)
+                rewards_buf[t] = (reward + final_rewards).view(-1, 1)
+                dones_buf[t] = done.view(-1, 1)
+
+                self._record_episode_stats(reward, done)
+                if t == 0:
+                    first_chunk_infos.append(info)
+                # Every single-step transition is a valid sample (the action was applied before
+                # auto_reset), so terminal transitions must count in the [DONE_ROLLOUT] diagnostics.
+                valid = torch.ones_like(done, dtype=torch.bool)
+                rollout_info_items.append((info, valid.detach()))
+                for key, val in info["done_terms"].items():
+                    b = val.bool()
+                    done_terms_union[key] = b.clone() if key not in done_terms_union else (done_terms_union[key] | b)
+
+                obs = next_obs
+                critic_obs = next_critic_obs
 
             last_critic_obs = self._norm_critic(critic_obs, update=False)
             last_values = self.critic.evaluate(last_critic_obs).detach()
-            chunk_gamma = gamma ** H
-            returns, advantages = self._compute_gae(last_values, values_buf, dones_buf, rewards_buf, chunk_gamma)
+            returns, advantages = self._compute_gae(last_values, values_buf, dones_buf, rewards_buf, gamma)
 
         self._obs = obs
         self._critic_obs = critic_obs
+        # Adaptive phase-sampler feedback: reinforce the motion phases the robot actually dies at
+        # so the most failure-prone interval is oversampled next rollout (MixGRPO parity).
+        self._update_adaptive_motion_sampler(first_done_phase, first_done_timeout, start_phase, T)
         return {
-            "raw_obs": raw_obs_buf, "actor_obs": actor_obs_buf, "critic_obs": critic_obs_buf, "latent": latent_buf,
-            "tau": tau_buf, "eps": eps_buf, "old_cfm": old_cfm_buf, "values": values_buf,
-            "returns": returns, "advantages": advantages, "rewards": rewards_buf, "dones": dones_buf,
+            "actor_obs": actor_obs_buf, "critic_obs": critic_obs_buf, "actions": actions_buf,
+            "cfm_t": cfm_t_buf, "cfm_eps": cfm_eps_buf, "old_cfm": old_cfm_buf, "x1_pred": x1_pred_buf,
+            "values": values_buf, "returns": returns, "advantages": advantages,
+            "rewards": rewards_buf, "dones": dones_buf,
             "done_terms_union": done_terms_union, "rollout_info_items": rollout_info_items,
             "first_chunk_infos": first_chunk_infos, "action_abs_max": action_abs_max,
+            "first_done_step": first_done_step, "first_done_phase": first_done_phase,
+            "first_done_ee_body": first_done_ee_body, "first_done_anchor_pos": first_done_anchor_pos,
+            "first_done_anchor_ori": first_done_anchor_ori, "first_done_timeout": first_done_timeout,
             "next_observation": obs,
         }
 
-    def _chunks_per_rollout(self) -> int:
-        rollout_env_steps = int(self.cfg.rollout_env_steps)
-        if rollout_env_steps > 0:
-            if rollout_env_steps % self.horizon != 0:
-                raise ValueError(
-                    f"rollout_env_steps ({rollout_env_steps}) must be divisible by horizon ({self.horizon})."
-                )
-            return max(1, rollout_env_steps // self.horizon)
-        return max(1, int(self.cfg.chunks_per_rollout))
+    def _update_adaptive_motion_sampler(self, first_done_phase, first_done_timeout, start_phase, rollout_steps) -> None:
+        env = self.env
+        update_sampler = getattr(env, "update_adaptive_motion_statistics", None)
+        if not callable(update_sampler):
+            return
+        num_frames = int(getattr(getattr(env, "motion", None), "num_frames", 0) or 0)
+        if num_frames <= 0 or start_phase is None:
+            return
+        died = first_done_phase >= 0
+        sampler_failed = died & (~first_done_timeout)
+        death_phase = first_done_phase.clamp(min=0, max=num_frames - 1)
+        survivor_phase = (start_phase + int(rollout_steps)).clamp(min=0, max=num_frames - 1)
+        sampler_phases = torch.where(died, death_phase, survivor_phase)
+        update_sampler(sampler_phases, sampler_failed, rollout_steps=int(rollout_steps))
 
     def _compute_gae(self, last_values, values, dones, rewards, gamma):
         lam = float(self.cfg.gae_lambda)
@@ -436,18 +426,18 @@ class FPOPP(Algorithm):
     def update(self, rollout: dict, collect_time: float) -> dict:
         import time as _time
         device = self.env.device
-        T, N = rollout["latent"].shape[0], rollout["latent"].shape[1]
+        T, N = rollout["actions"].shape[0], rollout["actions"].shape[1]
         B = T * N
         M = self.num_mc
-        D = self.chunk_dim
+        A = self.num_act
 
         actor_obs = rollout["actor_obs"].reshape(B, self.actor_obs_dim)
         critic_obs = rollout["critic_obs"].reshape(B, self.critic_obs_dim)
-        latent = rollout["latent"].reshape(B, D)
-        tau = rollout["tau"].reshape(B, M)
-        eps = rollout["eps"].reshape(B, M, D)
+        actions = rollout["actions"].reshape(B, A)
+        cfm_t = rollout["cfm_t"].reshape(B, M, 1)
+        cfm_eps = rollout["cfm_eps"].reshape(B, M, A)
         old_cfm = rollout["old_cfm"].reshape(B, M)
-        old_values = rollout["values"].reshape(B, 1)
+        old_x1_pred = rollout["x1_pred"].reshape(B, M, A)
         returns = rollout["returns"].reshape(B, 1)
         advantages = rollout["advantages"].reshape(B, 1)
 
@@ -460,14 +450,15 @@ class FPOPP(Algorithm):
         totals = {
             "actor_loss": 0.0, "value_loss": 0.0, "ratio": 0.0, "ratio_min": float("inf"),
             "ratio_max": 0.0, "clip_frac": 0.0, "cfm_new": 0.0, "cfm_old": 0.0, "grad_norm": 0.0,
+            "grad_norm_critic": 0.0, "kl": 0.0,
         }
         num_updates = 0
 
-        # Probe action drift before the update (zero-sampling greedy chunk).
+        # Probe greedy (zero-sampling) action drift across the whole update.
         probe_count = min(128, N)
         with torch.no_grad():
-            probe_obs = rollout["raw_obs"][0, :probe_count]
-            probe_before = self._zero_sample_chunk(probe_obs)
+            probe_obs_n = rollout["actor_obs"][0, :probe_count]
+            probe_before = self.actor.act_inference(probe_obs_n, eval_mode="zero")
             params_before = [p.detach().clone() for p in self.actor.parameters()]
 
         t1 = _time.perf_counter()
@@ -475,49 +466,98 @@ class FPOPP(Algorithm):
             perm = torch.randperm(B, device=device)
             for mb in range(num_mini_batches):
                 idx = perm[mb * mini_batch_size:(mb + 1) * mini_batch_size]
-                mb_actor_obs = actor_obs[idx]
-                mb_latent = latent[idx]
-                mb_tau = tau[idx]
-                mb_eps = eps[idx]
-                mb_old_cfm = old_cfm[idx]
-                mb_adv = advantages[idx]
-                mb_old_values = old_values[idx]
-                mb_returns = returns[idx]
-                mb_critic_obs = critic_obs[idx]
+                mb_size = idx.numel()
+                if mb_size == 0:
+                    continue
+                # Symmetric advantage clamp (official advantage_clamp), per logical minibatch.
+                mb_adv_full = advantages[idx].clamp(-self.adv_clamp, self.adv_clamp)
 
-                new_cfm = cfm_loss(self.actor, mb_actor_obs, mb_latent, mb_tau, mb_eps, loss_clamp=self.cfm_loss_clamp)
-                ratio = fpo_pp_ratio(mb_old_cfm, new_cfm, self.delta_clip)  # (mb, M)
-                objective = aspo_objective(ratio, mb_adv, clip)             # (mb, M)
-                actor_loss = -objective.mean()
-
-                value = self.critic.evaluate(mb_critic_obs)
-                value_clipped = mb_old_values + (value - mb_old_values).clamp(-clip, clip)
-                value_loss = torch.max((value - mb_returns) ** 2, (value_clipped - mb_returns) ** 2).mean()
-
-                loss = actor_loss + value_coef * value_loss
                 self._optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                grad_norm = nn.utils.clip_grad_norm_(
-                    list(self.actor.parameters()) + list(self.critic.parameters()), self.cfg.max_grad_norm
-                )
+                micro_chunks = torch.chunk(torch.arange(mb_size, device=device), self.num_micro_batches)
+                agg = {k: 0.0 for k in ("actor_loss", "value_loss", "ratio", "clip_frac", "cfm_new", "cfm_old", "kl")}
+                agg_ratio_min = float("inf")
+                agg_ratio_max = 0.0
+                for sub in micro_chunks:
+                    if sub.numel() == 0:
+                        continue
+                    weight = float(sub.numel()) / float(mb_size)
+                    li = idx[sub]
+                    new_cfm, x1_pred, _ = self.actor.get_cfm_loss(
+                        actor_obs[li], actions[li], cfm_eps[li], cfm_t[li]
+                    )
+                    value = self.critic.evaluate(critic_obs[li])
+                    mb_adv = mb_adv_full[sub]
+                    mb_old_cfm = old_cfm[li]
+
+                    # Symmetric CFM-loss clamp (numerical safety on both old and new).
+                    if self.cfm_loss_clamp > 0.0:
+                        mb_old_cfm = mb_old_cfm.clamp(max=self.cfm_loss_clamp)
+                        new_cfm = new_cfm.clamp(max=self.cfm_loss_clamp)
+                    # Negative-advantage CFM clamp: cap the new CFM where the action is bad,
+                    # preventing extreme ratios when the policy aggressively avoids it.
+                    if self.cfm_loss_clamp_neg_adv:
+                        new_cfm = torch.where(
+                            mb_adv < 0, new_cfm.clamp(max=self.cfm_loss_clamp_neg_adv_max), new_cfm
+                        )
+
+                    ratio = fpo_pp_ratio(mb_old_cfm, new_cfm, self.cfm_diff_clamp_max)  # (mb, M)
+                    surrogate = aspo_objective(ratio, mb_adv, clip)                     # (mb, M)
+                    actor_loss = -surrogate.mean()
+
+                    # Unclipped value loss (official use_clipped_value_loss=False).
+                    value_loss = (value - returns[li]).pow(2).mean()
+
+                    loss = actor_loss + value_coef * value_loss
+                    (loss * weight).backward()
+
+                    with torch.no_grad():
+                        agg["actor_loss"] += float(actor_loss.item()) * weight
+                        agg["value_loss"] += float(value_loss.item()) * weight
+                        agg["ratio"] += float(ratio.mean().item()) * weight
+                        agg["clip_frac"] += float((torch.abs(ratio - 1.0) > clip).float().mean().item()) * weight
+                        agg["cfm_new"] += float(new_cfm.mean().item()) * weight
+                        agg["cfm_old"] += float(mb_old_cfm.mean().item()) * weight
+                        agg_ratio_min = min(agg_ratio_min, float(ratio.min().item()))
+                        agg_ratio_max = max(agg_ratio_max, float(ratio.max().item()))
+                        # KL drift of the flow endpoint (official adaptive-LR signal).
+                        kl_micro = ((x1_pred.detach() - old_x1_pred[li]) ** 2).mean()
+                        agg["kl"] += float(kl_micro.item()) * weight
+
+                # Adaptive learning-rate schedule from the aggregated KL (official rule). Only the
+                # ACTOR group's LR is adapted; the critic keeps its fixed value_lr.
+                if self.schedule == "adaptive":
+                    kl_mean = agg["kl"]
+                    if kl_mean > self.desired_kl * 2.0:
+                        self.learning_rate = max(self.lr_min, self.learning_rate / 1.5)
+                    elif 0.0 < kl_mean < self.desired_kl / 2.0:
+                        self.learning_rate = min(self.lr_max, self.learning_rate * 1.5)
+                    for group in self._optimizer.param_groups:
+                        if group.get("name") != "critic":
+                            group["lr"] = self.learning_rate
+
+                # Clip actor and critic gradients SEPARATELY so the value head's large gradient
+                # cannot rescale (squash) the actor's gradient through a shared global norm.
+                grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm)
+                grad_norm_critic = nn.utils.clip_grad_norm_(self.critic.parameters(), self.cfg.max_grad_norm)
                 self._optimizer.step()
 
-                with torch.no_grad():
-                    totals["actor_loss"] += float(actor_loss.item())
-                    totals["value_loss"] += float(value_loss.item())
-                    totals["ratio"] += float(ratio.mean().item())
-                    totals["ratio_min"] = min(totals["ratio_min"], float(ratio.min().item()))
-                    totals["ratio_max"] = max(totals["ratio_max"], float(ratio.max().item()))
-                    totals["clip_frac"] += float((torch.abs(ratio - 1.0) > clip).float().mean().item())
-                    totals["cfm_new"] += float(new_cfm.mean().item())
-                    totals["cfm_old"] += float(mb_old_cfm.mean().item())
-                    totals["grad_norm"] += float(grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm)
+                totals["actor_loss"] += agg["actor_loss"]
+                totals["value_loss"] += agg["value_loss"]
+                totals["ratio"] += agg["ratio"]
+                totals["ratio_min"] = min(totals["ratio_min"], agg_ratio_min)
+                totals["ratio_max"] = max(totals["ratio_max"], agg_ratio_max)
+                totals["clip_frac"] += agg["clip_frac"]
+                totals["cfm_new"] += agg["cfm_new"]
+                totals["cfm_old"] += agg["cfm_old"]
+                totals["kl"] += agg["kl"]
+                totals["grad_norm"] += float(grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm)
+                totals["grad_norm_critic"] += float(grad_norm_critic.item() if torch.is_tensor(grad_norm_critic) else grad_norm_critic)
                 num_updates += 1
 
         update_time = _time.perf_counter() - t1
         denom = max(num_updates, 1)
         with torch.no_grad():
-            probe_after = self._zero_sample_chunk(probe_obs)
+            probe_after = self.actor.act_inference(probe_obs_n, eval_mode="zero")
             action_delta = float(torch.mean(torch.abs(probe_after - probe_before)).item())
             param_delta_sq = torch.zeros((), device=device)
             param_count = 0
@@ -527,7 +567,7 @@ class FPOPP(Algorithm):
                 param_count += d.numel()
             param_rms_delta = float(torch.sqrt(param_delta_sq / max(param_count, 1)).item())
 
-        agg = {
+        agg_out = {
             "actor_loss": totals["actor_loss"] / denom,
             "value_loss": totals["value_loss"] / denom,
             "ratio": totals["ratio"] / denom,
@@ -537,24 +577,59 @@ class FPOPP(Algorithm):
             "cfm_new": totals["cfm_new"] / denom,
             "cfm_old": totals["cfm_old"] / denom,
             "grad_norm": totals["grad_norm"] / denom,
+            "grad_norm_critic": totals["grad_norm_critic"] / denom,
+            "kl": totals["kl"] / denom,
             "action_delta": action_delta,
             "param_rms_delta": param_rms_delta,
             "mini_batch_size": float(mini_batch_size),
         }
-        return self._build_metrics(rollout, agg, collect_time, update_time)
+        return self._build_metrics(rollout, agg_out, collect_time, update_time)
 
     # ------------------------------------------------------------------ inference
-    def _zero_sample_chunk(self, obs: torch.Tensor) -> torch.Tensor:
-        """Zero-sampling greedy action chunk (paper Sec. III-D): integrate flow from eps = 0."""
-        actor_obs_n = self._norm_actor(obs, update=False)
-        x0 = torch.zeros(obs.shape[0], self.chunk_dim, device=obs.device, dtype=obs.dtype)
-        action_chunk, _ = self._sample_action_chunk(actor_obs_n, obs, x0)
-        return action_chunk
-
     def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
-        return self._zero_sample_chunk(obs)
+        """Zero-sampling inference. Returns (N, 1, action_dim): the validation harness indexes
+        [:, frame, :] and re-queries the policy every step (horizon == 1)."""
+        actor_obs_n = self._norm_actor(obs, update=False)
+        action = self.actor.act_inference(actor_obs_n, eval_mode="zero")
+        return action.unsqueeze(1)
 
     # ------------------------------------------------------------------ metrics + logging
+    def _add_first_failure_metrics(self, metrics: dict, rollout: dict) -> None:
+        """Populate rollout/first_failure_* (the shared [FIRST_FAILURE] line). `chunk` == step
+        index here (single-step rollout). Deaths that recorded no phase still count as failures."""
+        T = self.num_steps_per_env
+        fds = rollout.get("first_done_step")
+        if fds is None:
+            for k in ("first_failure_chunk_mean", "first_failure_chunk_min", "first_failure_chunk_max",
+                      "first_failure_phase_mean", "first_failure_phase_min", "first_failure_phase_max"):
+                metrics[f"rollout/{k}"] = float("nan")
+            return
+        died = fds < T
+        timeout = rollout["first_done_timeout"]
+        if bool(died.any()):
+            steps = fds[died].float()
+            metrics["rollout/first_failure_chunk_mean"] = float(steps.mean().item())
+            metrics["rollout/first_failure_chunk_min"] = float(steps.min().item())
+            metrics["rollout/first_failure_chunk_max"] = float(steps.max().item())
+        else:
+            for k in ("first_failure_chunk_mean", "first_failure_chunk_min", "first_failure_chunk_max"):
+                metrics[f"rollout/{k}"] = float("nan")
+        phase = rollout["first_done_phase"]
+        valid_phase = phase[phase >= 0]
+        if valid_phase.numel() > 0:
+            metrics["rollout/first_failure_phase_mean"] = float(valid_phase.float().mean().item())
+            metrics["rollout/first_failure_phase_min"] = float(valid_phase.min().item())
+            metrics["rollout/first_failure_phase_max"] = float(valid_phase.max().item())
+        else:
+            for k in ("first_failure_phase_mean", "first_failure_phase_min", "first_failure_phase_max"):
+                metrics[f"rollout/{k}"] = float("nan")
+        metrics["rollout/first_failure_ee_body_frac"] = float((rollout["first_done_ee_body"] & died).float().mean().item())
+        metrics["rollout/first_failure_anchor_pos_frac"] = float((rollout["first_done_anchor_pos"] & died).float().mean().item())
+        metrics["rollout/first_failure_anchor_ori_frac"] = float((rollout["first_done_anchor_ori"] & died).float().mean().item())
+        metrics["rollout/first_failure_timeout_frac"] = float((timeout & died).float().mean().item())
+        metrics["rollout/failure_frac"] = float((died & (~timeout)).float().mean().item())
+        metrics["fpo/terminal_penalty"] = float(self.terminal_penalty)
+
     def _build_metrics(self, rollout, agg, collect_time, update_time) -> dict:
         rewards = rollout["rewards"]
         dones = rollout["dones"]
@@ -568,7 +643,10 @@ class FPOPP(Algorithm):
             "fpo/cfm_new": agg["cfm_new"],
             "fpo/cfm_old": agg["cfm_old"],
             "fpo/grad_norm": agg["grad_norm"],
+            "fpo/grad_norm_critic": agg["grad_norm_critic"],
+            "fpo/kl": agg["kl"],
             "fpo/lr": self.learning_rate,
+            "fpo/critic_lr": self.critic_learning_rate,
             "rollout/reward_step_mean": float(rewards.mean().item()),
             "rollout/done_frac": float(dones.float().mean().item()),
             "act/abs_max_all": float(rollout.get("action_abs_max", 0.0)),
@@ -611,25 +689,21 @@ class FPOPP(Algorithm):
             metrics["train/mean_episode_length"] = float("nan")
         metrics["train/recent_episode_count"] = float(len(self._train_reward_buffer))
         metrics["train/completed_episodes"] = float(self._train_completed_episodes)
-        for k in ("first_failure_chunk_mean", "first_failure_chunk_min", "first_failure_chunk_max",
-                  "first_failure_phase_mean", "first_failure_phase_min", "first_failure_phase_max"):
-            metrics[f"rollout/{k}"] = float("nan")
-        # Generic action / latent magnitude summary so the shared [ACT_SUMMARY] line is not all-nan.
-        # (Joint-specific [TRAIN_ACT]/[TRAIN_BODY]/[REWARD_WEIGHTED] keys need env body mappings the
-        # MixGRPO path fills; FPO++ leaves those to the shared default.)
+        self._add_first_failure_metrics(metrics, rollout)
+        # Generic action magnitude summary so the shared [ACT_SUMMARY] line is not all-nan.
         with torch.no_grad():
-            lat = rollout["latent"].reshape(-1, self.chunk_dim)
-            metrics["latent/final_abs_mean"] = float(lat.abs().mean().item())
-            metrics["latent/final_abs_max"] = float(lat.abs().max().item())
-            greedy = self._zero_sample_chunk(rollout["raw_obs"][0])  # (N, H, A)
+            acts = rollout["actions"].reshape(-1, self.num_act)
+            metrics["latent/final_abs_mean"] = float(acts.abs().mean().item())
+            metrics["latent/final_abs_max"] = float(acts.abs().max().item())
+            greedy = self.actor.act_inference(rollout["actor_obs"][0], eval_mode="zero")  # (N, A)
             a_abs = greedy.abs()
             flat = a_abs.reshape(-1)
             metrics["act/abs_mean"] = float(flat.mean().item())
             metrics["act/abs_p95"] = float(torch.quantile(flat, 0.95).item())
             metrics["act/abs_p99"] = float(torch.quantile(flat, 0.99).item())
             metrics["act/abs_max"] = float(flat.max().item())
-            metrics["act/first_abs_mean"] = float(a_abs[:, 0].mean().item())
-            metrics["act/last_abs_mean"] = float(a_abs[:, -1].mean().item())
+            metrics["act/first_abs_mean"] = float(a_abs.mean().item())
+            metrics["act/last_abs_mean"] = float(a_abs.mean().item())
         return metrics
 
     def log(self, update_idx: int, max_updates: int, metrics: dict) -> None:
@@ -645,10 +719,12 @@ class FPOPP(Algorithm):
             f"[FPO++] actor_loss={metrics['fpo/actor_loss']:.5f} value_loss={metrics['fpo/value_loss']:.5f} "
             f"ratio={metrics['fpo/ratio']:.4f} [{metrics['fpo/ratio_min']:.3f},{metrics['fpo/ratio_max']:.3f}] "
             f"clip_frac={metrics['fpo/clip_frac']:.4f} cfm_old={metrics['fpo/cfm_old']:.4f} "
-            f"cfm_new={metrics['fpo/cfm_new']:.4f} grad={metrics['fpo/grad_norm']:.4f} lr={metrics['fpo/lr']:.6f}",
+            f"cfm_new={metrics['fpo/cfm_new']:.4f} kl={metrics['fpo/kl']:.6f} "
+            f"grad={metrics['fpo/grad_norm']:.4f} grad_c={metrics.get('fpo/grad_norm_critic', float('nan')):.4f} "
+            f"lr={metrics['fpo/lr']:.6f} critic_lr={metrics.get('fpo/critic_lr', float('nan')):.6f}",
             flush=True,
         )
-        log_shared_update_diagnostics(metrics, failure_label="FIRST_FAILURE", index_name="chunk")
+        log_shared_update_diagnostics(metrics, failure_label="FIRST_FAILURE", index_name="step")
         log_shared_tracking(metrics)
 
     def log_banner(self) -> None:
@@ -658,13 +734,18 @@ class FPOPP(Algorithm):
         print(f"[INFO] motion_file={env.task_cfg.motion_file}", flush=True)
         print(
             f"[INFO] algo=fpo_pp actor_obs_dim={self.actor_obs_dim} critic_obs_dim={self.critic_obs_dim} "
-            f"action_dim={self.num_act} horizon={self.horizon} basis_count={self.actor.basis_count} "
-            f"chunk_dim={self.chunk_dim} num_envs={env.num_envs} chunks_per_rollout={self._chunks_per_rollout()} "
-            f"flow_steps={self.flow_steps} num_mc={self.num_mc} clip={cfg.clip_range} "
-            f"delta_clip={self.delta_clip} cfm_loss_clamp={self.cfm_loss_clamp} "
+            f"action_dim={self.num_act} horizon={self.horizon} basis_count=1 "
+            f"chunk_dim={self.chunk_dim} num_envs={env.num_envs} num_steps_per_env={self.num_steps_per_env} "
+            f"flow_steps={self.flow_steps} num_mc={self.num_mc} actor_scale={self.actor.actor_scale} "
+            f"action_perturb_std={self.actor.action_perturb_std} timestep_embed_dim={self.actor.timestep_embed_dim} "
+            f"cfm_reduction={self.actor.cfm_loss_reduction} clip={cfg.clip_range} "
+            f"cfm_diff_clamp_max={self.cfm_diff_clamp_max} cfm_loss_clamp={self.cfm_loss_clamp} "
+            f"adv_clamp={self.adv_clamp} schedule={self.schedule} desired_kl={self.desired_kl} "
+            f"trust_region={self.trust_region_mode} num_micro_batches={self.num_micro_batches} "
+            f"terminal_penalty={self.terminal_penalty} "
             f"num_learning_epochs={cfg.num_learning_epochs} num_mini_batches={cfg.num_mini_batches} "
             f"gamma={cfg.discount_gamma} lam={cfg.gae_lambda} value_loss_coef={cfg.value_loss_coef} "
-            f"lr={cfg.policy_lr} weight_decay={cfg.weight_decay} "
+            f"lr={cfg.policy_lr} critic_lr={self.critic_learning_rate} weight_decay={cfg.weight_decay} "
             f"empirical_normalization={cfg.empirical_normalization} "
             f"actor_hidden_dims={list(cfg.actor_hidden_dims)} activation={cfg.activation}",
             flush=True,

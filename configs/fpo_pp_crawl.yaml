@@ -1,24 +1,23 @@
 # FPO++ (Flow Policy Optimization++) on the G1 crawl task.
 #
-# Paper-faithful first config (arXiv:2602.02481, motion-tracking Table A.2):
+# SINGLE-STEP actor-critic, matching the official amazon-far/fpo-control robot structure:
+# PPO single-step rollout + single-step flow actor + CFM ratio + ASPO. One flow-generated action
+# per env step (horizon == 1, basis_count == 1 -> chunk_dim == action_dim == 29). There is NO
+# action chunk, no terminal_penalty death shaping; deaths/timeouts use the validated PPO per-step
+# mechanics (timeout value bootstrap + done truncation in GAE, gamma=0.99 NOT gamma^H).
+#
+# Paper-faithful hyperparameters (arXiv:2602.02481, motion-tracking Table A.2):
 #   flow_steps=50, fpo_num_mc=16, lr=3e-4, weight_decay=1e-4, clip_range=0.01,
 #   gamma=0.99, gae_lambda=0.95, num_learning_epochs=5, num_mini_batches=4,
 #   AdamW betas=(0.9,0.95) (set in code), running observation normalization on.
 #
-# basis_count == horizon gives the IDENTITY temporal basis, i.e. the CFM loss / flow ratio is
-# taken in the true per-frame action-chunk space (strict paper formulation). basis_count is
-# auto-clamped to horizon by FlowMatchingPolicy, so keep them equal for the paper-faithful run.
-# Set basis_count < horizon later to experiment with the smoother "latent FPO++" variant.
-#
-# CFM ratio scale: the CFM loss is the MEAN squared error over the chunk dims (see cfm_loss in
-# algorithms/fpo_pp.py), not the raw sum. A sum over D makes exp(l_old - l_new) scale with
-# dimensionality and explode (the fpo_pp_30 run hit ratio_max ~785, clip_frac ~0.9); the mean
-# keeps the exponent O(1) so delta_clip / clip_range act on a sane scale.
+# CFM ratio scale: the CFM loss is the MEAN squared error over the action dim (see cfm_loss in
+# algorithms/fpo_pp.py), not the raw sum, so exp(l_old - l_new) stays O(1).
 #
 # Memory note: the rollout stores a per-sample noise buffer of shape
-#   (chunks_per_rollout, num_envs, fpo_num_mc, basis_count*action_dim).
-# With these defaults (6 chunks * 8192 envs * 16 mc * 232 dims) that is ~730 MB on the rollout
-# device. If you OOM, lower num_envs, fpo_num_mc, or rollout_env_steps.
+#   (num_steps_per_env, num_envs, fpo_num_mc, action_dim).
+# With these defaults (24 steps * 8192 envs * 16 mc * 29 dims) that is ~365 MB on the rollout
+# device. If you OOM, lower num_envs, fpo_num_mc, or num_steps_per_env.
 #
 # Single source of defaults. Override any leaf with --set a.b=c.
 
@@ -52,41 +51,65 @@ env:
   term_z_sigma: 0.12
 
 algo:
-  # network / flow policy
+  # network: single-step Flow actor (horizon=1 -> chunk_dim == action_dim). NO tanh squash;
+  # action = actor_scale * x_t. Velocity net input = [obs, embed(t) (timestep_embed_dim), x_t].
   action_dim: 29
-  horizon: 8
-  actor_hidden_dims: [512, 256, 128]
-  activation: elu
-  action_squash_scale: 5.0
-  basis_count: 8               # == horizon -> identity basis (paper-faithful action-chunk space)
-  chunk_stitch_frames: 0       # no cross-chunk stitching for the strict paper version
+  horizon: 1
+  basis_count: 1               # informational; FPO++ flow acts directly in action space
+  chunk_stitch_frames: 0
   chunk_stitch_mode: none
+  actor_hidden_dims: [1024, 512, 256]
+  activation: elu
+  action_squash_scale: 5.0     # unused by the official Flow actor (kept for config compatibility)
+  actor_scale: 0.5             # action = actor_scale * x_t. <1 shrinks the EARLY random offset
+                               # (untrained flow ~ N(0,I)); the env is ref_joint_pos + action_scale*
+                               # offset, so offset~0 is the imitation prior. CFM target is x_t itself
+                               # (=action/actor_scale), so the flow training is unchanged -- this is
+                               # purely a gentler env-facing offset gain. Set 1.0 for pure official.
+  mlp_output_scale: 1.0        # scale on the raw velocity-net output (official)
+  timestep_embed_dim: 8        # sinusoidal cos/sin timestep embedding width (official)
+  cfm_loss_reduction: mean     # reduction over the action dim (official G1 tracking)
+  action_perturb_std: 0.1      # Gaussian noise added to the action in training (official tracking)
+  cfm_loss_t_inverse_cdf_beta: 1.0
   num_generations: 1           # FPO++ has no GRPO groups
   # flow integration
-  flow_steps: 50               # deterministic Euler steps (Table A.2)
+  flow_steps: 16               # Euler steps generating one action (official default 64; 16 is a
+                               # compute/quality compromise -- 4 is too coarse, 64 makes collect ~16x
+                               # slower for this single-step actor)
   init_noise_std: 1.0          # informational; Euler uses standard N(0, I) noise
   eval_initial_noise: zero
-  # rollout (chunks_per_rollout = rollout_env_steps // horizon)
-  rollout_env_steps: 48        # horizon=8 -> 6 action chunks per rollout
-  chunks_per_rollout: 6        # fallback when rollout_env_steps <= 0
+  # rollout
+  num_steps_per_env: 48        # official G1 tracking; spans past the average death horizon
   discount_gamma: 0.99
-  # FPO++ objective
-  fpo_num_mc: 16               # Monte-Carlo (tau, eps) samples per action (Eq. 10)
-  # With the mean-over-dim CFM loss the exponent is O(1), so delta_clip is now a rarely-hit safety
-  # rail rather than the primary control. cfm_loss_clamp off (mean already bounds scale).
-  fpo_delta_clip: 3.0          # safety clamp on |L_old - L_new| before exp() -> ratio in [0.05, 20]
-  fpo_cfm_loss_clamp: 0.0      # off; the mean reduction already keeps per-sample loss O(1)
-  clip_range: 0.01             # back to paper value (Table A.2); mean-scale ratio sits near 1
+  # survival objective: a non-timeout death gets -terminal_penalty in its reward (enters GAE
+  # directly). The crawl task has no env-level termination reward, so per-step bootstrap alone
+  # under-credits death. Mirrors MixGRPO. Set 0.0 to recover pure official-tracking behaviour.
+  terminal_penalty: 50.0
+  # FPO++ objective (official G1 motion-tracking values)
+  fpo_num_mc: 16               # Monte-Carlo (eps, t) samples per action (Eq. 10)
+  fpo_delta_clip: 3.0          # STE clamp on log-ratio (l_old - l_new) before exp() (cfm_diff_clamp_max)
+  fpo_cfm_loss_clamp: 3.0      # symmetric clamp on old/new CFM loss (cfm_loss_clamp)
+  cfm_loss_clamp_neg_adv: true # clamp new CFM loss where advantage < 0
+  cfm_loss_clamp_neg_adv_max: 20.0
+  fpo_adv_clamp: 5.0           # symmetric advantage clamp before the surrogate
+  clip_range: 0.01             # ASPO/PPO clip epsilon (official tracking)
+  trust_region_mode: aspo
   # actor-critic optimization
-  num_learning_epochs: 5
-  num_mini_batches: 4
+  schedule: adaptive           # KL-driven adaptive learning rate
+  desired_kl: 1.0e-4           # target flow-endpoint KL drift (official)
+  num_learning_epochs: 16      # official tracking (default; humanoid uses 16 here)
+  num_mini_batches: 6          # official tracking
+  num_micro_batches: 8         # gradient-accum microbatches per logical minibatch; 8 keeps the
+                               # update CFM forward within 16GB at num_envs=8192 (lower to 1 for 2048)
   gae_lambda: 0.95
   value_loss_coef: 1.0
-  policy_lr: 3.0e-4
+  policy_lr: 1.0e-4            # initial ACTOR LR (adaptive schedule moves it)
+  value_lr: 1.0e-3            # fixed CRITIC LR, decoupled from the actor (clipped separately too)
   weight_decay: 1.0e-4
   max_grad_norm: 1.0
   empirical_normalization: true
   init_at_random_ep_len: true
+  storage_action_noise_std: 0.0
 
 train:
   seed: 0

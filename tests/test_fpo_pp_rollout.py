@@ -65,8 +65,14 @@ class FakeEnv:
         self.device = torch.device("cpu")
         self.task_cfg = types.SimpleNamespace(max_episode_steps=20, motion_file="fake_motion")
         self.episode_steps = torch.zeros(num_envs, dtype=torch.long)
+        self.phase_steps = torch.zeros(num_envs, dtype=torch.long)
+        self.motion = types.SimpleNamespace(num_frames=100)
         self._gen = torch.Generator().manual_seed(123)
         self._step = 0
+        self.sampler_calls = []
+
+    def update_adaptive_motion_statistics(self, phases, failed, rollout_steps):
+        self.sampler_calls.append((phases.clone(), failed.clone(), int(rollout_steps)))
 
     def _obs(self):
         return torch.randn(self.num_envs, self.observation_dim, generator=self._gen)
@@ -99,27 +105,38 @@ class FakeEnv:
             timeout[1] = True           # env 1 times out
         done_terms = {k: torch.zeros(self.num_envs, dtype=torch.bool) for k in DONE_KEYS}
         done_terms["time_out"] = timeout
-        done_terms["anchor_pos_bad"] = done & ~timeout
+        # env 0 dies via ee_body_bad (the crawl failure mode); record it as the death cause.
+        done_terms["ee_body_bad"] = done & ~timeout
         reward_terms = {k: torch.randn(self.num_envs, generator=self._gen) * 0.05 for k in REWARD_KEYS}
+        self.phase_steps = (self.phase_steps + 1) % self.motion.num_frames
         self._cur_obs = self._obs()
         self._cur_critic = self._critic()
-        info = {"done_terms": done_terms, "reward_terms": reward_terms}
+        info = {
+            "done_terms": done_terms, "reward_terms": reward_terms,
+            "termination_phase_steps": self.phase_steps.clone(),
+        }
         if auto_reset and bool(timeout.any()):
             info["final_critic_observation"] = self._critic()
         return self._cur_obs, reward, done, info
 
 
-def _cfg():
+def _cfg(num_micro_batches=1):
+    # Single-step FPO++ (official-aligned): horizon=1, flow acts directly in action space.
     return types.SimpleNamespace(
-        action_dim=3, horizon=4, actor_hidden_dims=(32, 32), activation="elu",
-        init_noise_std=1.0, action_squash_scale=5.0, basis_count=4,
+        action_dim=3, horizon=1, actor_hidden_dims=(32, 32), activation="elu",
+        init_noise_std=1.0, action_squash_scale=5.0, basis_count=1,
         chunk_stitch_frames=0, chunk_stitch_mode="none",
-        empirical_normalization=True, policy_lr=3e-4, weight_decay=1e-4,
-        fpo_num_mc=6, flow_steps=8, fpo_delta_clip=0.0, fpo_cfm_loss_clamp=0.0,
+        actor_scale=1.0, mlp_output_scale=1.0, timestep_embed_dim=8,
+        cfm_loss_reduction="mean", action_perturb_std=0.1, cfm_loss_t_inverse_cdf_beta=1.0,
+        empirical_normalization=True, policy_lr=1e-4, weight_decay=1e-4,
+        fpo_num_mc=6, flow_steps=4, fpo_delta_clip=3.0, fpo_cfm_loss_clamp=3.0,
+        cfm_loss_clamp_neg_adv=True, cfm_loss_clamp_neg_adv_max=20.0, fpo_adv_clamp=5.0,
+        schedule="adaptive", desired_kl=1e-4, trust_region_mode="aspo",
+        num_micro_batches=num_micro_batches, storage_action_noise_std=0.0,
         init_at_random_ep_len=True,
-        rollout_env_steps=8, chunks_per_rollout=2, discount_gamma=0.99,
+        num_steps_per_env=6, discount_gamma=0.99, terminal_penalty=50.0,
         num_mini_batches=2, num_learning_epochs=2, clip_range=0.01,
-        value_loss_coef=1.0, max_grad_norm=1.0, gae_lambda=0.95,
+        value_loss_coef=1.0, max_grad_norm=1.0, gae_lambda=0.95, value_lr=1.0e-3,
     )
 
 
@@ -134,27 +151,47 @@ def test_end_to_end():
     env = FakeEnv()
     algo = fpo.FPOPP(cfg=_cfg(), env=env, simulation_app=None)
     algo.build()
-    check("chunk_dim == basis_count*action_dim", algo.chunk_dim == 4 * 3)
-    check("chunks_per_rollout == rollout_env_steps//horizon", algo._chunks_per_rollout() == 2)
+    check("chunk_dim == action_dim", algo.chunk_dim == 3)
+    check("horizon forced to 1", algo.horizon == 1)
+    check("num_steps_per_env", algo.num_steps_per_env == 6)
 
     obs = algo.initial_reset()
     check("initial_reset obs shape", obs.shape == (env.num_envs, env.observation_dim))
 
     obs = algo.reset_for_update(1)
+    env._step = 0
     rollout = algo.collect(obs)
-    T = algo._chunks_per_rollout()
+    T = algo.num_steps_per_env
     N = env.num_envs
     M = algo.num_mc
     D = algo.chunk_dim
-    check("rollout latent shape", rollout["latent"].shape == (T, N, D))
-    check("rollout eps shape", rollout["eps"].shape == (T, N, M, D))
-    check("rollout tau shape", rollout["tau"].shape == (T, N, M))
+    check("env.step called num_steps_per_env times", env._step == T)
+    check("rollout actions shape (T, N, action_dim)", rollout["actions"].shape == (T, N, D))
+    check("rollout cfm_eps shape", rollout["cfm_eps"].shape == (T, N, M, D))
+    check("rollout cfm_t shape", rollout["cfm_t"].shape == (T, N, M, 1))
     check("rollout old_cfm shape", rollout["old_cfm"].shape == (T, N, M))
+    check("rollout x1_pred shape (T, N, M, A)", rollout["x1_pred"].shape == (T, N, M, D))
     check("rollout returns shape", rollout["returns"].shape == (T, N, 1))
     check("rollout advantages shape", rollout["advantages"].shape == (T, N, 1))
     check("advantages finite", bool(torch.isfinite(rollout["advantages"]).all()))
     check("old_cfm finite & non-negative",
           bool(torch.isfinite(rollout["old_cfm"]).all()) and bool((rollout["old_cfm"] >= 0).all()))
+    check("x1_pred finite", bool(torch.isfinite(rollout["x1_pred"]).all()))
+    check("no chunk-only keys (latent/fail/lost_frames/raw_obs) in rollout",
+          not any(k in rollout for k in ("latent", "fail", "lost_frames", "raw_obs")))
+
+    # Survival objective: env 0 dies (non-timeout) every 5th step; its reward must be pushed far
+    # below the env reward scale by -terminal_penalty, and the failure must be recorded.
+    rewards = rollout["rewards"]
+    check("terminal_penalty applied to failure rewards (min << env scale)",
+          float(rewards.min().item()) < -10.0)
+    check("first_done_step recorded for env 0 (failure)", int(rollout["first_done_step"][0].item()) < T)
+    check("env 0 death recorded as ee_body_bad", bool(rollout["first_done_ee_body"][0].item()))
+    check("env 0 not a timeout", not bool(rollout["first_done_timeout"][0].item()))
+    check("adaptive motion sampler was called", len(env.sampler_calls) == 1)
+    sp, sf, rs = env.sampler_calls[0]
+    check("sampler shapes/rollout_steps", sp.shape == (N,) and sf.shape == (N,) and rs == T)
+    check("sampler flags env 0 as failed", bool(sf[0].item()))
 
     # Snapshot actor params; one update must change them.
     before = [p.detach().clone() for p in algo.actor.parameters()]
@@ -165,22 +202,56 @@ def test_end_to_end():
     check("actor_loss finite", torch.isfinite(torch.tensor(metrics["fpo/actor_loss"])))
     check("value_loss finite & >=0", metrics["fpo/value_loss"] >= 0)
     check("ratio reported", "fpo/ratio" in metrics and metrics["fpo/ratio"] > 0)
+    check("kl reported & finite", "fpo/kl" in metrics and torch.isfinite(torch.tensor(metrics["fpo/kl"])))
+    # Gradient decoupling: actor and critic clipped separately; critic LR is fixed (value_lr),
+    # actor LR is the adaptive one (independent param groups).
+    check("separate critic grad reported", "fpo/grad_norm_critic" in metrics)
+    check("critic_lr == value_lr (decoupled, fixed)", abs(metrics["fpo/critic_lr"] - 1.0e-3) < 1e-12)
+    group_names = {g.get("name") for g in algo.optimizer.param_groups}
+    check("optimizer has separate actor/critic groups", {"actor", "critic"} <= group_names)
+    critic_group = next(g for g in algo.optimizer.param_groups if g.get("name") == "critic")
+    check("critic group LR stayed at value_lr", abs(critic_group["lr"] - 1.0e-3) < 1e-12)
     check("metrics has reward terms", any(k.startswith("reward/") for k in metrics))
     check("metrics has done fracs", any(k.startswith("done/") for k in metrics))
+    check("first_failure metrics populated (ee_body_frac > 0)",
+          metrics["rollout/first_failure_ee_body_frac"] > 0.0)
+    check("failure_frac reported", "rollout/failure_frac" in metrics)
 
     # log() should not raise (uses stubbed shared logging).
     algo.log(1, 10, metrics)
 
-    # Zero-sampling determinism: same obs -> identical greedy chunk; shape (N, H, A).
+    # Zero-sampling determinism: same obs -> identical greedy action; shape (N, 1, A).
     probe = env.get_observation()
     a1 = algo.deterministic_actions(probe)
     a2 = algo.deterministic_actions(probe)
-    check("deterministic_actions shape (N, H, A)", a1.shape == (N, algo.horizon, algo.num_act))
+    check("deterministic_actions shape (N, 1, A)", a1.shape == (N, 1, algo.num_act))
     check("zero-sampling is deterministic", torch.allclose(a1, a2, atol=1e-6))
-    check("actions within squash bound", bool((a1.abs() <= algo.cfg.action_squash_scale + 1e-4).all()))
+    check("actions finite (no clipping in official Flow actor)", bool(torch.isfinite(a1).all()))
+
+
+def test_microbatch_matches_single_batch():
+    """Gradient-accumulation microbatching must produce the same update as one backward."""
+    def _run(num_micro):
+        torch.manual_seed(7)
+        env = FakeEnv()
+        algo = fpo.FPOPP(cfg=_cfg(num_micro_batches=num_micro), env=env, simulation_app=None)
+        algo.build()
+        obs = algo.initial_reset()
+        obs = algo.reset_for_update(1)
+        env._step = 0
+        rollout = algo.collect(obs)
+        algo.update(rollout, collect_time=0.0)
+        return [p.detach().clone() for p in algo.actor.parameters()]
+
+    single = _run(1)
+    micro = _run(3)
+    same = all(torch.allclose(a, b, atol=1e-5) for a, b in zip(single, micro))
+    check("microbatched update == single-batch update", same)
 
 
 if __name__ == "__main__":
     print("[test_end_to_end]")
     test_end_to_end()
+    print("\n[test_microbatch_matches_single_batch]")
+    test_microbatch_matches_single_batch()
     print("\nFPO++ end-to-end rollout/update smoke test passed.")

@@ -73,6 +73,14 @@ class CoreTrainer:
 
             metrics = self.algo.update(rollout, collect_time)
 
+            # Free the rollout BEFORE the next iteration's collect() runs. Otherwise the old
+            # rollout's large MC buffers (cfm_eps / x1_pred, ~1.4GiB at 8192x48x16) stay alive
+            # while the next collect() allocates a fresh rollout + CFM activations, doubling peak
+            # memory and OOM-ing on the 2nd collect. empty_cache() returns the freed blocks to the
+            # CUDA allocator so Isaac/PhysX (non-PyTorch) can reuse that VRAM.
+            del rollout
+            torch.cuda.empty_cache()
+
             if update_idx % tcfg.log_every == 0:
                 self.algo.log(update_idx, tcfg.max_updates, metrics)
 

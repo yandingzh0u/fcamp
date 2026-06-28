@@ -98,6 +98,9 @@ class AlgoCfg:
     micro_batch_size: int = 8192
     max_grad_norm: float = 1.0
     policy_lr: float = 1.0e-3
+    value_lr: float = 1.0e-3   # critic LR. Decoupled from actor (adaptive) LR so the value head's
+                               # large early gradient (esp. with terminal_penalty) cannot drag the
+                               # actor's adaptive schedule. <=0 -> follow policy_lr.
 
     # --- PPO (actor-critic) specific. Unused by MixGRPO. ---
     num_steps_per_env: int = 24
@@ -111,9 +114,23 @@ class AlgoCfg:
     init_at_random_ep_len: bool = True
 
     # --- FPO++ specific. Unused by MixGRPO / PPO. ---
-    fpo_num_mc: int = 16            # Monte-Carlo (tau, eps) samples per action for the CFM ratio (paper Eq. 10).
-    fpo_delta_clip: float = 0.0     # Clamp |L_old - L_new| before exp() (App. C.23); <=0 disables.
-    fpo_cfm_loss_clamp: float = 0.0  # Clamp each CFM loss to [0, this] before the ratio diff; <=0 disables.
+    fpo_num_mc: int = 16            # Monte-Carlo (eps, t) samples per action for the CFM ratio (paper Eq. 10).
+    fpo_delta_clip: float = 3.0     # STE clamp on log-ratio (l_old - l_new) before exp() (official cfm_diff_clamp_max).
+    fpo_cfm_loss_clamp: float = 3.0  # Symmetric clamp on old/new CFM loss before the ratio diff (official cfm_loss_clamp).
+    # Official-aligned single-step Flow actor (amazon-far/fpo-control G1 motion tracking).
+    actor_scale: float = 1.0                      # action = actor_scale * x_t (linear, NO tanh).
+    mlp_output_scale: float = 1.0                 # scale on the raw velocity-net output.
+    timestep_embed_dim: int = 8                   # sinusoidal cos/sin timestep embedding width.
+    cfm_loss_reduction: str = "mean"              # reduction over the action dim (tracking: mean).
+    action_perturb_std: float = 0.1               # Gaussian noise added to the action in training (entropy reg).
+    cfm_loss_t_inverse_cdf_beta: float = 1.0      # Beta(1, beta) inverse-CDF shaping of CFM timesteps.
+    schedule: str = "adaptive"                    # "adaptive" (KL-driven LR) or "fixed".
+    fpo_adv_clamp: float = 5.0                    # symmetric advantage clamp before the surrogate.
+    cfm_loss_clamp_neg_adv: bool = True           # clamp the new CFM loss where advantage < 0.
+    cfm_loss_clamp_neg_adv_max: float = 20.0      # cap for that negative-advantage CFM clamp.
+    trust_region_mode: str = "aspo"              # ppo | spo | aspo.
+    num_micro_batches: int = 1                    # gradient-accum microbatches per logical minibatch.
+    storage_action_noise_std: float = 0.0         # extra noise added to stored actions (off by default).
 
 
 @dataclass
