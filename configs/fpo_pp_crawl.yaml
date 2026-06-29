@@ -65,9 +65,17 @@ algo:
   mlp_output_scale: 1.0        # scale on the raw velocity-net output (official)
   timestep_embed_dim: 8        # sinusoidal cos/sin timestep embedding width (official)
   cfm_loss_reduction: mean     # reduction over the action dim (official G1 tracking)
-  action_perturb_std: 0.1      # Gaussian noise added to the action in training (official tracking)
+  action_perturb_std: 0.1      # Gaussian noise added to the INNOVATION u_t in training (official tracking)
   cfm_loss_t_inverse_cdf_beta: 1.0
   num_generations: 1           # FPO++ has no GRPO groups
+  # Residual-innovation parametrization for the residual action space (q_target = q_ref(t+1) + S*r_t).
+  # The flow emits an innovation u_t; the executed residual is the AR(1) low-pass
+  #   r_t = residual_innov_rho * r_{t-1} + residual_innov_scale * u_t .
+  # This makes r_t small, low-frequency and time-correlated instead of an iid N(0,I) offset every
+  # step. The CFM loss / FPO ratio is computed on u_t (innovation coordinates); r_{t-1} is the env's
+  # previous executed residual. DC gain = scale/(1-rho); high-frequency gain = scale.
+  residual_innov_rho: 0.9      # AR(1) persistence (temporal continuity). 0 -> no filtering.
+  residual_innov_scale: 0.25   # per-joint innovation scale D (small local corrections). 1 + rho=0 -> legacy.
   # flow integration
   flow_steps: 16               # Euler steps generating one action (official default 64; 16 is a
                                # compute/quality compromise -- 4 is too coarse, 64 makes collect ~16x

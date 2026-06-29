@@ -158,6 +158,17 @@ class FPOPP(Algorithm):
         self.trust_region_mode = str(cfg.trust_region_mode)      # "aspo"
         self.num_micro_batches = max(1, int(cfg.num_micro_batches))  # gradient-accum microbatches
         self.storage_action_noise_std = float(cfg.storage_action_noise_std)  # 0.0
+        # Residual-innovation parametrization (the fix for the residual action space). The flow
+        # generates an INNOVATION u_t; the residual sent to the env is a low-pass AR(1) filter
+        #     r_t = residual_rho * r_{t-1} + residual_innov_scale * u_t .
+        # The flow models pi(u_t | s_t), so the CFM loss / FPO ratio is computed on u_t (the
+        # innovation), NOT on the executed residual r_t. r_{t-1} is the previous EXECUTED residual,
+        # which the env stores in `last_action` (reset to 0 on episode reset, included in the obs,
+        # and snapshotted/restored around validation) -- so no extra rollout state is needed.
+        # residual_rho == 0 and residual_innov_scale == 1 recovers the old "flow emits the full
+        # residual every step" behaviour.
+        self.residual_rho = float(cfg.residual_innov_rho)
+        self.residual_innov_scale = float(cfg.residual_innov_scale)
         # Survival objective: non-timeout deaths get -terminal_penalty in their reward so the
         # failure enters GAE directly (the crawl task has no env-level termination reward and a
         # rollout often does not see the death, so bootstrap truncation alone is too weak). This
@@ -244,10 +255,11 @@ class FPOPP(Algorithm):
     def collect(self, current_obs: torch.Tensor) -> dict:
         """Single-step on-policy rollout (mirrors the official FPO.act / process_env_step).
 
-        Per env step: evaluate the critic, sample one flow action a = actor_scale*Euler(noise)
-        (+ action_perturb), draw M Monte-Carlo (eps, t) pairs and cache the old CFM loss and
-        flow-endpoint x1_pred (the ratio + KL references) of the EXECUTED action, then
-        env.step(auto_reset=True). Timeouts use the value bootstrap; done truncation happens in GAE.
+        Per env step: evaluate the critic, sample one flow INNOVATION u = actor_scale*Euler(noise)
+        (+ action_perturb), form the executed residual r = residual_rho*r_prev +
+        residual_innov_scale*u, draw M Monte-Carlo (eps, t) pairs and cache the old CFM loss and
+        flow-endpoint x1_pred (the ratio + KL references) of the INNOVATION u, then
+        env.step(r, auto_reset=True). Timeouts use the value bootstrap; done truncation happens in GAE.
         """
         env = self.env
         device = env.device
@@ -259,7 +271,8 @@ class FPOPP(Algorithm):
 
         actor_obs_buf = torch.zeros(T, N, self.actor_obs_dim, device=device)
         critic_obs_buf = torch.zeros(T, N, self.critic_obs_dim, device=device)
-        actions_buf = torch.zeros(T, N, A, device=device)
+        actions_buf = torch.zeros(T, N, A, device=device)       # innovations u_t (CFM coordinates)
+        residual_buf = torch.zeros(T, N, A, device=device)      # executed residuals r_t (env input)
         cfm_t_buf = torch.zeros(T, N, M, 1, device=device)
         cfm_eps_buf = torch.zeros(T, N, M, A, device=device)
         old_cfm_buf = torch.zeros(T, N, M, device=device)
@@ -295,18 +308,26 @@ class FPOPP(Algorithm):
                 critic_obs_n = self._norm_critic(critic_obs)
                 value = self.critic.evaluate(critic_obs_n).detach()
 
-                action = self.actor.act(actor_obs_n).detach()  # (N, A), linear scale + perturb
+                # Flow generates the INNOVATION u_t (linear scale + action_perturb, both on u_t).
+                innovation = self.actor.act(actor_obs_n).detach()  # (N, A)
                 if self.storage_action_noise_std > 0.0:
-                    action = action + self.storage_action_noise_std * torch.randn_like(action)
-                action_abs_max = max(action_abs_max, float(action.abs().max().item()))
+                    innovation = innovation + self.storage_action_noise_std * torch.randn_like(innovation)
+                # Executed residual via the AR(1) low-pass filter. r_{t-1} is the env's last
+                # executed residual (`last_action`), already reset to 0 on episode reset.
+                prev_residual = env.last_action
+                residual = self.residual_rho * prev_residual + self.residual_innov_scale * innovation
+                action_abs_max = max(action_abs_max, float(residual.abs().max().item()))
 
+                # CFM loss / FPO references live in INNOVATION coordinates (the variable the flow
+                # models): u_t -> r_t is a fixed affine map whose constant Jacobian cancels in the
+                # old/new ratio.
                 cfm_eps = torch.randn(N, M, A, device=device)
                 cfm_t = self.actor.sample_cfm_timesteps(N, M, device=device)
-                old_cfm, x1_pred, _ = self.actor.get_cfm_loss(actor_obs_n, action, cfm_eps, cfm_t)
+                old_cfm, x1_pred, _ = self.actor.get_cfm_loss(actor_obs_n, innovation, cfm_eps, cfm_t)
                 old_cfm = old_cfm.detach()
                 x1_pred = x1_pred.detach()
 
-                next_obs, reward, done, info = env.step(action, auto_reset=True)
+                next_obs, reward, done, info = env.step(residual, auto_reset=True)
                 next_critic_obs = env.get_critic_observation()
 
                 done_b = done.bool()
@@ -347,7 +368,8 @@ class FPOPP(Algorithm):
 
                 actor_obs_buf[t] = actor_obs_n
                 critic_obs_buf[t] = critic_obs_n
-                actions_buf[t] = action
+                actions_buf[t] = innovation
+                residual_buf[t] = residual
                 cfm_t_buf[t] = cfm_t
                 cfm_eps_buf[t] = cfm_eps
                 old_cfm_buf[t] = old_cfm
@@ -381,6 +403,7 @@ class FPOPP(Algorithm):
         self._update_adaptive_motion_sampler(first_done_phase, first_done_timeout, start_phase, T)
         return {
             "actor_obs": actor_obs_buf, "critic_obs": critic_obs_buf, "actions": actions_buf,
+            "residuals": residual_buf,
             "cfm_t": cfm_t_buf, "cfm_eps": cfm_eps_buf, "old_cfm": old_cfm_buf, "x1_pred": x1_pred_buf,
             "values": values_buf, "returns": returns, "advantages": advantages,
             "rewards": rewards_buf, "dones": dones_buf,
@@ -433,7 +456,7 @@ class FPOPP(Algorithm):
 
         actor_obs = rollout["actor_obs"].reshape(B, self.actor_obs_dim)
         critic_obs = rollout["critic_obs"].reshape(B, self.critic_obs_dim)
-        actions = rollout["actions"].reshape(B, A)
+        actions = rollout["actions"].reshape(B, A)  # innovations u_t -- the CFM/ratio variable
         cfm_t = rollout["cfm_t"].reshape(B, M, 1)
         cfm_eps = rollout["cfm_eps"].reshape(B, M, A)
         old_cfm = rollout["old_cfm"].reshape(B, M)
@@ -588,10 +611,18 @@ class FPOPP(Algorithm):
     # ------------------------------------------------------------------ inference
     def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
         """Zero-sampling inference. Returns (N, 1, action_dim): the validation harness indexes
-        [:, frame, :] and re-queries the policy every step (horizon == 1)."""
+        [:, frame, :] and re-queries the policy every step (horizon == 1).
+
+        Applies the same residual-innovation filter as training: the flow produces the innovation
+        u_t and the executed residual is r_t = residual_rho*r_{t-1} + residual_innov_scale*u_t.
+        r_{t-1} is read from the env's last executed residual (`last_action`), which the validation
+        harness advances each step and resets on episode reset, so the AR(1) state stays consistent
+        without extra bookkeeping."""
         actor_obs_n = self._norm_actor(obs, update=False)
-        action = self.actor.act_inference(actor_obs_n, eval_mode="zero")
-        return action.unsqueeze(1)
+        innovation = self.actor.act_inference(actor_obs_n, eval_mode="zero")
+        prev_residual = self.env.last_action
+        residual = self.residual_rho * prev_residual + self.residual_innov_scale * innovation
+        return residual.unsqueeze(1)
 
     # ------------------------------------------------------------------ metrics + logging
     def _add_first_failure_metrics(self, metrics: dict, rollout: dict) -> None:
@@ -692,10 +723,11 @@ class FPOPP(Algorithm):
         self._add_first_failure_metrics(metrics, rollout)
         # Generic action magnitude summary so the shared [ACT_SUMMARY] line is not all-nan.
         with torch.no_grad():
-            acts = rollout["actions"].reshape(-1, self.num_act)
+            # Magnitude metrics report the EXECUTED residual r_t (what the env actually applies).
+            acts = rollout["residuals"].reshape(-1, self.num_act)
             metrics["latent/final_abs_mean"] = float(acts.abs().mean().item())
             metrics["latent/final_abs_max"] = float(acts.abs().max().item())
-            greedy = self.actor.act_inference(rollout["actor_obs"][0], eval_mode="zero")  # (N, A)
+            greedy = self.actor.act_inference(rollout["actor_obs"][0], eval_mode="zero")  # (N, A) innovation
             a_abs = greedy.abs()
             flat = a_abs.reshape(-1)
             metrics["act/abs_mean"] = float(flat.mean().item())
@@ -738,6 +770,7 @@ class FPOPP(Algorithm):
             f"chunk_dim={self.chunk_dim} num_envs={env.num_envs} num_steps_per_env={self.num_steps_per_env} "
             f"flow_steps={self.flow_steps} num_mc={self.num_mc} actor_scale={self.actor.actor_scale} "
             f"action_perturb_std={self.actor.action_perturb_std} timestep_embed_dim={self.actor.timestep_embed_dim} "
+            f"residual_rho={self.residual_rho} residual_innov_scale={self.residual_innov_scale} "
             f"cfm_reduction={self.actor.cfm_loss_reduction} clip={cfg.clip_range} "
             f"cfm_diff_clamp_max={self.cfm_diff_clamp_max} cfm_loss_clamp={self.cfm_loss_clamp} "
             f"adv_clamp={self.adv_clamp} schedule={self.schedule} desired_kl={self.desired_kl} "

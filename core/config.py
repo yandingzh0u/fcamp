@@ -128,6 +128,11 @@ class AlgoCfg:
     trust_region_mode: str = "aspo"              # ppo | spo | aspo.
     num_micro_batches: int = 1                    # gradient-accum microbatches per logical minibatch.
     storage_action_noise_std: float = 0.0         # extra noise added to stored actions (off by default).
+    # Residual-innovation action parametrization (FPO++ residual env). The flow emits an
+    # innovation u_t; the executed residual is the AR(1) low-pass r_t = rho*r_{t-1} + scale*u_t.
+    # rho=0, scale=1 recovers "flow emits the full residual each step" (the legacy behaviour).
+    residual_innov_rho: float = 0.9               # AR(1) persistence (temporal continuity of r_t).
+    residual_innov_scale: float = 0.25            # per-joint innovation scale D (small local corrections).
 
 
 @dataclass
