@@ -64,6 +64,12 @@ class MixGRPO(Algorithm):
         self._init_onpolicy_state_bank()
         # Resolved episode cap mirrored from env for reward projection.
         self.max_episode_steps = int(getattr(env.task_cfg, "max_episode_steps", -1))
+        # Bind the adaptive sampler's causal predecessor window to MixGRPO's rollout span: the
+        # GRPO rollout is horizon*chunks frames with NO GAE, so the credit decay is gamma (per
+        # frame), not gamma*lambda.
+        inject_credit = getattr(env, "configure_adaptive_credit", None)
+        if callable(inject_credit):
+            inject_credit(self._training_rollout_horizon(), float(cfg.discount_gamma))
 
     @property
     def policy(self) -> torch.nn.Module:
@@ -800,20 +806,13 @@ class MixGRPO(Algorithm):
             "metric_action_abs_max_all": metric_action_abs_max_all,
             "metric_rollout_info_items": metric_rollout_info_items,
             "next_observation": obs_t.detach().clone(),
+            "_update_sampler": True,
         }
 
     def _compute_tail_bootstrap(self, obs_start, alive_mask, *, tail_steps, gamma, terminal_penalty):
         if tail_steps <= 0:
             return torch.zeros(obs_start.shape[0], device=obs_start.device, dtype=obs_start.dtype)
         was_training = self._policy.training
-        # Tail bootstrap is a counterfactual deterministic value estimate, not collected
-        # training experience. Its env.step() calls must neither add failures to nor decay the
-        # real rollout's adaptive sampler. MimicEnv gates both record and EMA-fold paths on this
-        # flag, so disabling it for the complete tail keeps sampler state bit-for-bit unchanged.
-        had_record_flag = hasattr(self.env, "record_motion_failures")
-        original_record_failures = getattr(self.env, "record_motion_failures", None)
-        if had_record_flag:
-            self.env.record_motion_failures = False
         self._policy.eval()
         try:
             with torch.no_grad():
@@ -848,8 +847,6 @@ class MixGRPO(Algorithm):
                         break
                     discount = discount * float(gamma)
         finally:
-            if had_record_flag:
-                self.env.record_motion_failures = original_record_failures
             if was_training:
                 self._policy.train()
         return (tail_return * alive_mask.to(dtype=tail_return.dtype)).detach()
@@ -1323,11 +1320,12 @@ class MixGRPO(Algorithm):
             "phase/start_min": float(collection_start_phases.min().item()) if collection_start_phases is not None else float("nan"),
             "phase/start_max": float(collection_start_phases.max().item()) if collection_start_phases is not None else float("nan"),
             "phase/start_at_min_frac": float((collection_start_phases == int(getattr(env, "motion_start_phase", 0))).float().mean().item()) if collection_start_phases is not None else float("nan"),
-            "sampler/start_p10": sampler_stats.get("start_p10", float("nan")),
-            "sampler/start_p50": sampler_stats.get("start_p50", float("nan")),
-            "sampler/start_p90": sampler_stats.get("start_p90", float("nan")),
+            "sampler/top_bin": sampler_stats.get("top_bin", float("nan")),
+            "sampler/top_prob": sampler_stats.get("top_prob", float("nan")),
+            "sampler/peak_bin": sampler_stats.get("peak_bin", float("nan")),
             "sampler/peak_fail_frame": sampler_stats.get("peak_fail_frame", float("nan")),
-            "sampler/frac_before_peak": sampler_stats.get("frac_before_peak", float("nan")),
+            "sampler/bottleneck_concentration": sampler_stats.get("bottleneck_concentration", float("nan")),
+            "sampler/causal_beta": sampler_stats.get("causal_beta", float("nan")),
             "sampler/failed_sum": sampler_stats.get("failed_sum", float("nan")),
             "sampler/entropy": sampler_stats.get("entropy", float("nan")),
             "timing/collect_s": collect_time,
@@ -1477,11 +1475,12 @@ class MixGRPO(Algorithm):
             f"start_max={metrics.get('phase/start_max', float('nan')):.0f} "
             f"start_at_min={metrics.get('phase/start_at_min_frac', float('nan')):.5f} "
             f"fail_rel_mean={metrics.get('rollout/first_failure_relative_phase_mean', float('nan')):.2f} "
-            f"sampler_start_p10={metrics.get('sampler/start_p10', float('nan')):.0f} "
-            f"sampler_start_p50={metrics.get('sampler/start_p50', float('nan')):.0f} "
-            f"sampler_start_p90={metrics.get('sampler/start_p90', float('nan')):.0f} "
+            f"sampler_top_bin={metrics.get('sampler/top_bin', float('nan')):.0f} "
+            f"sampler_top_prob={metrics.get('sampler/top_prob', float('nan')):.3f} "
+            f"sampler_peak_bin={metrics.get('sampler/peak_bin', float('nan')):.0f} "
             f"sampler_peak_fail={metrics.get('sampler/peak_fail_frame', float('nan')):.0f} "
-            f"sampler_frac_before_peak={metrics.get('sampler/frac_before_peak', float('nan')):.3f} "
+            f"sampler_bottleneck={metrics.get('sampler/bottleneck_concentration', float('nan')):.3f} "
+            f"sampler_causal_beta={metrics.get('sampler/causal_beta', float('nan')):.3f} "
             f"sampler_failed_sum={metrics.get('sampler/failed_sum', float('nan')):.4f} "
             f"sampler_entropy={metrics.get('sampler/entropy', float('nan')):.3f}",
             flush=True,
@@ -1696,6 +1695,7 @@ class MixGRPO(Algorithm):
             f"future_ref_steps=0 "
             f"phase_sampler={'adaptive' if env.task_cfg.adaptive_motion_sampling else 'uniform'} "
             f"adaptive_uniform_ratio={env.task_cfg.adaptive_uniform_ratio} "
+            f"adaptive_causal_max_ratio={env.task_cfg.adaptive_causal_max_ratio} "
             f"num_envs={env.num_envs} rollout_env_steps_target={int(cfg.rollout_env_steps)} "
             f"configured_chunks_per_rollout={cfg.chunks_per_rollout} "
             f"tail_bootstrap_steps={int(cfg.tail_bootstrap_steps)} "

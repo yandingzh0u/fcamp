@@ -60,6 +60,11 @@ class PPO(Algorithm):
 
         self.num_steps_per_env = int(cfg.num_steps_per_env)
         self.max_episode_steps = int(getattr(env.task_cfg, "max_episode_steps", -1))
+        # Bind the adaptive sampler's causal predecessor window to PPO's rollout credit horizon:
+        # a start can see the death within one T-step GAE rollout, discounted by (gamma*lambda)^k.
+        inject_credit = getattr(env, "configure_adaptive_credit", None)
+        if callable(inject_credit):
+            inject_credit(self.num_steps_per_env, float(cfg.discount_gamma) * float(cfg.gae_lambda))
         self._init_train_episode_stats()
 
         # Combined actor-critic for state_dict checkpointing through the base interface.
@@ -498,13 +503,16 @@ class PPO(Algorithm):
         return metrics
 
     def _add_sampler_metrics(self, metrics: dict) -> None:
-        """Adaptive-sampler diagnostics ([SAMPLER]): the causal-lookback START distribution
-        (percentiles), the dominant failure frame, and the share of starts that land before it.
-        Owned by env.step(); the algorithm only reads it. Absent when the env exposes no sampler
-        (e.g. test fakes)."""
+        """Adaptive-sampler diagnostics ([SAMPLER]): the official failure-bin distribution
+        (top_bin/top_prob/entropy/failed_sum), the dominant failure frame, and the causal
+        second-stage blend state (bottleneck_concentration -> causal_beta). Owned by env.step();
+        the algorithm only reads it. Absent when the env exposes no sampler (test fakes)."""
         stats_fn = getattr(self.env, "adaptive_sampling_stats", None)
         stats = stats_fn() if callable(stats_fn) else {}
-        for key in ("start_p10", "start_p50", "start_p90", "peak_fail_frame", "frac_before_peak", "failed_sum", "entropy"):
+        for key in (
+            "top_bin", "top_prob", "failed_sum", "entropy", "peak_bin",
+            "peak_fail_frame", "bottleneck_concentration", "causal_beta",
+        ):
             metrics[f"sampler/{key}"] = float(stats.get(key, float("nan")))
 
     # ----------------------------------------------------------------- metric helpers
@@ -709,11 +717,12 @@ class PPO(Algorithm):
         )
         print(
             f"[SAMPLER] "
-            f"start_p10={metrics.get('sampler/start_p10', float('nan')):.0f} "
-            f"start_p50={metrics.get('sampler/start_p50', float('nan')):.0f} "
-            f"start_p90={metrics.get('sampler/start_p90', float('nan')):.0f} "
+            f"top_bin={metrics.get('sampler/top_bin', float('nan')):.0f} "
+            f"top_prob={metrics.get('sampler/top_prob', float('nan')):.3f} "
+            f"peak_bin={metrics.get('sampler/peak_bin', float('nan')):.0f} "
             f"peak_fail={metrics.get('sampler/peak_fail_frame', float('nan')):.0f} "
-            f"frac_before_peak={metrics.get('sampler/frac_before_peak', float('nan')):.3f} "
+            f"bottleneck={metrics.get('sampler/bottleneck_concentration', float('nan')):.3f} "
+            f"causal_beta={metrics.get('sampler/causal_beta', float('nan')):.3f} "
             f"failed_sum={metrics.get('sampler/failed_sum', float('nan')):.4f} "
             f"entropy={metrics.get('sampler/entropy', float('nan')):.4f}",
             flush=True,

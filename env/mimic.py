@@ -133,9 +133,9 @@ class G1MimicEnv(
         if not self.adaptive_motion_sampling:
             return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
 
-        # Holosoma causal-lookback sampler: start frames are drawn from the failure-lookback
-        # window (spawning the env shortly BEFORE the frames it dies at) plus a uniform floor.
-        # The sampler is fed only by env.step().
+        # Holosoma failure-bin sampler (+ optional causal second stage). Start frames are drawn
+        # from the official death-frame bin distribution, blended with causal predecessor starts
+        # once deaths concentrate at the bottleneck. The sampler is fed only by env.step().
         return self.adaptive_sampler.sample_frames(num_samples, min_phase, max_phase)
 
     def reset(self, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
@@ -242,12 +242,17 @@ class G1MimicEnv(
         self.adaptive_sampler = AdaptiveTimestepsSampler(
             motion_time_step_total=int(self.motion.num_frames),
             device=self.device,
-            num_envs=int(self.num_envs),
-            lookback_min=int(self.task_cfg.adaptive_lookback_min),
-            lookback_max=int(self.task_cfg.adaptive_lookback_max),
-            hard_ratio=float(self.task_cfg.adaptive_hard_ratio),
-            uniform_ratio=float(self.task_cfg.adaptive_uniform_ratio),
+            num_bins=int(self.task_cfg.adaptive_num_bins),
+            env_fps=int(round(1.0 / float(self.task_cfg.sim_dt))) if float(self.task_cfg.sim_dt) > 0 else 50,
+            adaptive_kernel_size=int(self.task_cfg.adaptive_kernel_size),
+            adaptive_lambda=float(self.task_cfg.adaptive_lambda),
+            adaptive_uniform_ratio=float(self.task_cfg.adaptive_uniform_ratio),
             adaptive_alpha=float(self.task_cfg.adaptive_alpha),
+            causal_max_ratio=float(self.task_cfg.adaptive_causal_max_ratio),
+            causal_horizon=int(self.task_cfg.adaptive_causal_horizon),
+            causal_decay=float(self.task_cfg.adaptive_causal_decay),
+            causal_arm_lo=float(self.task_cfg.adaptive_causal_arm_lo),
+            causal_arm_hi=float(self.task_cfg.adaptive_causal_arm_hi),
         )
         # Per-env guard so the same termination is recorded by the sampler exactly once even
         # when the env is not auto-reset (validation / GRPO branch rollouts replay dead envs).
@@ -294,6 +299,19 @@ class G1MimicEnv(
     def adaptive_sampling_stats(self) -> dict[str, float]:
         min_phase, max_phase = self._adaptive_phase_range(horizon=1)
         return self.adaptive_sampler.stats(min_phase, max_phase)
+
+    def configure_adaptive_credit(self, horizon: int, decay: float) -> None:
+        """Bind the causal predecessor window to the algorithm's rollout credit horizon. The YAML
+        keeps adaptive_causal_horizon/decay at 0; a positive YAML value overrides the algorithm
+        injection so the credit window never silently misconfigures when the rollout length
+        changes."""
+        if not getattr(self, "adaptive_motion_sampling", False):
+            return
+        cfg_h = int(self.task_cfg.adaptive_causal_horizon)
+        cfg_d = float(self.task_cfg.adaptive_causal_decay)
+        h = cfg_h if cfg_h > 0 else int(horizon)
+        d = cfg_d if cfg_d > 0.0 else float(decay)
+        self.adaptive_sampler.configure_credit(h, d)
 
     def _resample_finished_motions(self) -> None:
         """Roll-in teleport: envs whose phase has advanced past the final frame are resampled to

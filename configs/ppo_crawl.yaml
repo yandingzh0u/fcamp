@@ -19,15 +19,21 @@ env:
   reset_noise: true
   interval_pushes: true
   observation_noise: true
-  # adaptive phase sampling (Holosoma causal-lookback, owned by env.step): a tracking failure
-  # at frame f only feeds START frames in [f - lookback_max, f - lookback_min] (roll-in before
-  # the wall). p(s) = hard_ratio * failure-lookback + uniform_ratio * uniform.
+  # adaptive phase sampling (Holosoma failure-bin, owned by env.step) + optional causal second
+  # stage. Base: p_b ∝ bin_failed_ema + uniform_ratio/num_bins. Blend p=(1-a_cau)*p_official +
+  # a_cau*p_causal; a_cau=beta*causal_max_ratio ramps with death concentration at the bottleneck;
+  # causal predecessor starts are bound to the rollout credit window [f-(H-1), f-1].
   adaptive_motion_sampling: true
-  adaptive_hard_ratio: 0.7
-  adaptive_uniform_ratio: 0.3
-  adaptive_lookback_min: 20
-  adaptive_lookback_max: 80
+  adaptive_num_bins: 0            # 0 -> auto floor(num_frames/fps)+1 (~1s bins; 959->20)
+  adaptive_uniform_ratio: 0.1    # additive floor (official), not a fixed mixture weight
+  adaptive_kernel_size: 1
+  adaptive_lambda: 0.8
   adaptive_alpha: 0.001
+  adaptive_causal_max_ratio: 0.5 # set 0 (via --set) to run the pure official baseline
+  adaptive_causal_horizon: 0     # 0 -> injected by algorithm (= num_steps_per_env = 24)
+  adaptive_causal_decay: 0.0     # 0 -> injected by algorithm (= gamma*lambda = 0.9405)
+  adaptive_causal_arm_lo: 0.5
+  adaptive_causal_arm_hi: 0.8
   # reward: official Holosoma WBT 9-term reward. action_rate is the only tunable weight.
   action_rate_weight: 0.1
 
@@ -63,7 +69,6 @@ train:
   checkpoint_dir: ""
   resume: ""
   reset_optimizer_on_resume: false
-  reset_sampler_on_resume: false
   validation_every: 0
   validation_max_steps: 500
   validation_start_phase: 0

@@ -24,8 +24,10 @@ def snapshot_env_state(env) -> dict[str, torch.Tensor]:
         "last_action": env.last_action.clone(),
         "prev_action": env.prev_action.clone(),
         "next_push_step": env.next_push_step.clone(),
-        "adaptive_failure_ema": env.adaptive_sampler.failure_ema.clone(),
-        "adaptive_current_failure_count": env.adaptive_sampler.current_failure_count.clone(),
+        "adaptive_bin_failed_count": env.adaptive_sampler.bin_failed_count.clone(),
+        "adaptive_current_bin_failed_count": env.adaptive_sampler.current_bin_failed_count.clone(),
+        "adaptive_frame_failed_count": env.adaptive_sampler.frame_failed_count.clone(),
+        "adaptive_current_frame_failed_count": env.adaptive_sampler.current_frame_failed_count.clone(),
         "failure_recorded": env._failure_recorded.clone(),
     }
 
@@ -54,9 +56,14 @@ def restore_env_state(env, snapshot: dict[str, torch.Tensor]) -> None:
     env.default_joint_vel = snapshot["default_joint_vel"].clone()
     env.default_action_joint_pos = snapshot["default_action_joint_pos"].clone()
     env.default_action_joint_vel = snapshot["default_action_joint_vel"].clone()
-    env.adaptive_sampler.failure_ema.copy_(snapshot["adaptive_failure_ema"].to(env.adaptive_sampler.failure_ema))
-    env.adaptive_sampler.current_failure_count.copy_(
-        snapshot["adaptive_current_failure_count"].to(env.adaptive_sampler.current_failure_count)
+    sampler = env.adaptive_sampler
+    sampler.bin_failed_count.copy_(snapshot["adaptive_bin_failed_count"].to(sampler.bin_failed_count))
+    sampler.current_bin_failed_count.copy_(
+        snapshot["adaptive_current_bin_failed_count"].to(sampler.current_bin_failed_count)
+    )
+    sampler.frame_failed_count.copy_(snapshot["adaptive_frame_failed_count"].to(sampler.frame_failed_count))
+    sampler.current_frame_failed_count.copy_(
+        snapshot["adaptive_current_frame_failed_count"].to(sampler.current_frame_failed_count)
     )
     env._failure_recorded = snapshot["failure_recorded"].clone()
     env.scene.update(env.physics_dt)

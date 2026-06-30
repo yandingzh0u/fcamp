@@ -35,13 +35,19 @@ class EnvCfg:
     interval_pushes: bool = True
     observation_noise: bool = True
     adaptive_motion_sampling: bool = True
-    # Causal-lookback start sampler: p(s) = hard_ratio * failure-lookback + uniform_ratio * uniform.
-    # A failure at frame f only feeds START frames in [f - lookback_max, f - lookback_min].
-    adaptive_hard_ratio: float = 0.7
-    adaptive_uniform_ratio: float = 0.3
-    adaptive_lookback_min: int = 20
-    adaptive_lookback_max: int = 80
+    # Holosoma failure-bin sampler + optional causal second stage. Base: p_b ∝ bin_failed_ema +
+    # uniform_ratio/num_bins (additive floor). Blend: p = (1-a_cau)·p_official + a_cau·p_causal,
+    # a_cau = beta·causal_max_ratio, beta ramps with death concentration at the bottleneck.
+    adaptive_num_bins: int = 0          # 0 -> auto ⌊num_frames/fps⌋+1 (~1s bins)
+    adaptive_uniform_ratio: float = 0.1  # additive floor (official), NOT a fixed mixture weight
+    adaptive_kernel_size: int = 1
+    adaptive_lambda: float = 0.8
     adaptive_alpha: float = 0.001
+    adaptive_causal_max_ratio: float = 0.5
+    adaptive_causal_horizon: int = 0    # 0 -> injected by algorithm (= num_steps_per_env)
+    adaptive_causal_decay: float = 0.0  # 0 -> injected by algorithm (= gamma·lambda; gamma for GRPO)
+    adaptive_causal_arm_lo: float = 0.5
+    adaptive_causal_arm_hi: float = 0.8
     action_rate_weight: float = 0.1
     # GRPO observation-noise sharing: set by the algorithm (num_generations) at build time.
     num_generations: int = 1
@@ -135,9 +141,6 @@ class TrainCfg:
     checkpoint_dir: str = ""
     resume: str = ""
     reset_optimizer_on_resume: bool = False
-    # Ignore any compatible adaptive-sampler state stored in the checkpoint and start its
-    # failure curriculum from a clean EMA. Independent of reset_optimizer_on_resume.
-    reset_sampler_on_resume: bool = False
     validation_every: int = 0
     validation_max_steps: int = 500
     validation_start_phase: int = 0
