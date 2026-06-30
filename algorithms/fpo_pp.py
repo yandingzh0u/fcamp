@@ -35,7 +35,6 @@ import torch
 from torch import nn
 
 from algorithms.base import Algorithm
-from core.logging import log_shared_tracking, log_shared_update_diagnostics
 from networks.fpo_actor import FPOActor
 from networks.mlp_actor_critic import Critic, EmpiricalNormalization
 
@@ -158,17 +157,6 @@ class FPOPP(Algorithm):
         self.trust_region_mode = str(cfg.trust_region_mode)      # "aspo"
         self.num_micro_batches = max(1, int(cfg.num_micro_batches))  # gradient-accum microbatches
         self.storage_action_noise_std = float(cfg.storage_action_noise_std)  # 0.0
-        # Residual-innovation parametrization (the fix for the residual action space). The flow
-        # generates an INNOVATION u_t; the residual sent to the env is a low-pass AR(1) filter
-        #     r_t = residual_rho * r_{t-1} + residual_innov_scale * u_t .
-        # The flow models pi(u_t | s_t), so the CFM loss / FPO ratio is computed on u_t (the
-        # innovation), NOT on the executed residual r_t. r_{t-1} is the previous EXECUTED residual,
-        # which the env stores in `last_action` (reset to 0 on episode reset, included in the obs,
-        # and snapshotted/restored around validation) -- so no extra rollout state is needed.
-        # residual_rho == 0 and residual_innov_scale == 1 recovers the old "flow emits the full
-        # residual every step" behaviour.
-        self.residual_rho = float(cfg.residual_innov_rho)
-        self.residual_innov_scale = float(cfg.residual_innov_scale)
         # Survival objective: non-timeout deaths get -terminal_penalty in their reward so the
         # failure enters GAE directly (the crawl task has no env-level termination reward and a
         # rollout often does not see the death, so bootstrap truncation alone is too weak). This
@@ -255,11 +243,10 @@ class FPOPP(Algorithm):
     def collect(self, current_obs: torch.Tensor) -> dict:
         """Single-step on-policy rollout (mirrors the official FPO.act / process_env_step).
 
-        Per env step: evaluate the critic, sample one flow INNOVATION u = actor_scale*Euler(noise)
-        (+ action_perturb), form the executed residual r = residual_rho*r_prev +
-        residual_innov_scale*u, draw M Monte-Carlo (eps, t) pairs and cache the old CFM loss and
-        flow-endpoint x1_pred (the ratio + KL references) of the INNOVATION u, then
-        env.step(r, auto_reset=True). Timeouts use the value bootstrap; done truncation happens in GAE.
+        Per env step: evaluate the critic, sample one flow action a = actor_scale*Euler(noise)
+        (+ action_perturb), draw M Monte-Carlo (eps, t) pairs and cache the old CFM loss and
+        flow-endpoint x1_pred (the ratio + KL references) of the EXECUTED action, then
+        env.step(auto_reset=True). Timeouts use the value bootstrap; done truncation happens in GAE.
         """
         env = self.env
         device = env.device
@@ -271,8 +258,7 @@ class FPOPP(Algorithm):
 
         actor_obs_buf = torch.zeros(T, N, self.actor_obs_dim, device=device)
         critic_obs_buf = torch.zeros(T, N, self.critic_obs_dim, device=device)
-        actions_buf = torch.zeros(T, N, A, device=device)       # innovations u_t (CFM coordinates)
-        residual_buf = torch.zeros(T, N, A, device=device)      # executed residuals r_t (env input)
+        actions_buf = torch.zeros(T, N, A, device=device)
         cfm_t_buf = torch.zeros(T, N, M, 1, device=device)
         cfm_eps_buf = torch.zeros(T, N, M, A, device=device)
         old_cfm_buf = torch.zeros(T, N, M, device=device)
@@ -297,10 +283,6 @@ class FPOPP(Algorithm):
         first_done_anchor_pos = torch.zeros(N, dtype=torch.bool, device=device)
         first_done_anchor_ori = torch.zeros(N, dtype=torch.bool, device=device)
         first_done_timeout = torch.zeros(N, dtype=torch.bool, device=device)
-        start_phase = None
-        _ps = getattr(env, "phase_steps", None)
-        if torch.is_tensor(_ps):
-            start_phase = _ps.detach().clone().long()
 
         with torch.no_grad():
             for t in range(T):
@@ -308,26 +290,18 @@ class FPOPP(Algorithm):
                 critic_obs_n = self._norm_critic(critic_obs)
                 value = self.critic.evaluate(critic_obs_n).detach()
 
-                # Flow generates the INNOVATION u_t (linear scale + action_perturb, both on u_t).
-                innovation = self.actor.act(actor_obs_n).detach()  # (N, A)
+                action = self.actor.act(actor_obs_n).detach()  # (N, A), linear scale + perturb
                 if self.storage_action_noise_std > 0.0:
-                    innovation = innovation + self.storage_action_noise_std * torch.randn_like(innovation)
-                # Executed residual via the AR(1) low-pass filter. r_{t-1} is the env's last
-                # executed residual (`last_action`), already reset to 0 on episode reset.
-                prev_residual = env.last_action
-                residual = self.residual_rho * prev_residual + self.residual_innov_scale * innovation
-                action_abs_max = max(action_abs_max, float(residual.abs().max().item()))
+                    action = action + self.storage_action_noise_std * torch.randn_like(action)
+                action_abs_max = max(action_abs_max, float(action.abs().max().item()))
 
-                # CFM loss / FPO references live in INNOVATION coordinates (the variable the flow
-                # models): u_t -> r_t is a fixed affine map whose constant Jacobian cancels in the
-                # old/new ratio.
                 cfm_eps = torch.randn(N, M, A, device=device)
                 cfm_t = self.actor.sample_cfm_timesteps(N, M, device=device)
-                old_cfm, x1_pred, _ = self.actor.get_cfm_loss(actor_obs_n, innovation, cfm_eps, cfm_t)
+                old_cfm, x1_pred, _ = self.actor.get_cfm_loss(actor_obs_n, action, cfm_eps, cfm_t)
                 old_cfm = old_cfm.detach()
                 x1_pred = x1_pred.detach()
 
-                next_obs, reward, done, info = env.step(residual, auto_reset=True)
+                next_obs, reward, done, info = env.step(action, auto_reset=True)
                 next_critic_obs = env.get_critic_observation()
 
                 done_b = done.bool()
@@ -368,8 +342,7 @@ class FPOPP(Algorithm):
 
                 actor_obs_buf[t] = actor_obs_n
                 critic_obs_buf[t] = critic_obs_n
-                actions_buf[t] = innovation
-                residual_buf[t] = residual
+                actions_buf[t] = action
                 cfm_t_buf[t] = cfm_t
                 cfm_eps_buf[t] = cfm_eps
                 old_cfm_buf[t] = old_cfm
@@ -398,12 +371,11 @@ class FPOPP(Algorithm):
 
         self._obs = obs
         self._critic_obs = critic_obs
-        # Adaptive phase-sampler feedback: reinforce the motion phases the robot actually dies at
-        # so the most failure-prone interval is oversampled next rollout (MixGRPO parity).
-        self._update_adaptive_motion_sampler(first_done_phase, first_done_timeout, start_phase, T)
+        # The adaptive phase sampler is owned and updated by env.step() (death-frame binning);
+        # the algorithm only consumes the env. first_done_* below is kept for [FIRST_FAILURE]
+        # logging only.
         return {
             "actor_obs": actor_obs_buf, "critic_obs": critic_obs_buf, "actions": actions_buf,
-            "residuals": residual_buf,
             "cfm_t": cfm_t_buf, "cfm_eps": cfm_eps_buf, "old_cfm": old_cfm_buf, "x1_pred": x1_pred_buf,
             "values": values_buf, "returns": returns, "advantages": advantages,
             "rewards": rewards_buf, "dones": dones_buf,
@@ -414,21 +386,6 @@ class FPOPP(Algorithm):
             "first_done_anchor_ori": first_done_anchor_ori, "first_done_timeout": first_done_timeout,
             "next_observation": obs,
         }
-
-    def _update_adaptive_motion_sampler(self, first_done_phase, first_done_timeout, start_phase, rollout_steps) -> None:
-        env = self.env
-        update_sampler = getattr(env, "update_adaptive_motion_statistics", None)
-        if not callable(update_sampler):
-            return
-        num_frames = int(getattr(getattr(env, "motion", None), "num_frames", 0) or 0)
-        if num_frames <= 0 or start_phase is None:
-            return
-        died = first_done_phase >= 0
-        sampler_failed = died & (~first_done_timeout)
-        death_phase = first_done_phase.clamp(min=0, max=num_frames - 1)
-        survivor_phase = (start_phase + int(rollout_steps)).clamp(min=0, max=num_frames - 1)
-        sampler_phases = torch.where(died, death_phase, survivor_phase)
-        update_sampler(sampler_phases, sampler_failed, rollout_steps=int(rollout_steps))
 
     def _compute_gae(self, last_values, values, dones, rewards, gamma):
         lam = float(self.cfg.gae_lambda)
@@ -456,7 +413,7 @@ class FPOPP(Algorithm):
 
         actor_obs = rollout["actor_obs"].reshape(B, self.actor_obs_dim)
         critic_obs = rollout["critic_obs"].reshape(B, self.critic_obs_dim)
-        actions = rollout["actions"].reshape(B, A)  # innovations u_t -- the CFM/ratio variable
+        actions = rollout["actions"].reshape(B, A)
         cfm_t = rollout["cfm_t"].reshape(B, M, 1)
         cfm_eps = rollout["cfm_eps"].reshape(B, M, A)
         old_cfm = rollout["old_cfm"].reshape(B, M)
@@ -611,18 +568,10 @@ class FPOPP(Algorithm):
     # ------------------------------------------------------------------ inference
     def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
         """Zero-sampling inference. Returns (N, 1, action_dim): the validation harness indexes
-        [:, frame, :] and re-queries the policy every step (horizon == 1).
-
-        Applies the same residual-innovation filter as training: the flow produces the innovation
-        u_t and the executed residual is r_t = residual_rho*r_{t-1} + residual_innov_scale*u_t.
-        r_{t-1} is read from the env's last executed residual (`last_action`), which the validation
-        harness advances each step and resets on episode reset, so the AR(1) state stays consistent
-        without extra bookkeeping."""
+        [:, frame, :] and re-queries the policy every step (horizon == 1)."""
         actor_obs_n = self._norm_actor(obs, update=False)
-        innovation = self.actor.act_inference(actor_obs_n, eval_mode="zero")
-        prev_residual = self.env.last_action
-        residual = self.residual_rho * prev_residual + self.residual_innov_scale * innovation
-        return residual.unsqueeze(1)
+        action = self.actor.act_inference(actor_obs_n, eval_mode="zero")
+        return action.unsqueeze(1)
 
     # ------------------------------------------------------------------ metrics + logging
     def _add_first_failure_metrics(self, metrics: dict, rollout: dict) -> None:
@@ -689,11 +638,18 @@ class FPOPP(Algorithm):
         }
         for key, mask in rollout["done_terms_union"].items():
             metrics[f"done/{key}_frac"] = float(mask.float().mean().item())
-        # alive-weighted rollout reward terms + done causes (shared [TRACK_ROLLOUT]/[DONE_ROLLOUT]).
+        # alive-weighted rollout reward terms ([TRACK_ROLLOUT]) + per-transition done rates.
         rollout_reward_sums: dict[str, float] = {}
-        rollout_done_union: dict[str, torch.Tensor] = {}
         weight_sum = 0.0
+        # [DONE_ROLLOUT] = per-transition average termination rate per cause (mean over all
+        # rollout transitions of the done-cause fraction). NOT masked by ~done (identically zero,
+        # a done-cause implies done) and NOT a per-env union (that is [DONE]).
+        done_rollout_sums: dict[str, float] = {}
+        done_rollout_steps = 0
         for info, valid in rollout["rollout_info_items"]:
+            done_rollout_steps += 1
+            for k, v in info["done_terms"].items():
+                done_rollout_sums[k] = done_rollout_sums.get(k, 0.0) + float(v.float().mean().item())
             vf = valid.float()
             w = float(vf.sum().item())
             if w <= 0.0:
@@ -701,14 +657,12 @@ class FPOPP(Algorithm):
             weight_sum += w
             for k, v in info["reward_terms"].items():
                 rollout_reward_sums[k] = rollout_reward_sums.get(k, 0.0) + float((v * vf).sum().item())
-            for k, v in info["done_terms"].items():
-                md = v.bool() & valid.bool()
-                rollout_done_union[k] = md.clone() if k not in rollout_done_union else (rollout_done_union[k] | md)
         if weight_sum > 0.0:
             for k, s in rollout_reward_sums.items():
                 metrics[f"reward_rollout/{k}_mean"] = s / weight_sum
-            for k, m in rollout_done_union.items():
-                metrics[f"done_rollout/{k}_frac"] = float(m.float().mean().item())
+        if done_rollout_steps > 0:
+            for k, s in done_rollout_sums.items():
+                metrics[f"done_rollout/{k}_frac"] = s / done_rollout_steps
         for info in rollout["first_chunk_infos"]:
             for k, v in info["reward_terms"].items():
                 metrics[f"reward/{k}_mean"] = float(v.mean().item())
@@ -721,22 +675,93 @@ class FPOPP(Algorithm):
         metrics["train/recent_episode_count"] = float(len(self._train_reward_buffer))
         metrics["train/completed_episodes"] = float(self._train_completed_episodes)
         self._add_first_failure_metrics(metrics, rollout)
-        # Generic action magnitude summary so the shared [ACT_SUMMARY] line is not all-nan.
+        # Two SEPARATE action distributions (never mixed): the greedy zero-noise deterministic
+        # action ([ACT_GREEDY]) and the actual sampled actions executed during the rollout
+        # ([ACT_ROLLOUT]). FPO outputs an absolute default-offset action (no latent space).
         with torch.no_grad():
-            # Magnitude metrics report the EXECUTED residual r_t (what the env actually applies).
-            acts = rollout["residuals"].reshape(-1, self.num_act)
-            metrics["latent/final_abs_mean"] = float(acts.abs().mean().item())
-            metrics["latent/final_abs_max"] = float(acts.abs().max().item())
-            greedy = self.actor.act_inference(rollout["actor_obs"][0], eval_mode="zero")  # (N, A) innovation
-            a_abs = greedy.abs()
-            flat = a_abs.reshape(-1)
-            metrics["act/abs_mean"] = float(flat.mean().item())
-            metrics["act/abs_p95"] = float(torch.quantile(flat, 0.95).item())
-            metrics["act/abs_p99"] = float(torch.quantile(flat, 0.99).item())
-            metrics["act/abs_max"] = float(flat.max().item())
-            metrics["act/first_abs_mean"] = float(a_abs.mean().item())
-            metrics["act/last_abs_mean"] = float(a_abs.mean().item())
+            greedy = self.actor.act_inference(rollout["actor_obs"][0], eval_mode="zero")  # (N, A)
+            g_abs = greedy.abs()
+            g_flat = g_abs.reshape(-1)
+            act_abs = g_abs.mean(dim=0)  # (A,) per-joint greedy mean
+            metrics["act/greedy_abs_mean"] = float(g_flat.mean().item())
+            metrics["act/greedy_abs_p95"] = float(torch.quantile(g_flat, 0.95).item())
+            metrics["act/greedy_abs_p99"] = float(torch.quantile(g_flat, 0.99).item())
+            metrics["act/greedy_abs_max"] = float(g_flat.max().item())
+            self._add_joint_group_metrics(metrics, act_abs)
+
+            sampled = rollout["actions"].reshape(-1, self.num_act).abs()
+            s_flat = sampled.reshape(-1)
+            metrics["act/rollout_abs_mean"] = float(s_flat.mean().item())
+            metrics["act/rollout_abs_p95"] = float(torch.quantile(s_flat, 0.95).item())
+            metrics["act/rollout_abs_p99"] = float(torch.quantile(s_flat, 0.99).item())
+            metrics["act/rollout_abs_max"] = float(s_flat.max().item())
+        self._add_reward_weighted_metrics(metrics)
+        self._add_sampler_metrics(metrics)
         return metrics
+
+    def _add_sampler_metrics(self, metrics: dict) -> None:
+        """Adaptive-sampler diagnostics ([SAMPLER]): which death-frame bin currently dominates
+        the reset distribution. Owned by env.step(); the algorithm only reads it. Absent when the
+        env exposes no sampler (e.g. test fakes)."""
+        stats_fn = getattr(self.env, "adaptive_sampling_stats", None)
+        stats = stats_fn() if callable(stats_fn) else {}
+        for key in ("top_bin", "top_prob", "failed_sum", "entropy"):
+            metrics[f"sampler/{key}"] = float(stats.get(key, float("nan")))
+
+    # ----------------------------------------------------------------- shared metric helpers
+    def _add_joint_group_metrics(self, metrics: dict, act_abs: torch.Tensor) -> None:
+        """Per-joint-group and per-arm-joint |action| means for [ACT_SUMMARY]/[TRAIN_ACT].
+
+        ``act_abs`` is the per-joint mean |action| over the batch, shape (action_dim,). The G1
+        joint layout is legs[0:12], waist[12:15], arms[15:29]. Guarded so a non-29-DoF action
+        space simply omits the per-joint fields rather than indexing out of range."""
+        if act_abs.numel() < 29:
+            return
+        legs_idx = list(range(0, 12)); waist_idx = [12, 13, 14]; arms_idx = list(range(15, 29))
+        metrics["act/legs_abs"] = float(act_abs[legs_idx].mean().item())
+        metrics["act/waist_abs"] = float(act_abs[waist_idx].mean().item())
+        metrics["act/arms_abs"] = float(act_abs[arms_idx].mean().item())
+        metrics["act/l_shoulder_pitch"] = float(act_abs[15].item()); metrics["act/r_shoulder_pitch"] = float(act_abs[22].item())
+        metrics["act/l_shoulder_roll"] = float(act_abs[16].item()); metrics["act/r_shoulder_roll"] = float(act_abs[23].item())
+        metrics["act/l_shoulder_yaw"] = float(act_abs[17].item()); metrics["act/r_shoulder_yaw"] = float(act_abs[24].item())
+        metrics["act/l_elbow"] = float(act_abs[18].item()); metrics["act/r_elbow"] = float(act_abs[25].item())
+        metrics["act/l_wrist_roll"] = float(act_abs[19].item()); metrics["act/r_wrist_roll"] = float(act_abs[26].item())
+        metrics["act/l_wrist_pitch"] = float(act_abs[20].item()); metrics["act/r_wrist_pitch"] = float(act_abs[27].item())
+        metrics["act/l_wrist_yaw"] = float(act_abs[21].item()); metrics["act/r_wrist_yaw"] = float(act_abs[28].item())
+
+    def _add_reward_weighted_metrics(self, metrics: dict) -> None:
+        """Per-term weighted contribution (raw reward-term mean x official weight x dt) for
+        [REWARD_WEIGHTED]. Uses the WHOLE-rollout average reward term (reward_rollout/*) so the
+        weighted total reflects the reward averaged over every transition actually optimized;
+        falls back to the chunk-0 term (reward/*) only when the rollout average is unavailable."""
+        action_rate_weight = float(getattr(self.env.task_cfg, "action_rate_weight", 0.1))
+        dt = float(getattr(self.env, "dt", 0.02))
+        reward_weights = {
+            "action_rate": -action_rate_weight,
+            "joint_limit": -10.0, "anchor_pos_reward": 0.5, "anchor_ori_reward": 0.5,
+            "body_pos_reward": 1.0, "body_ori_reward": 1.0, "body_lin_vel_reward": 1.0,
+            "body_ang_vel_reward": 1.0, "undesired_contacts": -0.1,
+        }
+        weighted_positive = 0.0
+        weighted_penalty = 0.0
+        for name, weight in reward_weights.items():
+            rollout_key = f"reward_rollout/{name}_mean"
+            chunk_key = f"reward/{name}_mean"
+            if rollout_key in metrics:
+                raw_value = metrics[rollout_key]
+            elif chunk_key in metrics:
+                raw_value = metrics[chunk_key]
+            else:
+                continue
+            contribution = weight * raw_value * dt
+            metrics[f"reward_weighted/{name}"] = contribution
+            if contribution >= 0.0:
+                weighted_positive += contribution
+            else:
+                weighted_penalty += contribution
+        metrics["reward_weighted/positive"] = weighted_positive
+        metrics["reward_weighted/penalty"] = weighted_penalty
+        metrics["reward_weighted/total"] = weighted_positive + weighted_penalty
 
     def log(self, update_idx: int, max_updates: int, metrics: dict) -> None:
         print(
@@ -756,8 +781,146 @@ class FPOPP(Algorithm):
             f"lr={metrics['fpo/lr']:.6f} critic_lr={metrics.get('fpo/critic_lr', float('nan')):.6f}",
             flush=True,
         )
-        log_shared_update_diagnostics(metrics, failure_label="FIRST_FAILURE", index_name="step")
-        log_shared_tracking(metrics)
+        # --- independent per-algorithm diagnostics (no shared logger) -------------------------
+        print(
+            f"[TRAIN] mean_reward={metrics.get('train/mean_reward', float('nan')):.5f} "
+            f"mean_len={metrics.get('train/mean_episode_length', float('nan')):.2f} "
+            f"recent_eps={metrics.get('train/recent_episode_count', 0.0):.0f} "
+            f"completed_eps={metrics.get('train/completed_episodes', 0.0):.0f}",
+            flush=True,
+        )
+        print(
+            f"[UPDATE_EFFECT] action_delta={metrics.get('policy/action_delta', float('nan')):.8f} "
+            f"param_rms_delta={metrics.get('policy/param_rms_delta', float('nan')):.8f}",
+            flush=True,
+        )
+        print(f"[TIME] collect={metrics['timing/collect_s']:.3f}s update={metrics['timing/update_s']:.3f}s", flush=True)
+        print(
+            f"[DONE] timeout={metrics.get('done/time_out_frac', 0.0):.5f} "
+            f"anchor_pos={metrics.get('done/anchor_pos_bad_frac', 0.0):.5f} "
+            f"anchor_ori={metrics.get('done/anchor_ori_bad_frac', 0.0):.5f} "
+            f"ee_body={metrics.get('done/ee_body_bad_frac', 0.0):.5f}",
+            flush=True,
+        )
+        print(
+            f"[DONE_ROLLOUT] timeout={metrics.get('done_rollout/time_out_frac', 0.0):.5f} "
+            f"anchor_pos={metrics.get('done_rollout/anchor_pos_bad_frac', 0.0):.5f} "
+            f"anchor_ori={metrics.get('done_rollout/anchor_ori_bad_frac', 0.0):.5f} "
+            f"ee_body={metrics.get('done_rollout/ee_body_bad_frac', 0.0):.5f}",
+            flush=True,
+        )
+        print(
+            f"[FIRST_FAILURE] "
+            f"step_mean={metrics.get('rollout/first_failure_chunk_mean', float('nan')):.2f} "
+            f"step_min={metrics.get('rollout/first_failure_chunk_min', float('nan')):.0f} "
+            f"step_max={metrics.get('rollout/first_failure_chunk_max', float('nan')):.0f} "
+            f"phase_mean={metrics.get('rollout/first_failure_phase_mean', float('nan')):.2f} "
+            f"phase_min={metrics.get('rollout/first_failure_phase_min', float('nan')):.0f} "
+            f"phase_max={metrics.get('rollout/first_failure_phase_max', float('nan')):.0f} "
+            f"anchor_pos={metrics.get('rollout/first_failure_anchor_pos_frac', 0.0):.5f} "
+            f"anchor_ori={metrics.get('rollout/first_failure_anchor_ori_frac', 0.0):.5f} "
+            f"ee_body={metrics.get('rollout/first_failure_ee_body_frac', 0.0):.5f} "
+            f"timeout={metrics.get('rollout/first_failure_timeout_frac', 0.0):.5f}",
+            flush=True,
+        )
+        print(
+            f"[TRACK_CHUNK0] "
+            f"anchor_pos={metrics.get('reward/anchor_pos_reward_mean', float('nan')):.5f} "
+            f"anchor_ori={metrics.get('reward/anchor_ori_reward_mean', float('nan')):.5f} "
+            f"body_pos={metrics.get('reward/body_pos_reward_mean', float('nan')):.5f} "
+            f"body_ori={metrics.get('reward/body_ori_reward_mean', float('nan')):.5f} "
+            f"body_lin={metrics.get('reward/body_lin_vel_reward_mean', float('nan')):.5f} "
+            f"body_ang={metrics.get('reward/body_ang_vel_reward_mean', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[TRACK_ROLLOUT] "
+            f"anchor_pos={metrics.get('reward_rollout/anchor_pos_reward_mean', float('nan')):.5f} "
+            f"anchor_ori={metrics.get('reward_rollout/anchor_ori_reward_mean', float('nan')):.5f} "
+            f"body_pos={metrics.get('reward_rollout/body_pos_reward_mean', float('nan')):.5f} "
+            f"body_ori={metrics.get('reward_rollout/body_ori_reward_mean', float('nan')):.5f} "
+            f"body_lin={metrics.get('reward_rollout/body_lin_vel_reward_mean', float('nan')):.5f} "
+            f"body_ang={metrics.get('reward_rollout/body_ang_vel_reward_mean', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_COST] "
+            f"action_rate={metrics.get('reward/action_rate_mean', float('nan')):.5f} "
+            f"joint_limit={metrics.get('reward/joint_limit_mean', float('nan')):.5f} "
+            f"undesired_contacts={metrics.get('reward/undesired_contacts_mean', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[REWARD_WEIGHTED] "
+            f"pos={metrics.get('reward_weighted/positive', float('nan')):.5f} "
+            f"penalty={metrics.get('reward_weighted/penalty', float('nan')):.5f} "
+            f"total={metrics.get('reward_weighted/total', float('nan')):.5f} "
+            f"act_rate={metrics.get('reward_weighted/action_rate', float('nan')):.5f} "
+            f"contacts={metrics.get('reward_weighted/undesired_contacts', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[ACT_GREEDY] "
+            f"abs_mean={metrics.get('act/greedy_abs_mean', float('nan')):.4f} "
+            f"abs_p95={metrics.get('act/greedy_abs_p95', float('nan')):.4f} "
+            f"abs_p99={metrics.get('act/greedy_abs_p99', float('nan')):.4f} "
+            f"abs_max={metrics.get('act/greedy_abs_max', float('nan')):.4f} "
+            f"legs={metrics.get('act/legs_abs', float('nan')):.4f} "
+            f"waist={metrics.get('act/waist_abs', float('nan')):.4f} "
+            f"arms={metrics.get('act/arms_abs', float('nan')):.4f}",
+            flush=True,
+        )
+        print(
+            f"[ACT_ROLLOUT] "
+            f"abs_mean={metrics.get('act/rollout_abs_mean', float('nan')):.4f} "
+            f"abs_p95={metrics.get('act/rollout_abs_p95', float('nan')):.4f} "
+            f"abs_p99={metrics.get('act/rollout_abs_p99', float('nan')):.4f} "
+            f"abs_max={metrics.get('act/rollout_abs_max', float('nan')):.4f} "
+            f"abs_max_all={metrics.get('act/abs_max_all', float('nan')):.4f}",
+            flush=True,
+        )
+        print(
+            f"[SAMPLER] "
+            f"top_bin={metrics.get('sampler/top_bin', float('nan')):.0f} "
+            f"top_prob={metrics.get('sampler/top_prob', float('nan')):.5f} "
+            f"failed_sum={metrics.get('sampler/failed_sum', float('nan')):.2f} "
+            f"entropy={metrics.get('sampler/entropy', float('nan')):.4f}",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_BODY] "
+            f"torso_ori={metrics.get('reward/diag_torso_ori_deg_mean', float('nan')):.2f}deg "
+            f"l_wrist_ori={metrics.get('reward/diag_left_wrist_ori_deg_mean', float('nan')):.2f}deg "
+            f"r_wrist_ori={metrics.get('reward/diag_right_wrist_ori_deg_mean', float('nan')):.2f}deg "
+            f"l_elbow_ori={metrics.get('reward/diag_left_elbow_ori_deg_mean', float('nan')):.2f}deg "
+            f"r_elbow_ori={metrics.get('reward/diag_right_elbow_ori_deg_mean', float('nan')):.2f}deg "
+            f"l_shoulder_ori={metrics.get('reward/diag_left_shoulder_ori_deg_mean', float('nan')):.2f}deg "
+            f"r_shoulder_ori={metrics.get('reward/diag_right_shoulder_ori_deg_mean', float('nan')):.2f}deg",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_ANG] "
+            f"torso={metrics.get('reward/diag_torso_ang_vel_mean', float('nan')):.3f} "
+            f"l_wrist={metrics.get('reward/diag_left_wrist_ang_vel_mean', float('nan')):.3f} "
+            f"r_wrist={metrics.get('reward/diag_right_wrist_ang_vel_mean', float('nan')):.3f} "
+            f"l_elbow={metrics.get('reward/diag_left_elbow_ang_vel_mean', float('nan')):.3f} "
+            f"r_elbow={metrics.get('reward/diag_right_elbow_ang_vel_mean', float('nan')):.3f} "
+            f"l_shoulder={metrics.get('reward/diag_left_shoulder_ang_vel_mean', float('nan')):.3f} "
+            f"r_shoulder={metrics.get('reward/diag_right_shoulder_ang_vel_mean', float('nan')):.3f}",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_ACT] "
+            f"l_wrist_r={metrics.get('act/l_wrist_roll', float('nan')):.4f} "
+            f"l_wrist_p={metrics.get('act/l_wrist_pitch', float('nan')):.4f} "
+            f"l_wrist_y={metrics.get('act/l_wrist_yaw', float('nan')):.4f} "
+            f"r_wrist_r={metrics.get('act/r_wrist_roll', float('nan')):.4f} "
+            f"r_wrist_p={metrics.get('act/r_wrist_pitch', float('nan')):.4f} "
+            f"r_wrist_y={metrics.get('act/r_wrist_yaw', float('nan')):.4f} "
+            f"l_elbow={metrics.get('act/l_elbow', float('nan')):.4f} "
+            f"r_elbow={metrics.get('act/r_elbow', float('nan')):.4f}",
+            flush=True,
+        )
 
     def log_banner(self) -> None:
         cfg = self.cfg
@@ -770,7 +933,6 @@ class FPOPP(Algorithm):
             f"chunk_dim={self.chunk_dim} num_envs={env.num_envs} num_steps_per_env={self.num_steps_per_env} "
             f"flow_steps={self.flow_steps} num_mc={self.num_mc} actor_scale={self.actor.actor_scale} "
             f"action_perturb_std={self.actor.action_perturb_std} timestep_embed_dim={self.actor.timestep_embed_dim} "
-            f"residual_rho={self.residual_rho} residual_innov_scale={self.residual_innov_scale} "
             f"cfm_reduction={self.actor.cfm_loss_reduction} clip={cfg.clip_range} "
             f"cfm_diff_clamp_max={self.cfm_diff_clamp_max} cfm_loss_clamp={self.cfm_loss_clamp} "
             f"adv_clamp={self.adv_clamp} schedule={self.schedule} desired_kl={self.desired_kl} "

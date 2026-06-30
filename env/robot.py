@@ -73,7 +73,7 @@ class G1Env:
             G1_MIMIC_ACTION_SCALE_VALUES,
             dtype=torch.float32,
             device=self.device,
-        ).unsqueeze(0) * float(getattr(cfg, "action_scale_multiplier", 1.0))
+        ).unsqueeze(0)
         min_push, max_push = PUSH_INTERVAL_STEP_RANGE
         self.next_push_step = torch.randint(
             min_push,

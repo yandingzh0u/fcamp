@@ -66,9 +66,6 @@ class FakeEnv:
         self.task_cfg = types.SimpleNamespace(max_episode_steps=20, motion_file="fake_motion")
         self.episode_steps = torch.zeros(num_envs, dtype=torch.long)
         self.phase_steps = torch.zeros(num_envs, dtype=torch.long)
-        # Executed residual r_{t-1}; the real env stores it in last_action (reset to 0 on done).
-        self.last_action = torch.zeros(num_envs, action_dim)
-        self.prev_action = torch.zeros(num_envs, action_dim)
         self.motion = types.SimpleNamespace(num_frames=100)
         self._gen = torch.Generator().manual_seed(123)
         self._step = 0
@@ -85,8 +82,6 @@ class FakeEnv:
 
     def reset(self, **kw):
         self.episode_steps.zero_()
-        self.last_action.zero_()
-        self.prev_action.zero_()
         self._cur_obs = self._obs()
         self._cur_critic = self._critic()
         return self._cur_obs
@@ -100,10 +95,6 @@ class FakeEnv:
     def step(self, action, auto_reset=True, reset_horizon=1):
         self._step += 1
         assert action.shape == (self.num_envs, self.action_dim)
-        # Mirror the real env: the applied action is the executed residual r_t, stored as
-        # last_action (and zeroed on auto-reset) so the AR(1) state is read back next step.
-        self.prev_action = self.last_action.clone()
-        self.last_action = action.clone()
         reward = torch.randn(self.num_envs, generator=self._gen) * 0.1
         # Make a couple of envs terminate periodically to exercise done handling.
         done = torch.zeros(self.num_envs, dtype=torch.bool)
@@ -116,9 +107,6 @@ class FakeEnv:
         done_terms["time_out"] = timeout
         # env 0 dies via ee_body_bad (the crawl failure mode); record it as the death cause.
         done_terms["ee_body_bad"] = done & ~timeout
-        if auto_reset and bool(done.any()):
-            self.last_action[done] = 0.0
-            self.prev_action[done] = 0.0
         reward_terms = {k: torch.randn(self.num_envs, generator=self._gen) * 0.05 for k in REWARD_KEYS}
         self.phase_steps = (self.phase_steps + 1) % self.motion.num_frames
         self._cur_obs = self._obs()
@@ -144,7 +132,6 @@ def _cfg(num_micro_batches=1):
         cfm_loss_clamp_neg_adv=True, cfm_loss_clamp_neg_adv_max=20.0, fpo_adv_clamp=5.0,
         schedule="adaptive", desired_kl=1e-4, trust_region_mode="aspo",
         num_micro_batches=num_micro_batches, storage_action_noise_std=0.0,
-        residual_innov_rho=0.9, residual_innov_scale=0.25,
         init_at_random_ep_len=True,
         num_steps_per_env=6, discount_gamma=0.99, terminal_penalty=50.0,
         num_mini_batches=2, num_learning_epochs=2, clip_range=0.01,
@@ -179,14 +166,6 @@ def test_end_to_end():
     D = algo.chunk_dim
     check("env.step called num_steps_per_env times", env._step == T)
     check("rollout actions shape (T, N, action_dim)", rollout["actions"].shape == (T, N, D))
-    check("rollout residuals shape (T, N, action_dim)", rollout["residuals"].shape == (T, N, D))
-    # Residual-innovation filter: r_t = rho*r_{t-1} + scale*u_t. At t=0 the env's last_action is 0
-    # (reset), so r_0 == scale * u_0 (u_t = the stored innovation in "actions").
-    check("residual filter: r_0 == scale * u_0 (r_prev=0 after reset)",
-          torch.allclose(rollout["residuals"][0], 0.25 * rollout["actions"][0], atol=1e-6))
-    # The executed residual is smaller than the raw innovation it was built from (scale<1, rho<1).
-    check("executed residual magnitude < innovation magnitude",
-          float(rollout["residuals"].abs().mean()) < float(rollout["actions"].abs().mean()))
     check("rollout cfm_eps shape", rollout["cfm_eps"].shape == (T, N, M, D))
     check("rollout cfm_t shape", rollout["cfm_t"].shape == (T, N, M, 1))
     check("rollout old_cfm shape", rollout["old_cfm"].shape == (T, N, M))
@@ -208,10 +187,9 @@ def test_end_to_end():
     check("first_done_step recorded for env 0 (failure)", int(rollout["first_done_step"][0].item()) < T)
     check("env 0 death recorded as ee_body_bad", bool(rollout["first_done_ee_body"][0].item()))
     check("env 0 not a timeout", not bool(rollout["first_done_timeout"][0].item()))
-    check("adaptive motion sampler was called", len(env.sampler_calls) == 1)
-    sp, sf, rs = env.sampler_calls[0]
-    check("sampler shapes/rollout_steps", sp.shape == (N,) and sf.shape == (N,) and rs == T)
-    check("sampler flags env 0 as failed", bool(sf[0].item()))
+    # The adaptive sampler is now owned/updated by env.step() (death-frame binning), so the
+    # algorithm must NOT call back into it.
+    check("algorithm does not write the sampler", len(env.sampler_calls) == 0)
 
     # Snapshot actor params; one update must change them.
     before = [p.detach().clone() for p in algo.actor.parameters()]

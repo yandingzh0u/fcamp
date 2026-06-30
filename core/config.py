@@ -27,7 +27,6 @@ class EnvCfg:
     sim_dt: float = 0.02
     fix_root_link: bool = False
     startup_randomization: bool = True
-    action_scale_multiplier: float = 1.0
     motion_file: str = ""
     max_episode_steps: int = -1
     motion_start_phase: int = 0
@@ -37,16 +36,9 @@ class EnvCfg:
     observation_noise: bool = True
     adaptive_motion_sampling: bool = True
     adaptive_uniform_ratio: float = 0.1
-    motion_start_phase_ratio: float = 0.25
     adaptive_alpha: float = 0.001
     adaptive_kernel_size: int = 1
-    joint_acc_weight: float = 2.5e-7
-    joint_torque_weight: float = 1.0e-5
     action_rate_weight: float = 0.1
-    action_accel_weight: float = 0.0
-    action_l2_weight: float = 0.0
-    term_z_weight: float = 3.0
-    term_z_sigma: float = 0.12
     # GRPO observation-noise sharing: set by the algorithm (num_generations) at build time.
     num_generations: int = 1
     render: bool = False
@@ -128,11 +120,6 @@ class AlgoCfg:
     trust_region_mode: str = "aspo"              # ppo | spo | aspo.
     num_micro_batches: int = 1                    # gradient-accum microbatches per logical minibatch.
     storage_action_noise_std: float = 0.0         # extra noise added to stored actions (off by default).
-    # Residual-innovation action parametrization (FPO++ residual env). The flow emits an
-    # innovation u_t; the executed residual is the AR(1) low-pass r_t = rho*r_{t-1} + scale*u_t.
-    # rho=0, scale=1 recovers "flow emits the full residual each step" (the legacy behaviour).
-    residual_innov_rho: float = 0.9               # AR(1) persistence (temporal continuity of r_t).
-    residual_innov_scale: float = 0.25            # per-joint innovation scale D (small local corrections).
 
 
 @dataclass

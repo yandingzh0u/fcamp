@@ -56,6 +56,9 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
     cuda_rng_state = None
     original_obs_noise = getattr(env.task_cfg, "observation_noise", True)
     env.task_cfg.observation_noise = bool(tcfg.validation_observation_noise)
+    # Eval deaths must not feed the training adaptive sampler.
+    original_record_failures = getattr(env, "record_motion_failures", True)
+    env.record_motion_failures = False
     # Validate over the WHOLE motion clip: lift the training episode-length time-out so envs
     # are not force-timed-out at max_episode_steps (e.g. 500) before the motion ends (959).
     # Survival is then bounded only by the real tracking-failure terminations + motion end.
@@ -82,6 +85,10 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
     chunk_index = horizon
     done = torch.zeros(num_envs, dtype=torch.bool, device=env.device)
     survived_steps = torch.zeros(num_envs, dtype=torch.long, device=env.device)
+    # Actual motion frame the env was scored at when it died (info["termination_phase_steps"],
+    # the pre-advance phase). NOT start_phase + survived_steps, which is off-by-one after the
+    # Holosoma phase-timing change and ignores adaptive reset start frames.
+    death_phase_record = torch.zeros(num_envs, dtype=torch.long, device=env.device)
     cumulative_reward = torch.zeros(num_envs, device=env.device)
     done_term_record = {
         name: torch.zeros(num_envs, dtype=torch.bool, device=env.device)
@@ -126,6 +133,7 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
                 if bool(new_done.any()):
                     done_terms = info["done_terms"]
                     debug_terms = info["debug_terms"]
+                    death_phase_record[new_done] = info["termination_phase_steps"][new_done]
                     for name in done_term_record:
                         done_term_record[name][new_done] = done_terms[name][new_done]
                     for name in done_debug_record:
@@ -157,6 +165,7 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
                     break
     finally:
         env.task_cfg.observation_noise = original_obs_noise
+        env.record_motion_failures = original_record_failures
         env.task_cfg.max_episode_steps = original_max_episode_steps
         if training_snapshot is not None:
             restore_env_state(env, training_snapshot)
@@ -179,7 +188,7 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
         "validation/done_frac": float(done.float().mean().item()),
     }
     if bool(done.any()):
-        failed_phases = tcfg.validation_start_phase + survived_steps[done]
+        failed_phases = death_phase_record[done]
         metrics.update({
             "validation/fail_phase_mean": float(failed_phases.float().mean().item()),
             "validation/fail_phase_min": float(failed_phases.min().item()),

@@ -8,14 +8,14 @@ from .config import PUSH_INTERVAL_STEP_RANGE, VELOCITY_RANGE
 class MimicStepMixin:
     def step(
         self,
-        action_offsets: torch.Tensor,
+        actions: torch.Tensor,
         auto_reset: bool = False,
         reset_horizon: int = 1,
         loop_motion: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         previous_action = self.last_action.clone()
         previous_previous_action = self.prev_action.clone()
-        self._apply_action_targets(action_offsets)
+        self._apply_action_targets(actions)
         for _ in range(self.decimation):
             self.scene.write_data_to_sim()
             self.sim.step(render=False)
@@ -27,40 +27,53 @@ class MimicStepMixin:
                 self.sim.render()
 
         self.episode_steps += 1
-        # Advance phase BEFORE reward/termination so robot(t+1) is compared against ref(t+1).
-        # _apply_action_targets uses phase+1 to set the PD target, and after the sim step the
-        # robot state corresponds to that next frame. Keeping phase at t (the old behaviour)
-        # introduced a 1-frame mismatch in the reward/termination signal.
-        self.phase_steps += 1
-        # Motion-end handling. Capture which envs reached the clip end this step.
-        self._motion_end_mask = self.phase_steps >= self.motion.num_frames
+        # Holosoma phase timing: reward/termination are evaluated against the CURRENT phase
+        # ref(t) (the frame the policy observed when it chose this action). The phase is only
+        # advanced to t+1 AFTER reward/termination/reset, so the NEXT observation reads ref(t+1).
+        # Motion-end: the last valid reference frame (num_frames - 1) is the terminal frame --
+        # an env scoring there this step is flagged as a (timeout-style) done.
+        self._motion_end_mask = self.phase_steps >= (self.motion.num_frames - 1)
         if loop_motion:
-            # Explicit infinite-playback mode only: silently teleport finished envs back into
-            # the clip so the rollout never stops. NOT used during training or validation,
-            # where reaching the clip end must register as a (timeout-style) done so episodes
-            # terminate cleanly and survival is measured against the real clip length.
+            # Explicit infinite-playback mode only (play.py): never terminate on motion end.
             self._motion_end_mask = torch.zeros_like(self._motion_end_mask)
-            self._resample_finished_motions()
 
+        # Death frame = the phase that reward/termination are scored at (pre-advance).
         termination_phase_steps = self.phase_steps.clone()
-        reward, reward_terms = self.compute_reward(action_offsets, previous_action, previous_previous_action)
+        reward, reward_terms = self.compute_reward(actions, previous_action, previous_previous_action)
         done, done_terms, debug_terms = self.compute_termination()
         terminal_observation = None
+        terminal_critic_observation = None
 
-        if auto_reset:
-            if bool(done.any()):
-                terminal_observation = self.get_observation().clone()
-                terminal_critic_observation = self.get_critic_observation().clone()
-                env_ids = done.nonzero(as_tuple=False).squeeze(-1)
-                reset_phases = self.sample_phase_indices(env_ids.numel(), horizon=max(1, reset_horizon))
-                self.reset_envs(env_ids, phase_indices=reset_phases)
-            else:
-                terminal_critic_observation = None
-        else:
-            terminal_critic_observation = None
+        # The env owns the adaptive sampler: record this step's tracking-failure death frames
+        # BEFORE reset (guarded to count each episode once). A tracking failure is counted even
+        # when it coincides with a timeout on the same step; a pure timeout is not a failure. The
+        # EMA is folded only at the end of the step so the reset below samples from the OLD EMA
+        # (official order). All algorithms simply consume the env -- none write to the sampler.
+        tracking_failure = done_terms["anchor_pos_bad"] | done_terms["anchor_ori_bad"] | done_terms["ee_body_bad"]
+        self._record_adaptive_failures(tracking_failure, termination_phase_steps)
+
+        if auto_reset and bool(done.any()):
+            # Capture the terminal observation at ref(t) (robot's post-physics death state)
+            # before reset, then reset done envs back into the clip.
+            terminal_observation = self.get_observation().clone()
+            terminal_critic_observation = self.get_critic_observation().clone()
+            env_ids = done.nonzero(as_tuple=False).squeeze(-1)
+            reset_phases = self.sample_phase_indices(env_ids.numel(), horizon=max(1, reset_horizon))
+            self.reset_envs(env_ids, phase_indices=reset_phases)
+
+        # Advance the phase for ALL envs (reset envs go from their sampled frame k to k+1, so
+        # the returned observation references ref(k+1) just like a surviving env references
+        # ref(t+1)). Done in loop_motion too, then finished envs are teleported back in-clip.
+        self.phase_steps += 1
+        if loop_motion:
+            self._resample_finished_motions()
+
+        # Fold this step's recorded failures into the sampler EMA AFTER reset/phase-advance, so
+        # the reset above used the old EMA (official update order).
+        self._fold_adaptive_sampler()
 
         self.prev_action = previous_action.clone()
-        self.last_action = action_offsets.clone()
+        self.last_action = actions.clone()
         if auto_reset and bool(done.any()):
             self.prev_action[done] = 0.0
             self.last_action[done] = 0.0

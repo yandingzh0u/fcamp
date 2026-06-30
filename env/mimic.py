@@ -4,12 +4,7 @@ import torch
 
 from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
 
-from .adaptive_sampling import (
-    allocate_sampling_counts,
-    build_adaptive_phase_probabilities,
-    compute_failure_rates,
-    stratified_uniform_offsets,
-)
+from .adaptive_sampling import AdaptiveTimestepsSampler
 from .config import (
     CRITIC_OBS_DIM,
     OBS_DIM,
@@ -121,51 +116,22 @@ class G1MimicEnv(
             return torch.empty(0, dtype=torch.long, device=self.device)
         horizon = max(1, int(horizon))
         min_phase = self.motion_start_phase
+        # Never start on the final frame: the last valid reference frame is the terminal frame,
+        # so an env spawned there motion-times-out on its very first step. Hold back at least 2
+        # frames (Holosoma retreats the start to the second-to-last frame) so a fresh episode
+        # always has at least one real tracking step.
         max_phase = min(
             self.motion_end_phase,
-            max(0, self.motion.num_frames - horizon),
+            max(0, self.motion.num_frames - max(horizon, 2)),
         )
         if max_phase < min_phase:
             return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
         if not self.adaptive_motion_sampling:
             return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
 
-        failure_rates = compute_failure_rates(self.bin_failed_count, self.bin_exposure_count)
-        failure_rates = torch.nn.functional.pad(
-            failure_rates.unsqueeze(0).unsqueeze(0),
-            (0, self.adaptive_kernel_size - 1),
-            mode="replicate",
-        )
-        failure_rates = torch.nn.functional.conv1d(
-            failure_rates,
-            self.adaptive_kernel.view(1, 1, -1),
-        ).view(-1)
-        candidate_phases = torch.arange(min_phase, max_phase + 1, dtype=torch.long, device=self.device)
-        adaptive_probabilities = build_adaptive_phase_probabilities(
-            failure_rates,
-            candidate_phases,
-            motion_num_frames=self.motion.num_frames,
-        )
-        start_count, uniform_count, adaptive_count = allocate_sampling_counts(
-            num_samples,
-            uniform_ratio=self.adaptive_uniform_ratio,
-            start_phase_ratio=self.motion_start_phase_ratio,
-        )
-        sampled_phases = []
-        if start_count > 0:
-            sampled_phases.append(torch.full((start_count,), min_phase, dtype=torch.long, device=self.device))
-        if uniform_count > 0:
-            uniform_offsets = stratified_uniform_offsets(
-                candidate_phases.numel(),
-                uniform_count,
-                device=self.device,
-            )
-            sampled_phases.append(candidate_phases.index_select(0, uniform_offsets))
-        if adaptive_count > 0:
-            sampled_offsets = torch.multinomial(adaptive_probabilities, adaptive_count, replacement=True)
-            sampled_phases.append(candidate_phases.index_select(0, sampled_offsets))
-        phases = torch.cat(sampled_phases)
-        return phases.index_select(0, torch.randperm(num_samples, device=self.device))
+        # Holosoma death-frame sampler: bins are weighted by the EMA of the frames the robot
+        # actually dies at (plus a uniform floor). The sampler is fed only by env.step().
+        return self.adaptive_sampler.sample_frames(num_samples, min_phase, max_phase)
 
     def reset(self, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
@@ -188,6 +154,10 @@ class G1MimicEnv(
         self.episode_steps[env_ids] = 0
         self.last_action[env_ids] = 0.0
         self.prev_action[env_ids] = 0.0
+        # New episode for these envs: clear the per-episode death-record guard so their next
+        # termination is counted by the adaptive sampler exactly once.
+        if hasattr(self, "_failure_recorded"):
+            self._failure_recorded[env_ids] = False
         min_push, max_push = PUSH_INTERVAL_STEP_RANGE
         self.next_push_step[env_ids] = torch.randint(
             min_push,
@@ -250,74 +220,71 @@ class G1MimicEnv(
         soft_limits = self.robot.data.soft_joint_pos_limits.index_select(0, env_ids)
         joint_pos[:] = torch.clamp(joint_pos, soft_limits[:, self.action_joint_ids, 0], soft_limits[:, self.action_joint_ids, 1])
 
-    def _apply_action_targets(self, action_offsets: torch.Tensor) -> None:
-        if action_offsets.shape != (self.num_envs, self.action_dim):
-            raise ValueError(f"Expected action shape {(self.num_envs, self.action_dim)}, got {tuple(action_offsets.shape)}")
+    def _apply_action_targets(self, actions: torch.Tensor) -> None:
+        # Official WBT action semantics (use_default_offset=True): the PD target is the default
+        # joint pose plus the scaled policy action,  q_target = q_default + S * a_t.
+        # The raw action is clipped to +-100 before forming the PD target (official); the
+        # unclipped action is what reaches the action-rate reward (handled in step.py).
+        if actions.shape != (self.num_envs, self.action_dim):
+            raise ValueError(f"Expected action shape {(self.num_envs, self.action_dim)}, got {tuple(actions.shape)}")
 
-        next_phase = self.motion.clamp_time_steps(self.phase_steps + 1)
-        ref_joint_pos = self.motion.joint_pos.index_select(0, next_phase)
-        action_targets = ref_joint_pos + self.action_scale * action_offsets
+        clipped_actions = torch.clamp(actions, -100.0, 100.0)
+        action_targets = self.default_action_joint_pos + self.action_scale * clipped_actions
         self.robot.set_joint_position_target(action_targets, joint_ids=self.action_joint_ids)
 
     def _init_adaptive_motion_sampling(self) -> None:
-        self.bin_count = int(self.motion.num_frames // (1.0 / self.dt)) + 1
-        self.bin_count = max(self.bin_count, 1)
-        self.bin_failed_count = torch.zeros(self.bin_count, dtype=torch.float32, device=self.device)
-        self.bin_exposure_count = torch.zeros(self.bin_count, dtype=torch.float32, device=self.device)
         self.adaptive_motion_sampling = bool(self.task_cfg.adaptive_motion_sampling)
-        self.adaptive_kernel_size = max(1, int(self.task_cfg.adaptive_kernel_size))
-        self.adaptive_uniform_ratio = min(1.0, max(0.0, float(self.task_cfg.adaptive_uniform_ratio)))
-        self.motion_start_phase_ratio = min(1.0, max(0.0, float(self.task_cfg.motion_start_phase_ratio)))
-        self.adaptive_alpha = min(1.0, max(0.0, float(self.task_cfg.adaptive_alpha)))
-        kernel = torch.tensor([0.8**i for i in range(self.adaptive_kernel_size)], dtype=torch.float32, device=self.device)
-        self.adaptive_kernel = kernel / kernel.sum()
+        # ~1-second bins over the global motion-frame axis (env_fps = round(1/dt)).
+        env_fps = max(1, int(round(1.0 / self.dt)))
+        num_bins = max(1, int(self.motion.num_frames // env_fps) + 1)
+        self.adaptive_sampler = AdaptiveTimestepsSampler(
+            motion_time_step_total=int(self.motion.num_frames),
+            device=self.device,
+            num_bins=num_bins,
+            adaptive_kernel_size=max(1, int(self.task_cfg.adaptive_kernel_size)),
+            adaptive_uniform_ratio=float(self.task_cfg.adaptive_uniform_ratio),
+            adaptive_alpha=float(self.task_cfg.adaptive_alpha),
+        )
+        # Per-env guard so the same termination is recorded by the sampler exactly once even
+        # when the env is not auto-reset (validation / GRPO branch rollouts replay dead envs).
+        self._failure_recorded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Validation / probes flip this off so eval deaths do not feed the training sampler.
+        self.record_motion_failures = True
 
-    def update_adaptive_motion_statistics(
+    def _record_adaptive_failures(
         self,
-        start_phases: torch.Tensor,
-        failed: torch.Tensor,
-        *,
-        rollout_steps: int,
+        tracking_failure: torch.Tensor,
+        death_phase_steps: torch.Tensor,
     ) -> None:
-        if not self.adaptive_motion_sampling:
-            return
-        if start_phases.shape != failed.shape:
-            raise ValueError("start_phases and failed must have matching shapes")
-        if start_phases.numel() == 0:
-            return
+        """Record this step's tracking-failure death frames into the per-step accumulator.
 
-        start_bins = torch.clamp(
-            (start_phases.reshape(-1).long() * self.bin_count) // max(self.motion.num_frames, 1),
-            0,
-            self.bin_count - 1,
-        )
-        batch_exposure = torch.bincount(start_bins, minlength=self.bin_count).to(self.bin_exposure_count)
-        batch_failures = torch.zeros_like(self.bin_failed_count)
-        batch_failures.scatter_add_(0, start_bins, failed.reshape(-1).to(dtype=batch_failures.dtype))
+        ``tracking_failure`` is the union of the real tracking terminations
+        (anchor_pos_bad | anchor_ori_bad | ee_body_bad). A pure motion-end/episode-cap timeout is
+        NOT a failure, but a tracking failure that happens to coincide with a timeout on the same
+        step IS still counted (Holosoma records any non-timeout termination cause).
 
-        effective_alpha = 1.0 - (1.0 - self.adaptive_alpha) ** max(1, int(rollout_steps))
-        self.bin_failed_count.mul_(1.0 - effective_alpha).add_(batch_failures, alpha=effective_alpha)
-        self.bin_exposure_count.mul_(1.0 - effective_alpha).add_(
-            batch_exposure,
-            alpha=effective_alpha,
-        )
+        Called BEFORE reset/phase-advance. Only touches ``current_bin_failed_count`` -- it does
+        NOT fold the EMA, so the reset that follows still samples from the OLD EMA. Guarded so a
+        single termination is counted once per episode (matters when auto_reset=False)."""
+        if not self.adaptive_motion_sampling or not self.record_motion_failures:
+            return
+        failure = tracking_failure & (~self._failure_recorded)
+        if bool(failure.any()):
+            self.adaptive_sampler.update_current_bin_failed_count(death_phase_steps[failure])
+            self._failure_recorded |= failure
+
+    def _fold_adaptive_sampler(self) -> None:
+        """Fold the per-step failure accumulator into the EMA, then zero it.
+
+        Called at the END of the step, AFTER reset/phase-advance (official order: record death
+        -> reset using the old EMA -> update the EMA). Folding here avoids an instantaneous jump
+        in the sampling distribution when many envs die on the same step and are reset against it."""
+        if not self.adaptive_motion_sampling or not self.record_motion_failures:
+            return
+        self.adaptive_sampler.update_bin_failed_count()
 
     def adaptive_sampling_stats(self) -> dict[str, float]:
-        rates = compute_failure_rates(self.bin_failed_count, self.bin_exposure_count)
-        probabilities = rates / rates.sum().clamp_min(1.0e-8)
-        entropy = -(probabilities * probabilities.clamp_min(1.0e-12).log()).sum()
-        if self.bin_count > 1:
-            entropy = entropy / torch.log(torch.tensor(float(self.bin_count), device=self.device))
-        else:
-            entropy = torch.ones_like(entropy)
-        top_rate, top_bin = rates.max(dim=0)
-        return {
-            "failure_rate_mean": float(rates.mean().item()),
-            "failure_rate_max": float(top_rate.item()),
-            "top_bin": float(top_bin.item()),
-            "entropy": float(entropy.item()),
-            "exposure_sum": float(self.bin_exposure_count.sum().item()),
-        }
+        return self.adaptive_sampler.stats()
 
     def _resample_finished_motions(self) -> None:
         env_ids = torch.where(self.phase_steps >= self.motion.num_frames)[0]

@@ -46,10 +46,8 @@ class Checkpointer:
             "metrics": metrics,
             "algo_state": t.algo.extra_checkpoint_state(),
         }
-        if hasattr(t.env, "bin_failed_count"):
-            payload["adaptive_bin_failed_count"] = t.env.bin_failed_count.detach().cpu()
-        if hasattr(t.env, "bin_exposure_count"):
-            payload["adaptive_bin_exposure_count"] = t.env.bin_exposure_count.detach().cpu()
+        if hasattr(t.env, "adaptive_sampler"):
+            payload["adaptive_sampler_state"] = t.env.adaptive_sampler.state_dict()
         try:
             payload["torch_rng_state"] = torch.random.get_rng_state()
             if torch.cuda.is_available():
@@ -78,15 +76,13 @@ class Checkpointer:
 
         t.algo.load_extra_checkpoint_state(payload.get("algo_state", {}))
 
-        # Adaptive sampler bins.
-        has_rate = "adaptive_bin_failed_count" in payload and "adaptive_bin_exposure_count" in payload
-        if has_rate and hasattr(t.env, "bin_exposure_count"):
-            saved_bins = payload["adaptive_bin_failed_count"].to(t.env.bin_failed_count)
-            saved_exp = payload["adaptive_bin_exposure_count"].to(t.env.bin_exposure_count)
-            if saved_bins.shape == t.env.bin_failed_count.shape and saved_exp.shape == t.env.bin_exposure_count.shape:
-                t.env.bin_failed_count.copy_(saved_bins)
-                t.env.bin_exposure_count.copy_(saved_exp)
-                print("[CHECKPOINT] restored adaptive sampler failure/exposure state.", flush=True)
+        # Adaptive sampler bins (versioned). Pre-Holosoma failure/exposure stats carry no
+        # compatible version and are intentionally NOT restored.
+        if hasattr(t.env, "adaptive_sampler"):
+            if t.env.adaptive_sampler.load_state_dict(payload.get("adaptive_sampler_state")):
+                print("[CHECKPOINT] restored adaptive sampler state.", flush=True)
+            else:
+                print("[CHECKPOINT] adaptive sampler state absent/incompatible; starting fresh.", flush=True)
 
         try:
             if "torch_rng_state" in payload:

@@ -4,7 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.actuators import IdealPDActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
 
@@ -95,18 +95,30 @@ G1_BASE_CFG = ArticulationCfg(
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
-        "legs": ImplicitActuatorCfg(
+        "legs": IdealPDActuatorCfg(
             joint_names_expr=[
                 ".*_hip_yaw_joint",
                 ".*_hip_roll_joint",
                 ".*_hip_pitch_joint",
                 ".*_knee_joint",
             ],
+            effort_limit={
+                ".*_hip_yaw_joint": 88.0,
+                ".*_hip_roll_joint": 139.0,
+                ".*_hip_pitch_joint": 88.0,
+                ".*_knee_joint": 139.0,
+            },
             effort_limit_sim={
                 ".*_hip_yaw_joint": 88.0,
                 ".*_hip_roll_joint": 139.0,
                 ".*_hip_pitch_joint": 88.0,
                 ".*_knee_joint": 139.0,
+            },
+            velocity_limit={
+                ".*_hip_yaw_joint": 32.0,
+                ".*_hip_roll_joint": 20.0,
+                ".*_hip_pitch_joint": 32.0,
+                ".*_knee_joint": 20.0,
             },
             velocity_limit_sim={
                 ".*_hip_yaw_joint": 32.0,
@@ -133,31 +145,37 @@ G1_BASE_CFG = ArticulationCfg(
                 ".*_knee_joint": 0.025101925,
             },
         ),
-        "feet": ImplicitActuatorCfg(
+        "feet": IdealPDActuatorCfg(
+            effort_limit=50.0,
             effort_limit_sim=50.0,
+            velocity_limit=37.0,
             velocity_limit_sim=37.0,
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
             stiffness=28.50124619574858,
             damping=1.814445686584846,
             armature=0.00721945,
         ),
-        "waist": ImplicitActuatorCfg(
+        "waist": IdealPDActuatorCfg(
+            effort_limit=50.0,
             effort_limit_sim=50.0,
+            velocity_limit=37.0,
             velocity_limit_sim=37.0,
             joint_names_expr=["waist_roll_joint", "waist_pitch_joint"],
             stiffness=28.50124619574858,
             damping=1.814445686584846,
             armature=0.00721945,
         ),
-        "waist_yaw": ImplicitActuatorCfg(
+        "waist_yaw": IdealPDActuatorCfg(
+            effort_limit=88.0,
             effort_limit_sim=88.0,
+            velocity_limit=32.0,
             velocity_limit_sim=32.0,
             joint_names_expr=["waist_yaw_joint"],
             stiffness=40.17923847137318,
             damping=2.5578897650279457,
             armature=0.01017752,
         ),
-        "arms": ImplicitActuatorCfg(
+        "arms": IdealPDActuatorCfg(
             joint_names_expr=[
                 ".*_shoulder_pitch_joint",
                 ".*_shoulder_roll_joint",
@@ -167,6 +185,15 @@ G1_BASE_CFG = ArticulationCfg(
                 ".*_wrist_pitch_joint",
                 ".*_wrist_yaw_joint",
             ],
+            effort_limit={
+                ".*_shoulder_pitch_joint": 25.0,
+                ".*_shoulder_roll_joint": 25.0,
+                ".*_shoulder_yaw_joint": 25.0,
+                ".*_elbow_joint": 25.0,
+                ".*_wrist_roll_joint": 25.0,
+                ".*_wrist_pitch_joint": 5.0,
+                ".*_wrist_yaw_joint": 5.0,
+            },
             effort_limit_sim={
                 ".*_shoulder_pitch_joint": 25.0,
                 ".*_shoulder_roll_joint": 25.0,
@@ -175,6 +202,15 @@ G1_BASE_CFG = ArticulationCfg(
                 ".*_wrist_roll_joint": 25.0,
                 ".*_wrist_pitch_joint": 5.0,
                 ".*_wrist_yaw_joint": 5.0,
+            },
+            velocity_limit={
+                ".*_shoulder_pitch_joint": 37.0,
+                ".*_shoulder_roll_joint": 37.0,
+                ".*_shoulder_yaw_joint": 37.0,
+                ".*_elbow_joint": 37.0,
+                ".*_wrist_roll_joint": 37.0,
+                ".*_wrist_pitch_joint": 22.0,
+                ".*_wrist_yaw_joint": 22.0,
             },
             velocity_limit_sim={
                 ".*_shoulder_pitch_joint": 37.0,

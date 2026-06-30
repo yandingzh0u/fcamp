@@ -18,7 +18,6 @@ import torch
 
 from algorithms.base import Algorithm
 from core.env_state import restore_env_state, snapshot_env_state
-from core.logging import log_shared_tracking, log_shared_update_diagnostics
 from networks.flow_inference import deterministic_sde_ode_actions
 from networks.flow_sampling import flow_grpo_step
 from networks.flow_policy import FlowMatchingPolicy
@@ -845,22 +844,8 @@ class MixGRPO(Algorithm):
     def update(self, group_data: dict, collect_time: float) -> dict:
         import time as _time
         env = self.env
-        # Adaptive phase-sampler feedback: reinforce the phases the robot actually dies at.
-        update_sampler = getattr(env, "update_adaptive_motion_statistics", None)
-        if callable(update_sampler):
-            first_done_phase = group_data["first_done_phase"]
-            sampler_failed = (first_done_phase >= 0) & (~group_data["first_done_timeout"])
-            live_frames_total = group_data.get("live_frames")
-            if live_frames_total is not None:
-                live_frames_total = live_frames_total.sum(dim=-1)
-            else:
-                live_frames_total = torch.zeros_like(group_data["collection_start_phases"])
-            survivor_reached_phase = (
-                group_data["collection_start_phases"] + live_frames_total.to(dtype=torch.long)
-            ).clamp(min=0, max=max(0, int(env.motion.num_frames) - 1))
-            death_phase_clamped = first_done_phase.clamp(min=0, max=max(0, int(env.motion.num_frames) - 1))
-            sampler_phases = torch.where(first_done_phase >= 0, death_phase_clamped, survivor_reached_phase)
-            update_sampler(sampler_phases, sampler_failed, rollout_steps=self._training_rollout_horizon())
+        # The adaptive phase sampler is owned and updated by env.step() (death-frame binning);
+        # MixGRPO only consumes the env and never writes the sampler.
 
         env_count = self.num_grpo_groups
         rollout_branch_count = int(self.cfg.num_generations)
@@ -1324,11 +1309,10 @@ class MixGRPO(Algorithm):
             "phase/start_min": float(collection_start_phases.min().item()) if collection_start_phases is not None else float("nan"),
             "phase/start_max": float(collection_start_phases.max().item()) if collection_start_phases is not None else float("nan"),
             "phase/start_at_min_frac": float((collection_start_phases == int(getattr(env, "motion_start_phase", 0))).float().mean().item()) if collection_start_phases is not None else float("nan"),
-            "sampler/failure_rate_mean": sampler_stats.get("failure_rate_mean", float("nan")),
-            "sampler/failure_rate_max": sampler_stats.get("failure_rate_max", float("nan")),
             "sampler/top_bin": sampler_stats.get("top_bin", float("nan")),
+            "sampler/top_prob": sampler_stats.get("top_prob", float("nan")),
+            "sampler/failed_sum": sampler_stats.get("failed_sum", float("nan")),
             "sampler/entropy": sampler_stats.get("entropy", float("nan")),
-            "sampler/exposure_sum": sampler_stats.get("exposure_sum", float("nan")),
             "timing/collect_s": collect_time,
             "timing/update_s": update_time,
             "act/abs_mean": float(act_abs_tensor.mean().item()),
@@ -1365,10 +1349,18 @@ class MixGRPO(Algorithm):
         for key, union_mask in done_union.items():
             metrics[f"done/{key}_frac"] = float(union_mask.float().mean().item())
         rollout_info_items = group_data.get("metric_rollout_info_items", [])
-        rollout_done_union: dict[str, torch.Tensor] = {}
         rollout_reward_sums: dict[str, float] = {}
         rollout_weight_sum = 0.0
+        # [DONE_ROLLOUT] = per-transition average termination rate per cause (mean over all
+        # rollout transitions of the done-cause fraction). NOT masked by ~done (which would be
+        # identically zero, since a done-cause implies done) and NOT a per-env union (that is
+        # what [DONE] reports). Counts every transition, not just alive-weighted ones.
+        done_rollout_sums: dict[str, float] = {}
+        done_rollout_steps = 0
         for step_info, valid_mask_for_step in rollout_info_items:
+            done_rollout_steps += 1
+            for key, value in step_info["done_terms"].items():
+                done_rollout_sums[key] = done_rollout_sums.get(key, 0.0) + float(value.float().mean().item())
             valid_mask_f = valid_mask_for_step.float()
             valid_weight = float(valid_mask_f.sum().item())
             if valid_weight <= 0.0:
@@ -1376,14 +1368,12 @@ class MixGRPO(Algorithm):
             rollout_weight_sum += valid_weight
             for key, value in step_info["reward_terms"].items():
                 rollout_reward_sums[key] = rollout_reward_sums.get(key, 0.0) + float((value * valid_mask_f).sum().item())
-            for key, value in step_info["done_terms"].items():
-                masked_done = value.bool() & valid_mask_for_step.bool()
-                rollout_done_union[key] = masked_done.clone() if key not in rollout_done_union else (rollout_done_union[key] | masked_done)
         if rollout_weight_sum > 0.0:
             for key, value_sum in rollout_reward_sums.items():
                 metrics[f"reward_rollout/{key}_mean"] = value_sum / rollout_weight_sum
-            for key, union_mask in rollout_done_union.items():
-                metrics[f"done_rollout/{key}_frac"] = float(union_mask.float().mean().item())
+        if done_rollout_steps > 0:
+            for key, value_sum in done_rollout_sums.items():
+                metrics[f"done_rollout/{key}_frac"] = value_sum / done_rollout_steps
         train_reward_buffer = self._train_reward_buffer
         train_length_buffer = self._train_length_buffer
         if train_reward_buffer:
@@ -1395,14 +1385,10 @@ class MixGRPO(Algorithm):
         metrics["train/recent_episode_count"] = float(len(train_reward_buffer))
         metrics["train/completed_episodes"] = float(self._train_completed_episodes)
         reward_weights = {
-            "joint_acc": -float(self.env.task_cfg.joint_acc_weight),
-            "joint_torque": -float(self.env.task_cfg.joint_torque_weight),
             "action_rate": -float(self.env.task_cfg.action_rate_weight),
-            "action_accel": -float(self.env.task_cfg.action_accel_weight),
-            "action_l2": -float(self.env.task_cfg.action_l2_weight),
-            "joint_limit": -10.0, "anchor_pos_reward": 2.0, "anchor_ori_reward": 2.0,
+            "joint_limit": -10.0, "anchor_pos_reward": 0.5, "anchor_ori_reward": 0.5,
             "body_pos_reward": 1.0, "body_ori_reward": 1.0, "body_lin_vel_reward": 1.0,
-            "body_ang_vel_reward": 1.0, "joint_pos_reward": 1.0, "joint_vel_reward": 0.5,
+            "body_ang_vel_reward": 1.0,
             "undesired_contacts": -0.1,
         }
         weighted_positive = 0.0
@@ -1474,9 +1460,9 @@ class MixGRPO(Algorithm):
             f"start_max={metrics.get('phase/start_max', float('nan')):.0f} "
             f"start_at_min={metrics.get('phase/start_at_min_frac', float('nan')):.5f} "
             f"fail_rel_mean={metrics.get('rollout/first_failure_relative_phase_mean', float('nan')):.2f} "
-            f"sampler_fail={metrics.get('sampler/failure_rate_mean', float('nan')):.3f} "
-            f"sampler_max={metrics.get('sampler/failure_rate_max', float('nan')):.3f} "
             f"sampler_top_bin={metrics.get('sampler/top_bin', float('nan')):.0f} "
+            f"sampler_top_prob={metrics.get('sampler/top_prob', float('nan')):.3f} "
+            f"sampler_failed_sum={metrics.get('sampler/failed_sum', float('nan')):.2f} "
             f"sampler_entropy={metrics.get('sampler/entropy', float('nan')):.3f}",
             flush=True,
         )
@@ -1536,8 +1522,144 @@ class MixGRPO(Algorithm):
             f"valid={metrics.get('rollout/valid_frac', float('nan')):.5f}",
             flush=True,
         )
-        log_shared_update_diagnostics(metrics, failure_label="FIRST_FAILURE", index_name="chunk")
-        log_shared_tracking(metrics)
+        # --- independent per-algorithm diagnostics (no shared logger) -------------------------
+        print(
+            f"[TRAIN] mean_reward={metrics.get('train/mean_reward', float('nan')):.5f} "
+            f"mean_len={metrics.get('train/mean_episode_length', float('nan')):.2f} "
+            f"recent_eps={metrics.get('train/recent_episode_count', 0.0):.0f} "
+            f"completed_eps={metrics.get('train/completed_episodes', 0.0):.0f}",
+            flush=True,
+        )
+        print(
+            f"[UPDATE_EFFECT] action_delta={metrics.get('policy/action_delta', float('nan')):.8f} "
+            f"param_rms_delta={metrics.get('policy/param_rms_delta', float('nan')):.8f}",
+            flush=True,
+        )
+        print(f"[TIME] collect={metrics['timing/collect_s']:.3f}s update={metrics['timing/update_s']:.3f}s", flush=True)
+        print(
+            f"[DONE] timeout={metrics.get('done/time_out_frac', 0.0):.5f} "
+            f"anchor_pos={metrics.get('done/anchor_pos_bad_frac', 0.0):.5f} "
+            f"anchor_ori={metrics.get('done/anchor_ori_bad_frac', 0.0):.5f} "
+            f"ee_body={metrics.get('done/ee_body_bad_frac', 0.0):.5f}",
+            flush=True,
+        )
+        print(
+            f"[DONE_ROLLOUT] timeout={metrics.get('done_rollout/time_out_frac', 0.0):.5f} "
+            f"anchor_pos={metrics.get('done_rollout/anchor_pos_bad_frac', 0.0):.5f} "
+            f"anchor_ori={metrics.get('done_rollout/anchor_ori_bad_frac', 0.0):.5f} "
+            f"ee_body={metrics.get('done_rollout/ee_body_bad_frac', 0.0):.5f}",
+            flush=True,
+        )
+        print(
+            f"[FIRST_FAILURE] "
+            f"chunk_mean={metrics.get('rollout/first_failure_chunk_mean', float('nan')):.2f} "
+            f"chunk_min={metrics.get('rollout/first_failure_chunk_min', float('nan')):.0f} "
+            f"chunk_max={metrics.get('rollout/first_failure_chunk_max', float('nan')):.0f} "
+            f"phase_mean={metrics.get('rollout/first_failure_phase_mean', float('nan')):.2f} "
+            f"phase_min={metrics.get('rollout/first_failure_phase_min', float('nan')):.0f} "
+            f"phase_max={metrics.get('rollout/first_failure_phase_max', float('nan')):.0f} "
+            f"anchor_pos={metrics.get('rollout/first_failure_anchor_pos_frac', 0.0):.5f} "
+            f"anchor_ori={metrics.get('rollout/first_failure_anchor_ori_frac', 0.0):.5f} "
+            f"ee_body={metrics.get('rollout/first_failure_ee_body_frac', 0.0):.5f} "
+            f"timeout={metrics.get('rollout/first_failure_timeout_frac', 0.0):.5f}",
+            flush=True,
+        )
+        print(
+            f"[TRACK_CHUNK0] "
+            f"anchor_pos={metrics.get('reward/anchor_pos_reward_mean', float('nan')):.5f} "
+            f"anchor_ori={metrics.get('reward/anchor_ori_reward_mean', float('nan')):.5f} "
+            f"body_pos={metrics.get('reward/body_pos_reward_mean', float('nan')):.5f} "
+            f"body_ori={metrics.get('reward/body_ori_reward_mean', float('nan')):.5f} "
+            f"body_lin={metrics.get('reward/body_lin_vel_reward_mean', float('nan')):.5f} "
+            f"body_ang={metrics.get('reward/body_ang_vel_reward_mean', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[TRACK_ROLLOUT] "
+            f"anchor_pos={metrics.get('reward_rollout/anchor_pos_reward_mean', float('nan')):.5f} "
+            f"anchor_ori={metrics.get('reward_rollout/anchor_ori_reward_mean', float('nan')):.5f} "
+            f"body_pos={metrics.get('reward_rollout/body_pos_reward_mean', float('nan')):.5f} "
+            f"body_ori={metrics.get('reward_rollout/body_ori_reward_mean', float('nan')):.5f} "
+            f"body_lin={metrics.get('reward_rollout/body_lin_vel_reward_mean', float('nan')):.5f} "
+            f"body_ang={metrics.get('reward_rollout/body_ang_vel_reward_mean', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_COST] "
+            f"action_rate={metrics.get('reward/action_rate_mean', float('nan')):.5f} "
+            f"joint_limit={metrics.get('reward/joint_limit_mean', float('nan')):.5f} "
+            f"undesired_contacts={metrics.get('reward/undesired_contacts_mean', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[REWARD_WEIGHTED] "
+            f"pos={metrics.get('reward_weighted/positive', float('nan')):.5f} "
+            f"penalty={metrics.get('reward_weighted/penalty', float('nan')):.5f} "
+            f"total={metrics.get('reward_weighted/total', float('nan')):.5f} "
+            f"act_rate={metrics.get('reward_weighted/action_rate', float('nan')):.5f} "
+            f"contacts={metrics.get('reward_weighted/undesired_contacts', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[ACT_SUMMARY] "
+            f"abs_mean={metrics.get('act/abs_mean', float('nan')):.4f} "
+            f"abs_p95={metrics.get('act/abs_p95', float('nan')):.4f} "
+            f"abs_p99={metrics.get('act/abs_p99', float('nan')):.4f} "
+            f"abs_max={metrics.get('act/abs_max', float('nan')):.4f} "
+            f"abs_max_all={metrics.get('act/abs_max_all', float('nan')):.4f} "
+            f"legs={metrics.get('act/legs_abs', float('nan')):.4f} "
+            f"waist={metrics.get('act/waist_abs', float('nan')):.4f} "
+            f"arms={metrics.get('act/arms_abs', float('nan')):.4f} "
+            f"first={metrics.get('act/first_abs_mean', float('nan')):.4f} "
+            f"last={metrics.get('act/last_abs_mean', float('nan')):.4f} "
+            f"latent_abs={metrics.get('latent/final_abs_mean', float('nan')):.4f} "
+            f"latent_max={metrics.get('latent/final_abs_max', float('nan')):.4f}",
+            flush=True,
+        )
+        print(
+            f"[FRAME_DIAG] "
+            f"frame0_abs={metrics.get('act/frame0_abs_mean', float('nan')):.4f} "
+            f"frame1_abs={metrics.get('act/frame1_abs_mean', float('nan')):.4f} "
+            f"in_chunk_delta={metrics.get('act/in_chunk_delta_abs', float('nan')):.4f} "
+            f"cross_chunk_delta={metrics.get('act/cross_chunk_delta_abs', float('nan')):.4f} "
+            f"frame0_reward={metrics.get('reward/frame0_mean', float('nan')):.5f} "
+            f"frame1_reward={metrics.get('reward/frame1_mean', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_BODY] "
+            f"torso_ori={metrics.get('reward/diag_torso_ori_deg_mean', float('nan')):.2f}deg "
+            f"l_wrist_ori={metrics.get('reward/diag_left_wrist_ori_deg_mean', float('nan')):.2f}deg "
+            f"r_wrist_ori={metrics.get('reward/diag_right_wrist_ori_deg_mean', float('nan')):.2f}deg "
+            f"l_elbow_ori={metrics.get('reward/diag_left_elbow_ori_deg_mean', float('nan')):.2f}deg "
+            f"r_elbow_ori={metrics.get('reward/diag_right_elbow_ori_deg_mean', float('nan')):.2f}deg "
+            f"l_shoulder_ori={metrics.get('reward/diag_left_shoulder_ori_deg_mean', float('nan')):.2f}deg "
+            f"r_shoulder_ori={metrics.get('reward/diag_right_shoulder_ori_deg_mean', float('nan')):.2f}deg",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_ANG] "
+            f"torso={metrics.get('reward/diag_torso_ang_vel_mean', float('nan')):.3f} "
+            f"l_wrist={metrics.get('reward/diag_left_wrist_ang_vel_mean', float('nan')):.3f} "
+            f"r_wrist={metrics.get('reward/diag_right_wrist_ang_vel_mean', float('nan')):.3f} "
+            f"l_elbow={metrics.get('reward/diag_left_elbow_ang_vel_mean', float('nan')):.3f} "
+            f"r_elbow={metrics.get('reward/diag_right_elbow_ang_vel_mean', float('nan')):.3f} "
+            f"l_shoulder={metrics.get('reward/diag_left_shoulder_ang_vel_mean', float('nan')):.3f} "
+            f"r_shoulder={metrics.get('reward/diag_right_shoulder_ang_vel_mean', float('nan')):.3f}",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_ACT] "
+            f"l_wrist_r={metrics.get('act/l_wrist_roll', float('nan')):.4f} "
+            f"l_wrist_p={metrics.get('act/l_wrist_pitch', float('nan')):.4f} "
+            f"l_wrist_y={metrics.get('act/l_wrist_yaw', float('nan')):.4f} "
+            f"r_wrist_r={metrics.get('act/r_wrist_roll', float('nan')):.4f} "
+            f"r_wrist_p={metrics.get('act/r_wrist_pitch', float('nan')):.4f} "
+            f"r_wrist_y={metrics.get('act/r_wrist_yaw', float('nan')):.4f} "
+            f"l_elbow={metrics.get('act/l_elbow', float('nan')):.4f} "
+            f"r_elbow={metrics.get('act/r_elbow', float('nan')):.4f}",
+            flush=True,
+        )
 
     def log_banner(self) -> None:
         cfg = self.cfg
@@ -1554,7 +1676,6 @@ class MixGRPO(Algorithm):
             f"future_ref_steps=0 "
             f"phase_sampler={'adaptive' if env.task_cfg.adaptive_motion_sampling else 'uniform'} "
             f"adaptive_uniform_ratio={env.task_cfg.adaptive_uniform_ratio} "
-            f"motion_start_phase_ratio={env.task_cfg.motion_start_phase_ratio} "
             f"num_envs={env.num_envs} rollout_env_steps_target={int(cfg.rollout_env_steps)} "
             f"configured_chunks_per_rollout={cfg.chunks_per_rollout} "
             f"tail_bootstrap_steps={int(cfg.tail_bootstrap_steps)} "
@@ -1577,10 +1698,7 @@ class MixGRPO(Algorithm):
             flush=True,
         )
         print(
-            f"[INFO] action_scale_multiplier={env.task_cfg.action_scale_multiplier} "
-            f"reward_weights joint_acc={env.task_cfg.joint_acc_weight} "
-            f"torque={env.task_cfg.joint_torque_weight} action_rate={env.task_cfg.action_rate_weight} "
-            f"action_accel={env.task_cfg.action_accel_weight} action_l2={env.task_cfg.action_l2_weight}",
+            f"[INFO] reward=official_holosoma_9term action_rate={env.task_cfg.action_rate_weight}",
             flush=True,
         )
         _chunks = self._chunks_per_grpo_update()

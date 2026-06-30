@@ -187,7 +187,6 @@ class EnvConfig:
     render: bool = False
     render_every: int = 1
     contact_debug_vis: bool = False
-    action_scale_multiplier: float = 1.0
     env_spacing: float = 2.5
     fix_root_link: bool = False
     startup_randomization: bool = True
@@ -203,7 +202,6 @@ class MimicEnvConfig(EnvConfig):
     motion_end_phase: int = -1
     adaptive_motion_sampling: bool = True
     adaptive_uniform_ratio: float = 0.1
-    motion_start_phase_ratio: float = 0.25
     adaptive_alpha: float = 0.001
     adaptive_kernel_size: int = 1
     reset_noise: bool = True
@@ -215,20 +213,8 @@ class MimicEnvConfig(EnvConfig):
     # intra-group difference is the SDE action noise). 1 keeps fully independent per-env
     # noise (non-GRPO / single-branch behavior).
     num_generations: int = 1
-    joint_acc_weight: float = 2.5e-7
-    joint_torque_weight: float = 1.0e-5
+    # Action-rate penalty weight (official Holosoma WBT action_rate_l2 reward, weight -0.1).
     action_rate_weight: float = 1.0e-1
-    action_accel_weight: float = 0.0
-    action_l2_weight: float = 0.0
-    # Dense reward weight for the MAX z-tracking error over the termination bodies (ankles +
-    # wrists), i.e. the exact quantity the hard termination gate checks. The rest of the
-    # tracking reward optimizes a MEAN over 14 bodies, which dilutes a single wrist breaching
-    # the 0.25 m termination threshold (mean stays ~0.95 while right_wrist_z hits 0.26 and
-    # the episode dies). This term makes the dense objective and the success condition the
-    # same quantity: term_z_reward = exp(-(max_term_z_err / sigma)^2). Weight 3.0 sits in the
-    # 2-4 band so it is not drowned by the averaged body terms.
-    term_z_weight: float = 3.0
-    term_z_sigma: float = 0.12
     track_body_names: tuple[str, ...] = MIMIC_BODY_NAMES
     ee_body_names: tuple[str, ...] = MIMIC_EE_BODY_NAMES
     termination_body_names: tuple[str, ...] = MIMIC_TERMINATION_BODY_NAMES

@@ -29,26 +29,20 @@ env:
   sim_dt: 0.02
   fix_root_link: false
   startup_randomization: true
-  action_scale_multiplier: 1.0
   motion_file: ""          # "" resolves to the packaged crawl motion
-  max_episode_steps: -1    # <=0 follows the motion clip length
+  max_episode_steps: 500   # official 10s @ 50Hz; aligned across PPO/FPO/MixGRPO
   motion_start_phase: 0
   motion_end_phase: -1
   reset_noise: true
   interval_pushes: true
   observation_noise: true
+  # adaptive phase sampling (Holosoma death-frame binning, owned by env.step)
   adaptive_motion_sampling: true
   adaptive_uniform_ratio: 0.1
-  motion_start_phase_ratio: 0.25
   adaptive_alpha: 0.001
   adaptive_kernel_size: 1
-  joint_acc_weight: 2.5e-7
-  joint_torque_weight: 1.0e-5
+  # reward: official Holosoma WBT 9-term reward. action_rate is the only tunable weight.
   action_rate_weight: 0.1
-  action_accel_weight: 0.0
-  action_l2_weight: 0.0
-  term_z_weight: 3.0
-  term_z_sigma: 0.12
 
 algo:
   # network: single-step Flow actor (horizon=1 -> chunk_dim == action_dim). NO tanh squash;
@@ -65,17 +59,9 @@ algo:
   mlp_output_scale: 1.0        # scale on the raw velocity-net output (official)
   timestep_embed_dim: 8        # sinusoidal cos/sin timestep embedding width (official)
   cfm_loss_reduction: mean     # reduction over the action dim (official G1 tracking)
-  action_perturb_std: 0.1      # Gaussian noise added to the INNOVATION u_t in training (official tracking)
+  action_perturb_std: 0.1      # Gaussian noise added to the action in training (official tracking)
   cfm_loss_t_inverse_cdf_beta: 1.0
   num_generations: 1           # FPO++ has no GRPO groups
-  # Residual-innovation parametrization for the residual action space (q_target = q_ref(t+1) + S*r_t).
-  # The flow emits an innovation u_t; the executed residual is the AR(1) low-pass
-  #   r_t = residual_innov_rho * r_{t-1} + residual_innov_scale * u_t .
-  # This makes r_t small, low-frequency and time-correlated instead of an iid N(0,I) offset every
-  # step. The CFM loss / FPO ratio is computed on u_t (innovation coordinates); r_{t-1} is the env's
-  # previous executed residual. DC gain = scale/(1-rho); high-frequency gain = scale.
-  residual_innov_rho: 0.9      # AR(1) persistence (temporal continuity). 0 -> no filtering.
-  residual_innov_scale: 0.25   # per-joint innovation scale D (small local corrections). 1 + rho=0 -> legacy.
   # flow integration
   flow_steps: 16               # Euler steps generating one action (official default 64; 16 is a
                                # compute/quality compromise -- 4 is too coarse, 64 makes collect ~16x
@@ -83,7 +69,10 @@ algo:
   init_noise_std: 1.0          # informational; Euler uses standard N(0, I) noise
   eval_initial_noise: zero
   # rollout
-  num_steps_per_env: 48        # official G1 tracking; spans past the average death horizon
+  num_steps_per_env: 24        # rollout horizon per update (NOT an episode cap -- envs run
+                               # continuously across updates with critic bootstrap at the boundary).
+                               # 24 halves collect/update cost & CFM cache vs the official 48; 8192
+                               # envs still give plenty of terminations. Official G1 tracking = 48.
   discount_gamma: 0.99
   # terminal_penalty: 0.0 = OFFICIAL RL logic. The FPO collect does NOT inject any extra death
   # penalty into the reward; env dense reward enters storage as-is, timeout does value bootstrap,
@@ -103,8 +92,9 @@ algo:
   # actor-critic optimization
   schedule: adaptive           # KL-driven adaptive learning rate
   desired_kl: 1.0e-4           # target flow-endpoint KL drift (official)
-  num_learning_epochs: 16      # official tracking (default; humanoid uses 16 here)
-  num_mini_batches: 6          # official tracking
+  num_learning_epochs: 5       # passes over each rollout batch. Official G1 tracking = 16 (max
+                               # sample reuse); 5 trades reuse for ~3x cheaper updates. 1 = no reuse.
+  num_mini_batches: 6          # official tracking; logical minibatches per epoch (one optimizer.step each)
   num_micro_batches: 8         # gradient-accum microbatches per logical minibatch; 8 keeps the
                                # update CFM forward within 16GB at num_envs=8192 (lower to 1 for 2048)
   gae_lambda: 0.95

@@ -17,7 +17,6 @@ from torch import nn
 from torch.distributions import Normal, kl_divergence
 
 from algorithms.base import Algorithm
-from core.logging import log_shared_tracking, log_shared_update_diagnostics
 from networks.mlp_actor_critic import Critic, EmpiricalNormalization, GaussianActor
 
 
@@ -164,6 +163,16 @@ class PPO(Algorithm):
         rollout_info_items: list[tuple] = []
         first_chunk_infos: list[dict] = []
 
+        # First-failure bookkeeping across the rollout (death step / phase / cause), for the
+        # [FIRST_FAILURE] diagnostic. Per env: the first termination in this rollout window.
+        ever_done = torch.zeros(N, dtype=torch.bool, device=device)
+        first_done_step = torch.full((N,), T, dtype=torch.long, device=device)
+        first_done_phase = torch.full((N,), -1, dtype=torch.long, device=device)
+        first_done_ee_body = torch.zeros(N, dtype=torch.bool, device=device)
+        first_done_anchor_pos = torch.zeros(N, dtype=torch.bool, device=device)
+        first_done_anchor_ori = torch.zeros(N, dtype=torch.bool, device=device)
+        first_done_timeout = torch.zeros(N, dtype=torch.bool, device=device)
+
         with torch.no_grad():
             for t in range(T):
                 actor_obs = self._norm_actor(obs)
@@ -198,9 +207,31 @@ class PPO(Algorithm):
                 self._record_episode_stats(rewards, dones)
                 if t == 0:
                     first_chunk_infos.append(infos)
-                rollout_info_items.append((infos, (~dones).detach()))
+                # Keep EVERY transition (including the terminal one) in the rollout reward
+                # average, matching FPO. The reward at the death step is real signal; masking it
+                # with ~dones biased PPO's [TRACK_ROLLOUT]/[REWARD_WEIGHTED] vs FPO's.
+                rollout_info_items.append((infos, torch.ones_like(dones, dtype=torch.bool)))
                 for key, val in infos["done_terms"].items():
                     done_terms_union[key] = val.bool().clone() if key not in done_terms_union else (done_terms_union[key] | val.bool())
+
+                # Record the first termination per env (step / phase / cause) for [FIRST_FAILURE].
+                done_b = dones.bool()
+                newly_done = (~ever_done) & done_b
+                if bool(newly_done.any()):
+                    ids = newly_done.nonzero(as_tuple=False).squeeze(-1)
+                    first_done_step[ids] = t
+                    first_done_timeout[ids] = time_outs.bool()[ids]
+                    dterms = infos["done_terms"]
+                    if "ee_body_bad" in dterms:
+                        first_done_ee_body[ids] = dterms["ee_body_bad"].bool()[ids]
+                    if "anchor_pos_bad" in dterms:
+                        first_done_anchor_pos[ids] = dterms["anchor_pos_bad"].bool()[ids]
+                    if "anchor_ori_bad" in dterms:
+                        first_done_anchor_ori[ids] = dterms["anchor_ori_bad"].bool()[ids]
+                    tps = infos.get("termination_phase_steps")
+                    if torch.is_tensor(tps):
+                        first_done_phase[ids] = tps.long().to(device)[ids]
+                    ever_done[ids] = True
 
                 obs = next_obs
                 critic_obs = next_critic_obs
@@ -217,6 +248,9 @@ class PPO(Algorithm):
             "returns": returns, "advantages": advantages, "rewards": rewards_buf, "dones": dones_buf,
             "done_terms_union": done_terms_union, "rollout_info_items": rollout_info_items,
             "first_chunk_infos": first_chunk_infos, "next_observation": obs,
+            "first_done_step": first_done_step, "first_done_phase": first_done_phase,
+            "first_done_ee_body": first_done_ee_body, "first_done_anchor_pos": first_done_anchor_pos,
+            "first_done_anchor_ori": first_done_anchor_ori, "first_done_timeout": first_done_timeout,
         }
 
     def _compute_gae(self, last_values, values, dones, rewards, gamma):
@@ -260,6 +294,14 @@ class PPO(Algorithm):
         totals = {"value": 0.0, "surrogate": 0.0, "entropy": 0.0, "kl": 0.0}
         num_updates = epochs * num_mini_batches
         grad_norm_accum = 0.0
+
+        # Probe greedy (deterministic mean) action drift + parameter RMS drift across the whole
+        # update, for [UPDATE_EFFECT]. actor_obs is already normalized in the rollout buffer.
+        probe_count = min(128, N)
+        with torch.no_grad():
+            probe_obs_n = rollout["actor_obs"][0, :probe_count]
+            probe_before = self.actor.act_inference(probe_obs_n)
+            params_before = [p.detach().clone() for p in self.actor.parameters()]
 
         t1 = _time.perf_counter()
         for _ in range(epochs):
@@ -325,7 +367,20 @@ class PPO(Algorithm):
             totals[key] /= num_updates
         grad_norm_accum /= num_updates
 
-        return self._build_metrics(rollout, totals, grad_norm_accum, collect_time, update_time)
+        with torch.no_grad():
+            probe_after = self.actor.act_inference(probe_obs_n)
+            action_delta = float(torch.mean(torch.abs(probe_after - probe_before)).item())
+            param_delta_sq = torch.zeros((), device=device)
+            param_count = 0
+            for p, before in zip(self.actor.parameters(), params_before, strict=True):
+                d = p.detach() - before
+                param_delta_sq = param_delta_sq + torch.sum(d * d)
+                param_count += d.numel()
+            param_rms_delta = float(torch.sqrt(param_delta_sq / max(param_count, 1)).item())
+
+        return self._build_metrics(
+            rollout, totals, grad_norm_accum, collect_time, update_time, action_delta, param_rms_delta
+        )
 
     def _update_lr(self, kl_mean: torch.Tensor) -> None:
         desired_kl = float(self.cfg.desired_kl)
@@ -346,8 +401,8 @@ class PPO(Algorithm):
         return mean.unsqueeze(1)  # (N, 1, action_dim): horizon=1 chunk for validation/play
 
     # ------------------------------------------------------------------ metrics + logging
-    def _build_metrics(self, rollout, totals, grad_norm, collect_time, update_time) -> dict:
-        env = self.env
+    def _build_metrics(self, rollout, totals, grad_norm, collect_time, update_time,
+                       action_delta, param_rms_delta) -> dict:
         rewards = rollout["rewards"]
         dones = rollout["dones"]
         metrics = {
@@ -363,17 +418,24 @@ class PPO(Algorithm):
             "rollout/done_frac": float(dones.float().mean().item()),
             "timing/collect_s": collect_time,
             "timing/update_s": update_time,
-            "policy/action_delta": 0.0,
-            "policy/param_rms_delta": 0.0,
+            "policy/action_delta": action_delta,
+            "policy/param_rms_delta": param_rms_delta,
         }
-        # done-cause fractions over the whole rollout
+        # done-cause fractions over the whole rollout (per-env union: did this cause ever fire)
         for key, mask in rollout["done_terms_union"].items():
             metrics[f"done/{key}_frac"] = float(mask.float().mean().item())
-        # rollout reward terms (alive-weighted), reusing the shared tracking log
+        # alive-weighted rollout reward terms ([TRACK_ROLLOUT]) + per-transition done rates.
         rollout_reward_sums: dict[str, float] = {}
-        rollout_done_union: dict[str, torch.Tensor] = {}
         weight_sum = 0.0
+        # [DONE_ROLLOUT] = per-transition average termination rate per cause (mean over all
+        # rollout transitions of the done-cause fraction). NOT masked by ~done (identically zero,
+        # a done-cause implies done) and NOT a per-env union (that is [DONE]).
+        done_rollout_sums: dict[str, float] = {}
+        done_rollout_steps = 0
         for info, valid in rollout["rollout_info_items"]:
+            done_rollout_steps += 1
+            for k, v in info["done_terms"].items():
+                done_rollout_sums[k] = done_rollout_sums.get(k, 0.0) + float(v.float().mean().item())
             vf = valid.float()
             w = float(vf.sum().item())
             if w <= 0.0:
@@ -381,14 +443,12 @@ class PPO(Algorithm):
             weight_sum += w
             for k, v in info["reward_terms"].items():
                 rollout_reward_sums[k] = rollout_reward_sums.get(k, 0.0) + float((v * vf).sum().item())
-            for k, v in info["done_terms"].items():
-                md = v.bool() & valid.bool()
-                rollout_done_union[k] = md.clone() if k not in rollout_done_union else (rollout_done_union[k] | md)
         if weight_sum > 0.0:
             for k, s in rollout_reward_sums.items():
                 metrics[f"reward_rollout/{k}_mean"] = s / weight_sum
-            for k, m in rollout_done_union.items():
-                metrics[f"done_rollout/{k}_frac"] = float(m.float().mean().item())
+        if done_rollout_steps > 0:
+            for k, s in done_rollout_sums.items():
+                metrics[f"done_rollout/{k}_frac"] = s / done_rollout_steps
         # chunk-0 reward terms for [TRACK_CHUNK0]
         for info in rollout["first_chunk_infos"]:
             for k, v in info["reward_terms"].items():
@@ -402,11 +462,125 @@ class PPO(Algorithm):
             metrics["train/mean_episode_length"] = float("nan")
         metrics["train/recent_episode_count"] = float(len(self._train_reward_buffer))
         metrics["train/completed_episodes"] = float(self._train_completed_episodes)
-        # first-failure placeholders (PPO has no chunk concept; report NaN to keep log shape)
-        for k in ("first_failure_chunk_mean", "first_failure_chunk_min", "first_failure_chunk_max",
-                  "first_failure_phase_mean", "first_failure_phase_min", "first_failure_phase_max"):
-            metrics[f"rollout/{k}"] = float("nan")
+        self._add_first_failure_metrics(metrics, rollout)
+        # Two SEPARATE action distributions (never mixed): the greedy zero-noise deterministic
+        # action ([ACT_GREEDY]) and the actual sampled actions executed during the rollout
+        # ([ACT_ROLLOUT]). PPO outputs an absolute default-offset action (no latent space).
+        with torch.no_grad():
+            greedy = self.actor.act_inference(rollout["actor_obs"][0])  # (N, A), obs already normed
+            g_abs = greedy.abs()
+            g_flat = g_abs.reshape(-1)
+            act_abs = g_abs.mean(dim=0)  # (A,) per-joint greedy mean
+            metrics["act/greedy_abs_mean"] = float(g_flat.mean().item())
+            metrics["act/greedy_abs_p95"] = float(torch.quantile(g_flat, 0.95).item())
+            metrics["act/greedy_abs_p99"] = float(torch.quantile(g_flat, 0.99).item())
+            metrics["act/greedy_abs_max"] = float(g_flat.max().item())
+            self._add_joint_group_metrics(metrics, act_abs)
+
+            sampled = rollout["actions"].reshape(-1, self.num_act).abs()
+            s_flat = sampled.reshape(-1)
+            metrics["act/rollout_abs_mean"] = float(s_flat.mean().item())
+            metrics["act/rollout_abs_p95"] = float(torch.quantile(s_flat, 0.95).item())
+            metrics["act/rollout_abs_p99"] = float(torch.quantile(s_flat, 0.99).item())
+            metrics["act/rollout_abs_max"] = float(s_flat.max().item())
+        self._add_reward_weighted_metrics(metrics)
+        self._add_sampler_metrics(metrics)
         return metrics
+
+    def _add_sampler_metrics(self, metrics: dict) -> None:
+        """Adaptive-sampler diagnostics ([SAMPLER]): which death-frame bin currently dominates
+        the reset distribution. Owned by env.step(); the algorithm only reads it. Absent when the
+        env exposes no sampler (e.g. test fakes)."""
+        stats_fn = getattr(self.env, "adaptive_sampling_stats", None)
+        stats = stats_fn() if callable(stats_fn) else {}
+        for key in ("top_bin", "top_prob", "failed_sum", "entropy"):
+            metrics[f"sampler/{key}"] = float(stats.get(key, float("nan")))
+
+    # ----------------------------------------------------------------- metric helpers
+    def _add_first_failure_metrics(self, metrics: dict, rollout: dict) -> None:
+        """Populate rollout/first_failure_* for the [FIRST_FAILURE] line. `step` == rollout step
+        index of the first termination (single-step actions). Deaths that recorded no phase still
+        count as failures via the step index."""
+        T = self.num_steps_per_env
+        fds = rollout["first_done_step"]
+        died = fds < T
+        timeout = rollout["first_done_timeout"]
+        if bool(died.any()):
+            steps = fds[died].float()
+            metrics["rollout/first_failure_chunk_mean"] = float(steps.mean().item())
+            metrics["rollout/first_failure_chunk_min"] = float(steps.min().item())
+            metrics["rollout/first_failure_chunk_max"] = float(steps.max().item())
+        else:
+            for k in ("first_failure_chunk_mean", "first_failure_chunk_min", "first_failure_chunk_max"):
+                metrics[f"rollout/{k}"] = float("nan")
+        phase = rollout["first_done_phase"]
+        valid_phase = phase[phase >= 0]
+        if valid_phase.numel() > 0:
+            metrics["rollout/first_failure_phase_mean"] = float(valid_phase.float().mean().item())
+            metrics["rollout/first_failure_phase_min"] = float(valid_phase.min().item())
+            metrics["rollout/first_failure_phase_max"] = float(valid_phase.max().item())
+        else:
+            for k in ("first_failure_phase_mean", "first_failure_phase_min", "first_failure_phase_max"):
+                metrics[f"rollout/{k}"] = float("nan")
+        metrics["rollout/first_failure_ee_body_frac"] = float((rollout["first_done_ee_body"] & died).float().mean().item())
+        metrics["rollout/first_failure_anchor_pos_frac"] = float((rollout["first_done_anchor_pos"] & died).float().mean().item())
+        metrics["rollout/first_failure_anchor_ori_frac"] = float((rollout["first_done_anchor_ori"] & died).float().mean().item())
+        metrics["rollout/first_failure_timeout_frac"] = float((timeout & died).float().mean().item())
+        metrics["rollout/failure_frac"] = float((died & (~timeout)).float().mean().item())
+
+    def _add_joint_group_metrics(self, metrics: dict, act_abs: torch.Tensor) -> None:
+        """Per-joint-group and per-arm-joint |action| means for [ACT_SUMMARY]/[TRAIN_ACT].
+
+        ``act_abs`` is the per-joint mean |action| over the batch, shape (action_dim,). The G1
+        joint layout is legs[0:12], waist[12:15], arms[15:29]. Guarded so a non-29-DoF action
+        space simply omits the per-joint fields rather than indexing out of range."""
+        if act_abs.numel() < 29:
+            return
+        legs_idx = list(range(0, 12)); waist_idx = [12, 13, 14]; arms_idx = list(range(15, 29))
+        metrics["act/legs_abs"] = float(act_abs[legs_idx].mean().item())
+        metrics["act/waist_abs"] = float(act_abs[waist_idx].mean().item())
+        metrics["act/arms_abs"] = float(act_abs[arms_idx].mean().item())
+        metrics["act/l_shoulder_pitch"] = float(act_abs[15].item()); metrics["act/r_shoulder_pitch"] = float(act_abs[22].item())
+        metrics["act/l_shoulder_roll"] = float(act_abs[16].item()); metrics["act/r_shoulder_roll"] = float(act_abs[23].item())
+        metrics["act/l_shoulder_yaw"] = float(act_abs[17].item()); metrics["act/r_shoulder_yaw"] = float(act_abs[24].item())
+        metrics["act/l_elbow"] = float(act_abs[18].item()); metrics["act/r_elbow"] = float(act_abs[25].item())
+        metrics["act/l_wrist_roll"] = float(act_abs[19].item()); metrics["act/r_wrist_roll"] = float(act_abs[26].item())
+        metrics["act/l_wrist_pitch"] = float(act_abs[20].item()); metrics["act/r_wrist_pitch"] = float(act_abs[27].item())
+        metrics["act/l_wrist_yaw"] = float(act_abs[21].item()); metrics["act/r_wrist_yaw"] = float(act_abs[28].item())
+
+    def _add_reward_weighted_metrics(self, metrics: dict) -> None:
+        """Per-term weighted contribution (raw reward-term mean x official weight x dt) for
+        [REWARD_WEIGHTED]. Uses the WHOLE-rollout average reward term (reward_rollout/*) so the
+        weighted total reflects the reward averaged over every transition actually optimized;
+        falls back to the chunk-0 term (reward/*) only when the rollout average is unavailable."""
+        action_rate_weight = float(getattr(self.env.task_cfg, "action_rate_weight", 0.1))
+        dt = float(getattr(self.env, "dt", 0.02))
+        reward_weights = {
+            "action_rate": -action_rate_weight,
+            "joint_limit": -10.0, "anchor_pos_reward": 0.5, "anchor_ori_reward": 0.5,
+            "body_pos_reward": 1.0, "body_ori_reward": 1.0, "body_lin_vel_reward": 1.0,
+            "body_ang_vel_reward": 1.0, "undesired_contacts": -0.1,
+        }
+        weighted_positive = 0.0
+        weighted_penalty = 0.0
+        for name, weight in reward_weights.items():
+            rollout_key = f"reward_rollout/{name}_mean"
+            chunk_key = f"reward/{name}_mean"
+            if rollout_key in metrics:
+                raw_value = metrics[rollout_key]
+            elif chunk_key in metrics:
+                raw_value = metrics[chunk_key]
+            else:
+                continue
+            contribution = weight * raw_value * dt
+            metrics[f"reward_weighted/{name}"] = contribution
+            if contribution >= 0.0:
+                weighted_positive += contribution
+            else:
+                weighted_penalty += contribution
+        metrics["reward_weighted/positive"] = weighted_positive
+        metrics["reward_weighted/penalty"] = weighted_penalty
+        metrics["reward_weighted/total"] = weighted_positive + weighted_penalty
 
     def log(self, update_idx: int, max_updates: int, metrics: dict) -> None:
         print(
@@ -425,8 +599,145 @@ class PPO(Algorithm):
             f"grad={metrics['ppo/grad_norm']:.5f} action_std={metrics['ppo/action_std_mean']:.4f}",
             flush=True,
         )
-        log_shared_update_diagnostics(metrics, failure_label="FIRST_FAILURE", index_name="chunk")
-        log_shared_tracking(metrics)
+        # --- independent per-algorithm diagnostics (no shared logger) -------------------------
+        print(
+            f"[TRAIN] mean_reward={metrics.get('train/mean_reward', float('nan')):.5f} "
+            f"mean_len={metrics.get('train/mean_episode_length', float('nan')):.2f} "
+            f"recent_eps={metrics.get('train/recent_episode_count', 0.0):.0f} "
+            f"completed_eps={metrics.get('train/completed_episodes', 0.0):.0f}",
+            flush=True,
+        )
+        print(
+            f"[UPDATE_EFFECT] action_delta={metrics.get('policy/action_delta', float('nan')):.8f} "
+            f"param_rms_delta={metrics.get('policy/param_rms_delta', float('nan')):.8f}",
+            flush=True,
+        )
+        print(f"[TIME] collect={metrics['timing/collect_s']:.3f}s update={metrics['timing/update_s']:.3f}s", flush=True)
+        print(
+            f"[DONE] timeout={metrics.get('done/time_out_frac', 0.0):.5f} "
+            f"anchor_pos={metrics.get('done/anchor_pos_bad_frac', 0.0):.5f} "
+            f"anchor_ori={metrics.get('done/anchor_ori_bad_frac', 0.0):.5f} "
+            f"ee_body={metrics.get('done/ee_body_bad_frac', 0.0):.5f}",
+            flush=True,
+        )
+        print(
+            f"[DONE_ROLLOUT] timeout={metrics.get('done_rollout/time_out_frac', 0.0):.5f} "
+            f"anchor_pos={metrics.get('done_rollout/anchor_pos_bad_frac', 0.0):.5f} "
+            f"anchor_ori={metrics.get('done_rollout/anchor_ori_bad_frac', 0.0):.5f} "
+            f"ee_body={metrics.get('done_rollout/ee_body_bad_frac', 0.0):.5f}",
+            flush=True,
+        )
+        print(
+            f"[FIRST_FAILURE] "
+            f"step_mean={metrics.get('rollout/first_failure_chunk_mean', float('nan')):.2f} "
+            f"step_min={metrics.get('rollout/first_failure_chunk_min', float('nan')):.0f} "
+            f"step_max={metrics.get('rollout/first_failure_chunk_max', float('nan')):.0f} "
+            f"phase_mean={metrics.get('rollout/first_failure_phase_mean', float('nan')):.2f} "
+            f"phase_min={metrics.get('rollout/first_failure_phase_min', float('nan')):.0f} "
+            f"phase_max={metrics.get('rollout/first_failure_phase_max', float('nan')):.0f} "
+            f"anchor_pos={metrics.get('rollout/first_failure_anchor_pos_frac', 0.0):.5f} "
+            f"anchor_ori={metrics.get('rollout/first_failure_anchor_ori_frac', 0.0):.5f} "
+            f"ee_body={metrics.get('rollout/first_failure_ee_body_frac', 0.0):.5f} "
+            f"timeout={metrics.get('rollout/first_failure_timeout_frac', 0.0):.5f}",
+            flush=True,
+        )
+        print(
+            f"[TRACK_CHUNK0] "
+            f"anchor_pos={metrics.get('reward/anchor_pos_reward_mean', float('nan')):.5f} "
+            f"anchor_ori={metrics.get('reward/anchor_ori_reward_mean', float('nan')):.5f} "
+            f"body_pos={metrics.get('reward/body_pos_reward_mean', float('nan')):.5f} "
+            f"body_ori={metrics.get('reward/body_ori_reward_mean', float('nan')):.5f} "
+            f"body_lin={metrics.get('reward/body_lin_vel_reward_mean', float('nan')):.5f} "
+            f"body_ang={metrics.get('reward/body_ang_vel_reward_mean', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[TRACK_ROLLOUT] "
+            f"anchor_pos={metrics.get('reward_rollout/anchor_pos_reward_mean', float('nan')):.5f} "
+            f"anchor_ori={metrics.get('reward_rollout/anchor_ori_reward_mean', float('nan')):.5f} "
+            f"body_pos={metrics.get('reward_rollout/body_pos_reward_mean', float('nan')):.5f} "
+            f"body_ori={metrics.get('reward_rollout/body_ori_reward_mean', float('nan')):.5f} "
+            f"body_lin={metrics.get('reward_rollout/body_lin_vel_reward_mean', float('nan')):.5f} "
+            f"body_ang={metrics.get('reward_rollout/body_ang_vel_reward_mean', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_COST] "
+            f"action_rate={metrics.get('reward/action_rate_mean', float('nan')):.5f} "
+            f"joint_limit={metrics.get('reward/joint_limit_mean', float('nan')):.5f} "
+            f"undesired_contacts={metrics.get('reward/undesired_contacts_mean', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[REWARD_WEIGHTED] "
+            f"pos={metrics.get('reward_weighted/positive', float('nan')):.5f} "
+            f"penalty={metrics.get('reward_weighted/penalty', float('nan')):.5f} "
+            f"total={metrics.get('reward_weighted/total', float('nan')):.5f} "
+            f"act_rate={metrics.get('reward_weighted/action_rate', float('nan')):.5f} "
+            f"contacts={metrics.get('reward_weighted/undesired_contacts', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            f"[ACT_GREEDY] "
+            f"abs_mean={metrics.get('act/greedy_abs_mean', float('nan')):.4f} "
+            f"abs_p95={metrics.get('act/greedy_abs_p95', float('nan')):.4f} "
+            f"abs_p99={metrics.get('act/greedy_abs_p99', float('nan')):.4f} "
+            f"abs_max={metrics.get('act/greedy_abs_max', float('nan')):.4f} "
+            f"legs={metrics.get('act/legs_abs', float('nan')):.4f} "
+            f"waist={metrics.get('act/waist_abs', float('nan')):.4f} "
+            f"arms={metrics.get('act/arms_abs', float('nan')):.4f}",
+            flush=True,
+        )
+        print(
+            f"[ACT_ROLLOUT] "
+            f"abs_mean={metrics.get('act/rollout_abs_mean', float('nan')):.4f} "
+            f"abs_p95={metrics.get('act/rollout_abs_p95', float('nan')):.4f} "
+            f"abs_p99={metrics.get('act/rollout_abs_p99', float('nan')):.4f} "
+            f"abs_max={metrics.get('act/rollout_abs_max', float('nan')):.4f}",
+            flush=True,
+        )
+        print(
+            f"[SAMPLER] "
+            f"top_bin={metrics.get('sampler/top_bin', float('nan')):.0f} "
+            f"top_prob={metrics.get('sampler/top_prob', float('nan')):.5f} "
+            f"failed_sum={metrics.get('sampler/failed_sum', float('nan')):.2f} "
+            f"entropy={metrics.get('sampler/entropy', float('nan')):.4f}",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_BODY] "
+            f"torso_ori={metrics.get('reward/diag_torso_ori_deg_mean', float('nan')):.2f}deg "
+            f"l_wrist_ori={metrics.get('reward/diag_left_wrist_ori_deg_mean', float('nan')):.2f}deg "
+            f"r_wrist_ori={metrics.get('reward/diag_right_wrist_ori_deg_mean', float('nan')):.2f}deg "
+            f"l_elbow_ori={metrics.get('reward/diag_left_elbow_ori_deg_mean', float('nan')):.2f}deg "
+            f"r_elbow_ori={metrics.get('reward/diag_right_elbow_ori_deg_mean', float('nan')):.2f}deg "
+            f"l_shoulder_ori={metrics.get('reward/diag_left_shoulder_ori_deg_mean', float('nan')):.2f}deg "
+            f"r_shoulder_ori={metrics.get('reward/diag_right_shoulder_ori_deg_mean', float('nan')):.2f}deg",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_ANG] "
+            f"torso={metrics.get('reward/diag_torso_ang_vel_mean', float('nan')):.3f} "
+            f"l_wrist={metrics.get('reward/diag_left_wrist_ang_vel_mean', float('nan')):.3f} "
+            f"r_wrist={metrics.get('reward/diag_right_wrist_ang_vel_mean', float('nan')):.3f} "
+            f"l_elbow={metrics.get('reward/diag_left_elbow_ang_vel_mean', float('nan')):.3f} "
+            f"r_elbow={metrics.get('reward/diag_right_elbow_ang_vel_mean', float('nan')):.3f} "
+            f"l_shoulder={metrics.get('reward/diag_left_shoulder_ang_vel_mean', float('nan')):.3f} "
+            f"r_shoulder={metrics.get('reward/diag_right_shoulder_ang_vel_mean', float('nan')):.3f}",
+            flush=True,
+        )
+        print(
+            f"[TRAIN_ACT] "
+            f"l_wrist_r={metrics.get('act/l_wrist_roll', float('nan')):.4f} "
+            f"l_wrist_p={metrics.get('act/l_wrist_pitch', float('nan')):.4f} "
+            f"l_wrist_y={metrics.get('act/l_wrist_yaw', float('nan')):.4f} "
+            f"r_wrist_r={metrics.get('act/r_wrist_roll', float('nan')):.4f} "
+            f"r_wrist_p={metrics.get('act/r_wrist_pitch', float('nan')):.4f} "
+            f"r_wrist_y={metrics.get('act/r_wrist_yaw', float('nan')):.4f} "
+            f"l_elbow={metrics.get('act/l_elbow', float('nan')):.4f} "
+            f"r_elbow={metrics.get('act/r_elbow', float('nan')):.4f}",
+            flush=True,
+        )
 
     def log_banner(self) -> None:
         cfg = self.cfg
