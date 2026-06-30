@@ -184,10 +184,13 @@ class FPOPP(Algorithm):
             "critic_obs_normalizer": self.critic_obs_normalizer.state_dict() if self.empirical_normalization else None,
         }
 
-    def load_extra_checkpoint_state(self, payload: dict) -> None:
+    def load_extra_checkpoint_state(self, payload: dict, reset_optimizer: bool = False) -> None:
         if not payload:
             return
-        self.learning_rate = float(payload.get("learning_rate", self.learning_rate))
+        # On a fresh-optimizer resume keep the config learning_rate (honour a fine-tune override)
+        # instead of restoring the checkpoint's adapted LR; otherwise restore it.
+        if not reset_optimizer:
+            self.learning_rate = float(payload.get("learning_rate", self.learning_rate))
         for group in self._optimizer.param_groups:
             if group.get("name") == "critic":
                 continue  # critic LR is fixed (value_lr), only the actor group is adaptive
@@ -700,12 +703,13 @@ class FPOPP(Algorithm):
         return metrics
 
     def _add_sampler_metrics(self, metrics: dict) -> None:
-        """Adaptive-sampler diagnostics ([SAMPLER]): which death-frame bin currently dominates
-        the reset distribution. Owned by env.step(); the algorithm only reads it. Absent when the
-        env exposes no sampler (e.g. test fakes)."""
+        """Adaptive-sampler diagnostics ([SAMPLER]): the causal-lookback START distribution
+        (percentiles), the dominant failure frame, and the share of starts that land before it.
+        Owned by env.step(); the algorithm only reads it. Absent when the env exposes no sampler
+        (e.g. test fakes)."""
         stats_fn = getattr(self.env, "adaptive_sampling_stats", None)
         stats = stats_fn() if callable(stats_fn) else {}
-        for key in ("top_bin", "top_prob", "failed_sum", "entropy"):
+        for key in ("start_p10", "start_p50", "start_p90", "peak_fail_frame", "frac_before_peak", "failed_sum", "entropy"):
             metrics[f"sampler/{key}"] = float(stats.get(key, float("nan")))
 
     # ----------------------------------------------------------------- shared metric helpers
@@ -881,9 +885,12 @@ class FPOPP(Algorithm):
         )
         print(
             f"[SAMPLER] "
-            f"top_bin={metrics.get('sampler/top_bin', float('nan')):.0f} "
-            f"top_prob={metrics.get('sampler/top_prob', float('nan')):.5f} "
-            f"failed_sum={metrics.get('sampler/failed_sum', float('nan')):.2f} "
+            f"start_p10={metrics.get('sampler/start_p10', float('nan')):.0f} "
+            f"start_p50={metrics.get('sampler/start_p50', float('nan')):.0f} "
+            f"start_p90={metrics.get('sampler/start_p90', float('nan')):.0f} "
+            f"peak_fail={metrics.get('sampler/peak_fail_frame', float('nan')):.0f} "
+            f"frac_before_peak={metrics.get('sampler/frac_before_peak', float('nan')):.3f} "
+            f"failed_sum={metrics.get('sampler/failed_sum', float('nan')):.4f} "
             f"entropy={metrics.get('sampler/entropy', float('nan')):.4f}",
             flush=True,
         )

@@ -2,24 +2,31 @@ from __future__ import annotations
 
 import torch
 
-# Bumped whenever the on-disk sampler state layout changes. Old checkpoints that carry the
-# pre-Holosoma failure/exposure stats (version mismatch / absent) are NOT restored.
-ADAPTIVE_SAMPLER_VERSION = 2
+# Bumped whenever the on-disk sampler state layout changes. Old checkpoints that carry an
+# incompatible sampler state (version mismatch / absent) are NOT restored -- resuming
+# update_1000.pt therefore starts the sampler fresh, as required.
+#   v2: per-bin death-frame EMA (~1s bins).
+#   v3: per-FRAME failure EMA + causal lookback start sampling (current design).
+ADAPTIVE_SAMPLER_VERSION = 3
 
 
 class AdaptiveTimestepsSampler:
-    """Holosoma death-frame adaptive motion sampler.
+    """Holosoma causal-lookback motion start sampler.
 
-    Bins motion failures over the GLOBAL motion-frame axis and oversamples the frames the
-    robot dies at most. The death frame maps directly to a bin:
+    Maintains a per-FRAME failure EMA over the global motion-frame axis (length
+    ``num_frames``). Each real tracking failure at frame ``f`` votes ONLY for START frames in
+    the causal lookback window ``[f - lookback_max, f - lookback_min]`` -- i.e. an env is
+    spawned ``lookback_min..lookback_max`` frames (0.4..1.6 s at 50 Hz) BEFORE the frame it
+    dies at, giving the policy a roll-in to learn the dynamic transition INTO the failure.
+    Sampling never lands on or after a failure frame.
 
-        failed_bin = clamp((failed_at_time_step * num_bins) // motion_time_step_total,
-                           0, num_bins - 1)
+        p(s) = hard_ratio * p_failure_lookback(s) + uniform_ratio * p_uniform(s)
 
-    The sampler is maintained entirely by ``env.step()``: each rl-environment step the
-    current step's failures are folded into an exponential moving average and the per-step
-    accumulator is zeroed (``update_bin_failed_count``). There is no exposure tracking and no
-    start-frame bookkeeping -- the bin counts are the EMA of raw failure counts.
+    The sampler is maintained entirely by ``env.step()``: each rl-environment step the current
+    step's tracking-failure frames are accumulated (``update_current_failure_count``) and folded
+    into the EMA at the end of the step (``update_failure_ema``). Failure counts are normalized
+    by ``num_envs`` so an 8192-env run is not twice as peaked as an official 4096-env run. All
+    three algorithms only consume the env; none write to the sampler.
     """
 
     def __init__(
@@ -27,155 +34,156 @@ class AdaptiveTimestepsSampler:
         motion_time_step_total: int,
         device: torch.device | str,
         *,
-        num_bins: int,
-        adaptive_kernel_size: int = 1,
-        adaptive_lambda: float = 0.8,
-        adaptive_uniform_ratio: float = 0.1,
+        num_envs: int,
+        lookback_min: int = 20,
+        lookback_max: int = 80,
+        hard_ratio: float = 0.7,
+        uniform_ratio: float = 0.3,
         adaptive_alpha: float = 0.001,
     ):
         self.device = device
-        self.motion_time_step_total = int(max(1, motion_time_step_total))
-        self.num_bins = int(max(1, num_bins))
-        self.adaptive_kernel_size = int(max(1, adaptive_kernel_size))
-        self.adaptive_lambda = float(adaptive_lambda)
-        self.adaptive_uniform_ratio = min(1.0, max(0.0, float(adaptive_uniform_ratio)))
+        self.num_frames = int(max(1, motion_time_step_total))
+        self.num_envs = int(max(1, num_envs))
+        self.lookback_min = int(max(1, lookback_min))
+        self.lookback_max = int(max(self.lookback_min, lookback_max))
+        self.hard_ratio = max(0.0, float(hard_ratio))
+        self.uniform_ratio = max(0.0, float(uniform_ratio))
         self.adaptive_alpha = min(1.0, max(0.0, float(adaptive_alpha)))
-        kernel = torch.tensor(
-            [self.adaptive_lambda**i for i in range(self.adaptive_kernel_size)],
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.kernel = kernel / kernel.sum()
         self.init_buffers()
 
     def init_buffers(self) -> None:
-        self.current_bin_failed_count = torch.zeros(self.num_bins, dtype=torch.float32, device=self.device)
-        self.bin_failed_count = torch.zeros(self.num_bins, dtype=torch.float32, device=self.device)
+        # Raw per-step failure accumulator (zeroed each fold) and the per-frame failure EMA.
+        self.current_failure_count = torch.zeros(self.num_frames, dtype=torch.float32, device=self.device)
+        self.failure_ema = torch.zeros(self.num_frames, dtype=torch.float32, device=self.device)
 
-    def frames_to_bins(self, failed_at_time_step: torch.Tensor) -> torch.Tensor:
-        return torch.clamp(
-            (failed_at_time_step.reshape(-1).long() * self.num_bins) // self.motion_time_step_total,
-            0,
-            self.num_bins - 1,
-        )
-
-    def update_current_bin_failed_count(self, failed_at_time_step: torch.Tensor) -> None:
-        """Accumulate this step's death frames into the per-step failure counter."""
+    # --------------------------------------------------------------------- failure recording
+    def update_current_failure_count(self, failed_at_time_step: torch.Tensor) -> None:
+        """Accumulate this step's tracking-failure death frames into the per-step counter."""
         if failed_at_time_step.numel() == 0:
             return
-        failed_bin = self.frames_to_bins(failed_at_time_step)
-        self.current_bin_failed_count += torch.bincount(failed_bin, minlength=self.num_bins).to(
-            self.current_bin_failed_count
+        idx = torch.clamp(failed_at_time_step.reshape(-1).long(), 0, self.num_frames - 1)
+        self.current_failure_count += torch.bincount(idx, minlength=self.num_frames).to(
+            self.current_failure_count
         )
 
-    def update_bin_failed_count(self) -> None:
-        """Fold the per-step failure counter into the EMA, then zero it. Called every step."""
-        self.bin_failed_count = (self.adaptive_alpha * self.current_bin_failed_count) + (
-            1.0 - self.adaptive_alpha
-        ) * self.bin_failed_count
-        self.current_bin_failed_count.zero_()
+    def update_failure_ema(self) -> None:
+        """Fold the per-step accumulator into the per-frame EMA, then zero it. Called every step.
 
-    @property
-    def sampling_probabilities(self) -> torch.Tensor:
-        # p_b proportional to (failure EMA + uniform floor), smoothed by the non-causal kernel.
-        probabilities = self.bin_failed_count + self.adaptive_uniform_ratio / float(self.num_bins)
-        probabilities = torch.nn.functional.pad(
-            probabilities.view(1, 1, -1),
-            (0, self.adaptive_kernel_size - 1),
-            mode="replicate",
+        The per-step count is normalized by ``num_envs`` BEFORE folding so the EMA magnitude is
+        independent of the number of parallel envs (an 8192-env run produces the same sampler
+        sharpness as the official 4096-env run)."""
+        normalized = self.current_failure_count / float(self.num_envs)
+        self.failure_ema = self.adaptive_alpha * normalized + (1.0 - self.adaptive_alpha) * self.failure_ema
+        self.current_failure_count.zero_()
+
+    # --------------------------------------------------------------------- sampling
+    def _lookback_scores(self) -> torch.Tensor:
+        """For each START frame s, the failure mass in its causal lookahead window
+        ``[s + lookback_min, s + lookback_max]`` (the failures that this start gives a roll-in
+        to). Computed as a sliding window sum of ``failure_ema`` via a prefix sum."""
+        ema = self.failure_ema
+        n = self.num_frames
+        prefix = torch.cat(
+            [torch.zeros(1, dtype=torch.float32, device=self.device), torch.cumsum(ema, dim=0)]
         )
-        probabilities = torch.nn.functional.conv1d(probabilities, self.kernel.view(1, 1, -1)).view(-1)
-        total = probabilities.sum()
-        if not bool(torch.isfinite(total)) or float(total.item()) <= 0.0:
-            return torch.full((self.num_bins,), 1.0 / float(self.num_bins), device=self.device)
-        return probabilities / total
+        starts = torch.arange(n, device=self.device)
+        lo = torch.clamp(starts + self.lookback_min, 0, n)
+        hi = torch.clamp(starts + self.lookback_max + 1, 0, n)  # inclusive window upper bound
+        return prefix.index_select(0, hi) - prefix.index_select(0, lo)
 
-    def bin_frame_bounds(self, bins: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        lo = (bins * self.motion_time_step_total) // self.num_bins
-        hi = ((bins + 1) * self.motion_time_step_total) // self.num_bins
-        hi = torch.maximum(hi, lo + 1)
-        return lo, hi
-
-    def sample_frames(self, num_samples: int, min_phase: int, max_phase: int) -> torch.Tensor:
-        """Conditionally sample global motion frames inside [min_phase, max_phase].
-
-        This is true conditional sampling, NOT a post-hoc clamp: each bin is intersected with
-        [min_phase, max_phase], bins with empty intersection are masked out, the remaining
-        bin probabilities are renormalized, and offsets are drawn only within each bin's
-        intersection. Clamping instead would pile every out-of-range sample onto the two
-        boundary frames and create spurious edge spikes."""
-        if num_samples <= 0:
-            return torch.empty(0, dtype=torch.long, device=self.device)
-        min_phase = int(min_phase)
-        max_phase = int(max_phase)
+    def start_probabilities(self, min_phase: int, max_phase: int) -> torch.Tensor:
+        """Per-frame start-sampling distribution over the inclusive valid range
+        ``[min_phase, max_phase]``: ``hard_ratio`` * (failure-lookback, renormalized in range)
+        + ``uniform_ratio`` * (uniform in range). Falls back to pure uniform-in-range when no
+        failure mass yet lies ahead of any in-range start."""
+        n = self.num_frames
+        min_phase = max(0, int(min_phase))
+        max_phase = min(n - 1, int(max_phase))
+        probs = torch.zeros(n, dtype=torch.float32, device=self.device)
         if max_phase < min_phase:
-            return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
+            probs[min_phase] = 1.0
+            return probs
+        valid = torch.zeros(n, dtype=torch.float32, device=self.device)
+        valid[min_phase : max_phase + 1] = 1.0
+        uniform = valid / valid.sum()
 
-        all_bins = torch.arange(self.num_bins, device=self.device)
-        lo, hi = self.bin_frame_bounds(all_bins)  # global [lo, hi) per bin
-        full_span = (hi - lo).clamp_min(1).to(torch.float32)
-        # Intersection of each bin with the inclusive range [min_phase, max_phase].
-        lo_eff = torch.clamp(lo, min=min_phase)
-        hi_eff = torch.clamp(hi, max=max_phase + 1)
-        span_eff = (hi_eff - lo_eff).clamp_min(0)  # 0 => no overlap with the range
-
-        # Bin-selection weight = (global frame density P_b / full_span_b) * in-range frame count.
-        # This makes the per-FRAME sampling density the exact conditional restriction of the
-        # global distribution to [min_phase, max_phase]; without the span_eff/full_span factor a
-        # partially-covered boundary bin would be over-/under-sampled per frame.
-        probs = self.sampling_probabilities / full_span * span_eff.to(torch.float32)
+        hard = self._lookback_scores() * valid
+        hard_total = hard.sum()
+        hr = self.hard_ratio
+        ur = self.uniform_ratio
+        if float(hard_total.item()) > 0.0 and hr > 0.0:
+            hard = hard / hard_total
+            probs = hr * hard + ur * uniform
+        else:
+            # No failure mass ahead of any valid start yet -> uniform exploration over the range.
+            probs = uniform.clone()
         total = probs.sum()
         if not bool(torch.isfinite(total)) or float(total.item()) <= 0.0:
-            # No in-range failure mass (or degenerate): fall back to per-frame-uniform in range,
-            # i.e. bin weight proportional to the number of in-range frames it contributes.
-            probs = span_eff.to(torch.float32)
-            total = probs.sum()
-            if float(total.item()) <= 0.0:
-                return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
-        probs = probs / total
+            return uniform
+        return probs / total
 
-        bins = torch.multinomial(probs, num_samples, replacement=True)
-        bin_lo = lo_eff.index_select(0, bins)
-        bin_span = span_eff.index_select(0, bins).clamp_min(1)
-        offset = (torch.rand(num_samples, device=self.device) * bin_span.to(torch.float32)).long()
-        frames = bin_lo + offset
-        return torch.clamp(frames, min=min_phase, max=max_phase)
+    def sample_frames(self, num_samples: int, min_phase: int, max_phase: int) -> torch.Tensor:
+        """Sample ``num_samples`` global start frames from ``start_probabilities``. Hard
+        (failure-lookback) starts are guaranteed to lie strictly BEFORE the failure frames
+        (a start s only earns hard mass from failures at f >= s + lookback_min > s)."""
+        if num_samples <= 0:
+            return torch.empty(0, dtype=torch.long, device=self.device)
+        probs = self.start_probabilities(min_phase, max_phase)
+        return torch.multinomial(probs, num_samples, replacement=True).long()
 
+    # --------------------------------------------------------------------- persistence
     def state_dict(self) -> dict:
         return {
             "version": ADAPTIVE_SAMPLER_VERSION,
-            "num_bins": self.num_bins,
-            "bin_failed_count": self.bin_failed_count.detach().cpu(),
-            "current_bin_failed_count": self.current_bin_failed_count.detach().cpu(),
+            "num_frames": self.num_frames,
+            "failure_ema": self.failure_ema.detach().cpu(),
+            "current_failure_count": self.current_failure_count.detach().cpu(),
         }
 
     def load_state_dict(self, state: dict | None) -> bool:
-        """Restore the EMA bins. Returns False (and keeps the fresh zeros) on version /
-        shape mismatch -- old failure/exposure stats are intentionally NOT restored."""
+        """Restore the per-frame failure EMA. Returns False (keeping fresh zeros) on version /
+        shape mismatch -- incompatible (e.g. pre-v3 bin) stats are intentionally NOT restored."""
         if not state:
             return False
         if int(state.get("version", -1)) != ADAPTIVE_SAMPLER_VERSION:
             return False
-        bfc = state.get("bin_failed_count")
-        if bfc is None or tuple(bfc.shape) != (self.num_bins,):
+        ema = state.get("failure_ema")
+        if ema is None or tuple(ema.shape) != (self.num_frames,):
             return False
-        self.bin_failed_count.copy_(bfc.to(self.bin_failed_count))
-        cbfc = state.get("current_bin_failed_count")
-        if cbfc is not None and tuple(cbfc.shape) == (self.num_bins,):
-            self.current_bin_failed_count.copy_(cbfc.to(self.current_bin_failed_count))
+        self.failure_ema.copy_(ema.to(self.failure_ema))
+        cur = state.get("current_failure_count")
+        if cur is not None and tuple(cur.shape) == (self.num_frames,):
+            self.current_failure_count.copy_(cur.to(self.current_failure_count))
         return True
 
-    def stats(self) -> dict[str, float]:
-        probabilities = self.sampling_probabilities
-        top_prob, top_bin = probabilities.max(dim=0)
-        entropy = -(probabilities * probabilities.clamp_min(1.0e-12).log()).sum()
-        if self.num_bins > 1:
-            entropy = entropy / torch.log(torch.tensor(float(self.num_bins), device=self.device))
+    # --------------------------------------------------------------------- diagnostics
+    def _weighted_percentile(self, cdf: torch.Tensor, q: float) -> float:
+        idx = torch.searchsorted(cdf, torch.tensor(float(q), device=self.device))
+        return float(torch.clamp(idx, 0, self.num_frames - 1).item())
+
+    def stats(self, min_phase: int = 0, max_phase: int | None = None) -> dict[str, float]:
+        """Start-distribution diagnostics for the [SAMPLER] log line, computed over the current
+        valid range. ``frac_before_peak`` is the share of start mass that lands before the
+        dominant failure frame (the "pre-wall" sampling ratio)."""
+        if max_phase is None:
+            max_phase = self.num_frames - 1
+        probs = self.start_probabilities(min_phase, max_phase)
+        cdf = torch.cumsum(probs, dim=0)
+        failed_sum = float(self.failure_ema.sum().item())
+        if failed_sum > 0.0:
+            peak_fail_frame = int(torch.argmax(self.failure_ema).item())
+            frac_before_peak = float(probs[:peak_fail_frame].sum().item()) if peak_fail_frame > 0 else 0.0
         else:
-            entropy = torch.ones_like(entropy)
+            peak_fail_frame = -1
+            frac_before_peak = float("nan")
+        entropy = -(probs * probs.clamp_min(1.0e-12).log()).sum()
+        entropy = entropy / torch.log(torch.tensor(float(self.num_frames), device=self.device))
         return {
-            "top_bin": float(top_bin.item()),
-            "top_prob": float(top_prob.item()),
-            "failed_sum": float(self.bin_failed_count.sum().item()),
+            "start_p10": self._weighted_percentile(cdf, 0.10),
+            "start_p50": self._weighted_percentile(cdf, 0.50),
+            "start_p90": self._weighted_percentile(cdf, 0.90),
+            "peak_fail_frame": float(peak_fail_frame),
+            "frac_before_peak": frac_before_peak,
+            "failed_sum": failed_sum,
             "entropy": float(entropy.item()),
         }

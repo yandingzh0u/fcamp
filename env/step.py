@@ -30,12 +30,10 @@ class MimicStepMixin:
         # Holosoma phase timing: reward/termination are evaluated against the CURRENT phase
         # ref(t) (the frame the policy observed when it chose this action). The phase is only
         # advanced to t+1 AFTER reward/termination/reset, so the NEXT observation reads ref(t+1).
-        # Motion-end: the last valid reference frame (num_frames - 1) is the terminal frame --
-        # an env scoring there this step is flagged as a (timeout-style) done.
+        # Motion-end: the last valid reference frame (num_frames - 1) is the terminal frame. In
+        # training this is NOT a done -- the survivor is teleported back into the clip below. It
+        # only becomes a (motion_complete) done when terminate_on_motion_end is set (validation).
         self._motion_end_mask = self.phase_steps >= (self.motion.num_frames - 1)
-        if loop_motion:
-            # Explicit infinite-playback mode only (play.py): never terminate on motion end.
-            self._motion_end_mask = torch.zeros_like(self._motion_end_mask)
 
         # Death frame = the phase that reward/termination are scored at (pre-advance).
         termination_phase_steps = self.phase_steps.clone()
@@ -65,7 +63,11 @@ class MimicStepMixin:
         # the returned observation references ref(k+1) just like a surviving env references
         # ref(t+1)). Done in loop_motion too, then finished envs are teleported back in-clip.
         self.phase_steps += 1
-        if loop_motion:
+        # Training roll-in (and play.py loop_motion): a surviving env that walked off the end of
+        # the clip is teleported back to a freshly sampled start frame with NO done and the
+        # episode timer preserved. Skipped only when motion end is a real termination
+        # (validation, terminate_on_motion_end=True), where the env stops at the final frame.
+        if not getattr(self, "terminate_on_motion_end", False):
             self._resample_finished_motions()
 
         # Fold this step's recorded failures into the sampler EMA AFTER reset/phase-advance, so

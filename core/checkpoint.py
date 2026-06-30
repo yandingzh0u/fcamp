@@ -74,12 +74,20 @@ class Checkpointer:
         else:
             raise KeyError(f"Checkpoint {checkpoint_path} has no optimizer state.")
 
-        t.algo.load_extra_checkpoint_state(payload.get("algo_state", {}))
+        t.algo.load_extra_checkpoint_state(payload.get("algo_state", {}), reset_optimizer=reset_optimizer)
 
-        # Adaptive sampler bins (versioned). Pre-Holosoma failure/exposure stats carry no
-        # compatible version and are intentionally NOT restored.
+        # Adaptive sampler state is independently resettable from the optimizer. This is useful
+        # for fine-tuning an otherwise compatible policy against a new/reset failure curriculum;
+        # relying only on a version mismatch would make the behavior accidental and would not
+        # work when resuming another checkpoint with the current sampler version.
         if hasattr(t.env, "adaptive_sampler"):
-            if t.env.adaptive_sampler.load_state_dict(payload.get("adaptive_sampler_state")):
+            reset_sampler = bool(getattr(t.train_cfg, "reset_sampler_on_resume", False))
+            if reset_sampler:
+                t.env.adaptive_sampler.init_buffers()
+                if hasattr(t.env, "_failure_recorded"):
+                    t.env._failure_recorded.zero_()
+                print("[CHECKPOINT] adaptive sampler reset by request; starting fresh.", flush=True)
+            elif t.env.adaptive_sampler.load_state_dict(payload.get("adaptive_sampler_state")):
                 print("[CHECKPOINT] restored adaptive sampler state.", flush=True)
             else:
                 print("[CHECKPOINT] adaptive sampler state absent/incompatible; starting fresh.", flush=True)

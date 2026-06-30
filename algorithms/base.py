@@ -75,7 +75,7 @@ class Algorithm(ABC):
     def extra_checkpoint_state(self) -> dict:
         return {}
 
-    def load_extra_checkpoint_state(self, payload: dict) -> None:
+    def load_extra_checkpoint_state(self, payload: dict, reset_optimizer: bool = False) -> None:
         pass
 
     @abstractmethod

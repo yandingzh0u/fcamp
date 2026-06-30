@@ -46,12 +46,19 @@ class MimicTerminationMixin:
         termination_z_error_max = termination_z_error.max(dim=-1).values
         termination_z_error_mean = termination_z_error.mean(dim=-1)
         time_out = self.episode_steps >= self.task_cfg.max_episode_steps
+        # Motion end is a SEPARATE event from the episode-length time-out. During training it is
+        # not a termination at all (the env teleports the survivor back into the clip with no
+        # done -- see step.py). Only when terminate_on_motion_end is set (validation) does
+        # reaching the final frame end the episode, and then it is recorded as motion_complete
+        # (a successful full-clip run), never disguised as a time_out or a tracking failure.
         motion_end = getattr(self, "_motion_end_mask", None)
-        if motion_end is not None:
-            time_out = time_out | motion_end
-        done = time_out | anchor_pos_bad | anchor_ori_bad | ee_body_bad
+        motion_complete = torch.zeros_like(time_out)
+        if motion_end is not None and bool(getattr(self, "terminate_on_motion_end", False)):
+            motion_complete = motion_end
+        done = time_out | anchor_pos_bad | anchor_ori_bad | ee_body_bad | motion_complete
         return done, {
             "time_out": time_out,
+            "motion_complete": motion_complete,
             "anchor_pos_bad": anchor_pos_bad,
             "anchor_ori_bad": anchor_ori_bad,
             "ee_body_bad": ee_body_bad,

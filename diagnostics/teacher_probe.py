@@ -27,8 +27,12 @@ parser.add_argument(
     "the PD target equal the reference pose q_ref(t). If even this cannot pass the 760-850 stand-up "
     "segment, the remaining problem is asset/terrain/physics, not RL.",
 )
-parser.add_argument("--no_reset_noise", action="store_true", default=False)
+# Nominal teacher probe: reset noise, pushes, observation noise AND startup randomization are
+# all OFF by default so friction / COM / default-joint bias are deterministic. Pass
+# --startup_randomization to re-enable domain randomization for the follow-up robustness test.
+parser.add_argument("--no_reset_noise", action="store_true", default=True)
 parser.add_argument("--no_obs_noise", action="store_true", default=True)
+parser.add_argument("--startup_randomization", action="store_true", default=False)
 parser.add_argument(
     "--feet_only_termination",
     action="store_true",
@@ -53,7 +57,7 @@ def main() -> None:
         device=args_cli.device,
         num_envs=args_cli.num_envs,
         render=False,
-        startup_randomization=False,
+        startup_randomization=args_cli.startup_randomization,
         reset_noise=not args_cli.no_reset_noise,
         interval_pushes=False,
         observation_noise=not args_cli.no_obs_noise,
@@ -62,6 +66,8 @@ def main() -> None:
         motion_start_phase=args_cli.start_phase,
     )
     env = G1MimicEnv(cfg)
+    # Motion end is a clean stop (success), not a teleport roll-in, for the probe.
+    env.terminate_on_motion_end = True
     if args_cli.feet_only_termination:
         feet = ["left_ankle_roll_link", "right_ankle_roll_link"]
         env.termination_body_indices = [env.track_body_names.index(n) for n in feet]
@@ -83,7 +89,7 @@ def main() -> None:
 
     alive = torch.ones(env.num_envs, dtype=torch.bool, device=device)
     survived_steps = torch.zeros(env.num_envs, dtype=torch.long, device=device)
-    death_cause = {"anchor_pos_bad": 0, "anchor_ori_bad": 0, "ee_body_bad": 0, "time_out": 0}
+    death_cause = {"anchor_pos_bad": 0, "anchor_ori_bad": 0, "ee_body_bad": 0, "time_out": 0, "motion_complete": 0}
 
     from env.config import EE_Z_TERMINATION_THRESHOLD
     # Roll every reference frame from start_phase through the final frame inclusive (diagnostic

@@ -201,9 +201,13 @@ class MimicEnvConfig(EnvConfig):
     motion_start_phase: int = 0
     motion_end_phase: int = -1
     adaptive_motion_sampling: bool = True
-    adaptive_uniform_ratio: float = 0.1
+    # Causal-lookback start sampler: p(s) = hard_ratio * failure-lookback + uniform_ratio * uniform.
+    # A failure at frame f only feeds START frames in [f - lookback_max, f - lookback_min].
+    adaptive_hard_ratio: float = 0.7
+    adaptive_uniform_ratio: float = 0.3
+    adaptive_lookback_min: int = 20
+    adaptive_lookback_max: int = 80
     adaptive_alpha: float = 0.001
-    adaptive_kernel_size: int = 1
     reset_noise: bool = True
     interval_pushes: bool = True
     observation_noise: bool = True

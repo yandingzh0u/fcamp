@@ -1,4 +1,4 @@
-"""Unit tests for the Holosoma death-frame adaptive motion sampler.
+"""Unit tests for the Holosoma causal-lookback adaptive motion sampler.
 
 Run:  python tests/test_adaptive_sampling.py   (from the repo root)
 """
@@ -9,18 +9,24 @@ import torch
 from env.adaptive_sampling import ADAPTIVE_SAMPLER_VERSION, AdaptiveTimestepsSampler
 
 
-MOTION_FRAMES = 960
-ENV_FPS = 50
-NUM_BINS = MOTION_FRAMES // ENV_FPS + 1  # ~1-second bins -> 20 bins, 48 frames each
+MOTION_FRAMES = 959  # frames 0..958
+LOOKBACK_MIN = 20
+LOOKBACK_MAX = 80
 
 
 def _sampler(**kw) -> AdaptiveTimestepsSampler:
-    params = dict(adaptive_kernel_size=1, adaptive_uniform_ratio=0.1, adaptive_alpha=0.001)
+    params = dict(
+        num_envs=4096,
+        lookback_min=LOOKBACK_MIN,
+        lookback_max=LOOKBACK_MAX,
+        hard_ratio=0.7,
+        uniform_ratio=0.3,
+        adaptive_alpha=0.001,
+    )
     params.update(kw)
     return AdaptiveTimestepsSampler(
         motion_time_step_total=MOTION_FRAMES,
         device="cpu",
-        num_bins=NUM_BINS,
         **params,
     )
 
@@ -31,116 +37,144 @@ def check(name, cond):
     print(f"  ok: {name}")
 
 
-def test_death_frame_maps_to_top_bin() -> None:
-    sampler = _sampler()
-    deaths = torch.full((4096,), 830, dtype=torch.long)
-    sampler.update_current_bin_failed_count(deaths)
-    sampler.update_bin_failed_count()
-
-    expected_bin = (830 * NUM_BINS) // MOTION_FRAMES  # == 17
-    top_bin = int(sampler.sampling_probabilities.argmax().item())
-    lo, hi = sampler.bin_frame_bounds(torch.tensor([expected_bin]))
-    check("death at 830 -> bin 17", expected_bin == 17)
-    check("top sampled bin is the death bin", top_bin == expected_bin)
-    check("death bin covers ~815-862", int(lo.item()) <= 830 < int(hi.item()) and 800 <= int(lo.item()) <= 820)
-
-
-def test_zero_history_is_uniform() -> None:
-    sampler = _sampler()
-    probs = sampler.sampling_probabilities
-    check("no deaths -> uniform probabilities", torch.allclose(probs, torch.full_like(probs, 1.0 / NUM_BINS)))
-    check("no deaths -> normalized entropy ~1", abs(sampler.stats()["entropy"] - 1.0) < 1e-4)
-
-
-def test_ema_folds_and_zeros_accumulator() -> None:
-    sampler = _sampler(adaptive_alpha=0.5)
-    sampler.update_current_bin_failed_count(torch.full((10,), 830, dtype=torch.long))
-    check("accumulator holds raw failures pre-fold", float(sampler.current_bin_failed_count.sum()) == 10.0)
-    sampler.update_bin_failed_count()
-    check("EMA = alpha * current (first fold)", abs(float(sampler.bin_failed_count.sum()) - 5.0) < 1e-5)
-    check("accumulator zeroed after fold", float(sampler.current_bin_failed_count.sum()) == 0.0)
-    # A subsequent step with no deaths decays the EMA toward zero.
-    sampler.update_bin_failed_count()
-    check("EMA decays when no new failures", abs(float(sampler.bin_failed_count.sum()) - 2.5) < 1e-5)
-
-
-def test_empty_failures_is_noop() -> None:
-    sampler = _sampler()
-    sampler.update_current_bin_failed_count(torch.empty(0, dtype=torch.long))
-    check("empty death tensor adds nothing", float(sampler.current_bin_failed_count.sum()) == 0.0)
-
-
-def test_sample_frames_respect_bounds() -> None:
+def test_hard_starts_strictly_before_failure() -> None:
+    # A failure at frame 832 must produce hard starts ONLY in the causal lookback window
+    # [832 - 80, 832 - 20] = [752, 812]; never on or after the failure frame.
     torch.manual_seed(0)
+    sampler = _sampler(hard_ratio=1.0, uniform_ratio=0.0)
+    sampler.update_current_failure_count(torch.full((4096,), 832, dtype=torch.long))
+    sampler.update_failure_ema()
+    frames = sampler.sample_frames(50000, min_phase=0, max_phase=MOTION_FRAMES - 1)
+    lo, hi = 832 - LOOKBACK_MAX, 832 - LOOKBACK_MIN
+    check("all hard starts within [752, 812]", int(frames.min()) >= lo and int(frames.max()) <= hi)
+    check("no hard start at or after the failure frame 832", int(frames.max()) < 832)
+
+
+def test_lookback_scores_window_bounds() -> None:
     sampler = _sampler()
-    sampler.update_current_bin_failed_count(torch.full((1000,), 830, dtype=torch.long))
-    sampler.update_bin_failed_count()
-    frames = sampler.sample_frames(5000, min_phase=0, max_phase=900)
-    check("sampled frames within [0, 900]", int(frames.min()) >= 0 and int(frames.max()) <= 900)
-    # The death bin should dominate: most samples land near phase 830.
-    near_death = ((frames >= 816) & (frames < 864)).float().mean().item()
-    check("majority of samples near the death frame", near_death > 0.5)
+    sampler.update_current_failure_count(torch.full((4096,), 832, dtype=torch.long))
+    sampler.update_failure_ema()
+    scores = sampler._lookback_scores()
+    nonzero = torch.nonzero(scores > 0).flatten()
+    check("lowest start that sees the failure is 752", int(nonzero.min()) == 832 - LOOKBACK_MAX)
+    check("highest start that sees the failure is 812", int(nonzero.max()) == 832 - LOOKBACK_MIN)
+
+
+def test_mixture_keeps_uniform_floor() -> None:
+    torch.manual_seed(0)
+    sampler = _sampler(hard_ratio=0.7, uniform_ratio=0.3)
+    sampler.update_current_failure_count(torch.full((4096,), 832, dtype=torch.long))
+    sampler.update_failure_ema()
+    frames = sampler.sample_frames(60000, min_phase=0, max_phase=MOTION_FRAMES - 1)
+    in_hard = ((frames >= 752) & (frames <= 812)).float().mean().item()
+    # ~0.7 hard (in window) + 0.3 uniform spread over the whole clip -> majority in window but a
+    # meaningful uniform tail outside it.
+    check("hard window dominates (~0.7+)", in_hard > 0.6)
+    check("uniform floor leaks outside the window", in_hard < 0.95)
+    check("uniform floor can sample at/after the failure frame", int(frames.max()) >= 832)
+
+
+def test_normalization_is_env_count_independent() -> None:
+    # The same fraction of envs dying at the same frame must yield an identical EMA regardless of
+    # num_envs (an 8192-env run is not twice as peaked as a 4096-env run).
+    a = _sampler(num_envs=4096)
+    a.update_current_failure_count(torch.full((4096,), 832, dtype=torch.long))
+    a.update_failure_ema()
+    b = _sampler(num_envs=8192)
+    b.update_current_failure_count(torch.full((8192,), 832, dtype=torch.long))
+    b.update_failure_ema()
+    check("4096-env and 8192-env EMA identical", torch.allclose(a.failure_ema, b.failure_ema))
+    check("EMA peak normalized to alpha (all envs died)", abs(float(a.failure_ema.max()) - a.adaptive_alpha) < 1e-6)
+
+
+def test_zero_history_is_uniform_in_range() -> None:
+    sampler = _sampler()
+    probs = sampler.start_probabilities(760, 850)
+    in_range = probs[760:851]
+    check("no failures -> uniform over the valid range", torch.allclose(in_range, torch.full_like(in_range, 1.0 / in_range.numel())))
+    check("no failures -> zero mass outside the range", float(probs[:760].sum() + probs[851:].sum()) < 1e-6)
 
 
 def test_conditional_range_no_boundary_spikes() -> None:
     torch.manual_seed(0)
     sampler = _sampler()
-    # Failures concentrated at frame 200 (far below the training window) must NOT leak in or
-    # pile onto the window boundaries: sampling is conditioned on [760, 850], not clamped.
-    sampler.update_current_bin_failed_count(torch.full((2000,), 200, dtype=torch.long))
-    sampler.update_bin_failed_count()
+    # Failures far below the window (frame 200) must not leak into [760, 850] nor pile on a
+    # boundary (sampling is conditioned on the range, not clamped to it).
+    sampler.update_current_failure_count(torch.full((4096,), 200, dtype=torch.long))
+    sampler.update_failure_ema()
     lo, hi = 760, 850
-    frames = sampler.sample_frames(20000, min_phase=lo, max_phase=hi)
+    frames = sampler.sample_frames(40000, min_phase=lo, max_phase=hi)
     check("all samples inside [760,850]", int(frames.min()) >= lo and int(frames.max()) <= hi)
-    # No single boundary frame should absorb the out-of-range mass (clamp bug signature).
     at_lo = (frames == lo).float().mean().item()
     at_hi = (frames == hi).float().mean().item()
     check("no spike at min boundary", at_lo < 0.05)
     check("no spike at max boundary", at_hi < 0.05)
-    # With no in-range failure mass it falls back to uniform over the in-range bins -> roughly flat.
     counts = torch.histc(frames.float(), bins=9, min=lo, max=hi)
-    check("in-range distribution is roughly uniform", float(counts.max() / counts.min()) < 1.6)
+    check("in-range distribution roughly uniform", float(counts.max() / counts.min()) < 1.6)
 
 
-def test_conditional_range_oversamples_in_range_failures() -> None:
-    torch.manual_seed(0)
+def test_ema_folds_and_zeros_accumulator() -> None:
+    sampler = _sampler(num_envs=10, adaptive_alpha=0.5)
+    sampler.update_current_failure_count(torch.full((10,), 832, dtype=torch.long))
+    check("accumulator holds raw failures pre-fold", float(sampler.current_failure_count.sum()) == 10.0)
+    sampler.update_failure_ema()
+    # alpha * (count / num_envs) = 0.5 * (10/10) = 0.5 at frame 832.
+    check("EMA = alpha * normalized count (first fold)", abs(float(sampler.failure_ema[832]) - 0.5) < 1e-6)
+    check("accumulator zeroed after fold", float(sampler.current_failure_count.sum()) == 0.0)
+    sampler.update_failure_ema()
+    check("EMA decays when no new failures", abs(float(sampler.failure_ema[832]) - 0.25) < 1e-6)
+
+
+def test_empty_failures_is_noop() -> None:
     sampler = _sampler()
-    # Failure at frame 830 (inside the window) should dominate within [760, 850].
-    sampler.update_current_bin_failed_count(torch.full((2000,), 830, dtype=torch.long))
-    sampler.update_bin_failed_count()
-    frames = sampler.sample_frames(20000, min_phase=760, max_phase=850)
-    near_death = ((frames >= 816) & (frames <= 850)).float().mean().item()
-    check("in-range failure bin dominates conditional samples", near_death > 0.6)
+    sampler.update_current_failure_count(torch.empty(0, dtype=torch.long))
+    check("empty death tensor adds nothing", float(sampler.current_failure_count.sum()) == 0.0)
+
+
+def test_stats_fields() -> None:
+    sampler = _sampler()
+    sampler.update_current_failure_count(torch.full((4096,), 832, dtype=torch.long))
+    sampler.update_failure_ema()
+    stats = sampler.stats(0, MOTION_FRAMES - 1)
+    for key in ("start_p10", "start_p50", "start_p90", "peak_fail_frame", "frac_before_peak", "failed_sum", "entropy"):
+        check(f"stats has {key}", key in stats)
+    check("peak failure frame is 832", int(stats["peak_fail_frame"]) == 832)
+    check("median start lands before the wall", stats["start_p50"] < 832)
+    # All 0.7 hard mass + the pre-wall part of the 0.3 uniform floor lands before the peak.
+    check("most start mass is before the peak failure", stats["frac_before_peak"] > 0.9)
 
 
 def test_state_dict_roundtrip_and_version_guard() -> None:
     sampler = _sampler()
-    sampler.update_current_bin_failed_count(torch.full((100,), 830, dtype=torch.long))
-    sampler.update_bin_failed_count()
+    sampler.update_current_failure_count(torch.full((4096,), 832, dtype=torch.long))
+    sampler.update_failure_ema()
     state = sampler.state_dict()
     check("state carries the sampler version", state["version"] == ADAPTIVE_SAMPLER_VERSION)
+    check("version is 3 (per-frame design)", ADAPTIVE_SAMPLER_VERSION == 3)
 
     restored = _sampler()
     check("matching version restores", restored.load_state_dict(state) is True)
-    check("restored EMA matches", torch.allclose(restored.bin_failed_count, sampler.bin_failed_count))
+    check("restored EMA matches", torch.allclose(restored.failure_ema, sampler.failure_ema))
 
     stale = _sampler()
     bad_state = dict(state)
     bad_state["version"] = ADAPTIVE_SAMPLER_VERSION - 1
     check("version mismatch is rejected", stale.load_state_dict(bad_state) is False)
-    check("rejected state keeps fresh zeros", float(stale.bin_failed_count.sum()) == 0.0)
+    check("rejected state keeps fresh zeros", float(stale.failure_ema.sum()) == 0.0)
     check("None state is rejected", _sampler().load_state_dict(None) is False)
 
 
 if __name__ == "__main__":
     for fn in (
-        test_death_frame_maps_to_top_bin,
-        test_zero_history_is_uniform,
+        test_hard_starts_strictly_before_failure,
+        test_lookback_scores_window_bounds,
+        test_mixture_keeps_uniform_floor,
+        test_normalization_is_env_count_independent,
+        test_zero_history_is_uniform_in_range,
+        test_conditional_range_no_boundary_spikes,
         test_ema_folds_and_zeros_accumulator,
         test_empty_failures_is_noop,
-        test_sample_frames_respect_bounds,
-        test_conditional_range_no_boundary_spikes,
-        test_conditional_range_oversamples_in_range_failures,
+        test_stats_fields,
         test_state_dict_roundtrip_and_version_guard,
     ):
         print(f"== {fn.__name__} ==")

@@ -35,9 +35,13 @@ class EnvCfg:
     interval_pushes: bool = True
     observation_noise: bool = True
     adaptive_motion_sampling: bool = True
-    adaptive_uniform_ratio: float = 0.1
+    # Causal-lookback start sampler: p(s) = hard_ratio * failure-lookback + uniform_ratio * uniform.
+    # A failure at frame f only feeds START frames in [f - lookback_max, f - lookback_min].
+    adaptive_hard_ratio: float = 0.7
+    adaptive_uniform_ratio: float = 0.3
+    adaptive_lookback_min: int = 20
+    adaptive_lookback_max: int = 80
     adaptive_alpha: float = 0.001
-    adaptive_kernel_size: int = 1
     action_rate_weight: float = 0.1
     # GRPO observation-noise sharing: set by the algorithm (num_generations) at build time.
     num_generations: int = 1
@@ -131,9 +135,16 @@ class TrainCfg:
     checkpoint_dir: str = ""
     resume: str = ""
     reset_optimizer_on_resume: bool = False
+    # Ignore any compatible adaptive-sampler state stored in the checkpoint and start its
+    # failure curriculum from a clean EMA. Independent of reset_optimizer_on_resume.
+    reset_sampler_on_resume: bool = False
     validation_every: int = 0
     validation_max_steps: int = 500
     validation_start_phase: int = 0
+    # Directional validation: an extra eval rollout started deep in the clip (e.g. phase 800)
+    # that measures feasibility of the hard stand-up segment in isolation, separately from the
+    # full phase-0 trajectory. Set < 0 to disable.
+    validation_directional_start_phase: int = 800
     validation_fixed_seed: int = -1
     validation_preserve_state: bool = True
     validation_observation_noise: bool = False

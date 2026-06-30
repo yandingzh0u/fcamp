@@ -94,6 +94,11 @@ class CoreTrainer:
                 )
                 vt0 = time.perf_counter()
                 metrics.update(run_validation_rollout(self))
+                dir_phase = int(getattr(tcfg, "validation_directional_start_phase", -1))
+                if dir_phase >= 0:
+                    dir_metrics = run_validation_rollout(self, start_phase_override=dir_phase)
+                    for key, value in dir_metrics.items():
+                        metrics[key.replace("validation/", "validation_directional/")] = value
                 if fixed_seed is not None:
                     fixed_metrics = run_validation_rollout(self, fixed_seed=fixed_seed)
                     for key, value in fixed_metrics.items():

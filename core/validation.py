@@ -38,7 +38,9 @@ def validation_max_steps(train_cfg, env) -> int:
     return max(1, steps)
 
 
-def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, float]:
+def run_validation_rollout(
+    trainer, fixed_seed: int | None = None, start_phase_override: int | None = None
+) -> dict[str, float]:
     algo = trainer.algo
     env = trainer.env
     policy = algo.policy
@@ -59,13 +61,23 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
     # Eval deaths must not feed the training adaptive sampler.
     original_record_failures = getattr(env, "record_motion_failures", True)
     env.record_motion_failures = False
+    # Validation scores survival to motion end: reaching the final frame is a clean stop
+    # recorded as motion_complete (success), NOT a teleport roll-in and NOT disguised as a
+    # time_out / tracking failure. A directional run (e.g. start_phase 800) therefore stops at
+    # the final frame (~159 steps) instead of resampling and continuing.
+    original_terminate_on_motion_end = getattr(env, "terminate_on_motion_end", False)
+    env.terminate_on_motion_end = True
     # Validate over the WHOLE motion clip: lift the training episode-length time-out so envs
     # are not force-timed-out at max_episode_steps (e.g. 500) before the motion ends (959).
     # Survival is then bounded only by the real tracking-failure terminations + motion end.
     original_max_episode_steps = int(getattr(env.task_cfg, "max_episode_steps", -1))
     motion_frames = int(getattr(getattr(env, "motion", None), "num_frames", 0) or 0)
     if motion_frames > 0:
-        env.task_cfg.max_episode_steps = motion_frames
+        # The full phase-0 validation scores the final reference frame on control step
+        # ``motion_frames``. With a cap equal to motion_frames, ``episode_steps >= cap`` and
+        # motion_complete become true on the same step, falsely labelling every successful run
+        # as a timeout too. One extra step keeps motion_complete as the sole clean-success cause.
+        env.task_cfg.max_episode_steps = motion_frames + 1
     if torch.cuda.is_available() and env_device.type == "cuda":
         cuda_rng_state = torch.cuda.get_rng_state(env_device)
     if fixed_seed is not None:
@@ -73,8 +85,9 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
             torch.cuda.manual_seed_all(fixed_seed)
         torch.manual_seed(fixed_seed)
 
+    start_phase = tcfg.validation_start_phase if start_phase_override is None else start_phase_override
     validation_phase = torch.full(
-        (num_envs,), max(0, tcfg.validation_start_phase), dtype=torch.long, device=env.device
+        (num_envs,), max(0, int(start_phase)), dtype=torch.long, device=env.device
     )
     reset_t0 = time.perf_counter()
     print("[VALIDATION_RESET_START]", flush=True)
@@ -92,7 +105,7 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
     cumulative_reward = torch.zeros(num_envs, device=env.device)
     done_term_record = {
         name: torch.zeros(num_envs, dtype=torch.bool, device=env.device)
-        for name in ("time_out", "anchor_pos_bad", "anchor_ori_bad", "ee_body_bad")
+        for name in ("time_out", "motion_complete", "anchor_pos_bad", "anchor_ori_bad", "ee_body_bad")
     }
     done_debug_record = {
         name: torch.zeros(num_envs, device=env.device)
@@ -166,6 +179,7 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
     finally:
         env.task_cfg.observation_noise = original_obs_noise
         env.record_motion_failures = original_record_failures
+        env.terminate_on_motion_end = original_terminate_on_motion_end
         env.task_cfg.max_episode_steps = original_max_episode_steps
         if training_snapshot is not None:
             restore_env_state(env, training_snapshot)
@@ -187,6 +201,25 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
         "validation/return_mean": float(cumulative_reward.mean().item()),
         "validation/done_frac": float(done.float().mean().item()),
     }
+    # Phase-absolute success/failure rates over ALL initial envs (death_phase_record holds the
+    # actual motion phase scored at death). alive_at_phase_850: share that did not terminate
+    # before phase 850. wrist_fail_825_840: share that died of a wrist z-gate inside [825, 840].
+    # motion_complete_rate: share that reached the final frame.
+    alive_phase = 850
+    wall_lo, wall_hi = 825, 840
+    died = done & (~done_term_record["motion_complete"])
+    died_before_alive = died & (death_phase_record < alive_phase)
+    metrics["validation/alive_at_phase_850"] = float(1.0 - died_before_alive.float().mean().item())
+    metrics["validation/motion_complete_rate"] = float(done_term_record["motion_complete"].float().mean().item())
+    wrist_cols = [i for i, n in enumerate(env.ee_body_names) if "wrist" in n]
+    if wrist_cols:
+        wrist_bad_any = done_ee_bad_record[:, wrist_cols].any(dim=1)
+    else:
+        wrist_bad_any = torch.zeros(num_envs, dtype=torch.bool, device=env.device)
+    in_wall = (death_phase_record >= wall_lo) & (death_phase_record <= wall_hi)
+    wrist_fail = done_term_record["ee_body_bad"] & wrist_bad_any & in_wall
+    metrics["validation/wrist_fail_825_840"] = float(wrist_fail.float().mean().item())
+
     if bool(done.any()):
         failed_phases = death_phase_record[done]
         metrics.update({
@@ -194,6 +227,7 @@ def run_validation_rollout(trainer, fixed_seed: int | None = None) -> dict[str, 
             "validation/fail_phase_min": float(failed_phases.min().item()),
             "validation/fail_phase_max": float(failed_phases.max().item()),
             "validation/time_out_frac": float(done_term_record["time_out"].float().mean().item()),
+            "validation/motion_complete_frac": float(done_term_record["motion_complete"].float().mean().item()),
             "validation/anchor_pos_bad_frac": float(done_term_record["anchor_pos_bad"].float().mean().item()),
             "validation/anchor_ori_bad_frac": float(done_term_record["anchor_ori_bad"].float().mean().item()),
             "validation/ee_body_bad_frac": float(done_term_record["ee_body_bad"].float().mean().item()),

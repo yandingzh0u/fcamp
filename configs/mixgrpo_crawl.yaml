@@ -25,11 +25,15 @@ env:
   reset_noise: true
   interval_pushes: true
   observation_noise: true
-  # adaptive phase sampling (Holosoma death-frame binning, owned by env.step)
+  # adaptive phase sampling (Holosoma causal-lookback, owned by env.step): a tracking failure
+  # at frame f only feeds START frames in [f - lookback_max, f - lookback_min] (roll-in before
+  # the wall). p(s) = hard_ratio * failure-lookback + uniform_ratio * uniform.
   adaptive_motion_sampling: true
-  adaptive_uniform_ratio: 0.1
+  adaptive_hard_ratio: 0.7
+  adaptive_uniform_ratio: 0.3
+  adaptive_lookback_min: 20
+  adaptive_lookback_max: 80
   adaptive_alpha: 0.001
-  adaptive_kernel_size: 1
   # reward: official Holosoma WBT 9-term reward. action_rate is the only tunable weight.
   action_rate_weight: 0.1
 
@@ -83,9 +87,12 @@ train:
   checkpoint_dir: ""
   resume: ""
   reset_optimizer_on_resume: false
+  reset_sampler_on_resume: false
   validation_every: 0
   validation_max_steps: 500
   validation_start_phase: 0
+  # directional eval from deep in the clip (hard stand-up segment); set <0 to disable
+  validation_directional_start_phase: 800
   validation_fixed_seed: -1
   validation_preserve_state: true
   validation_observation_noise: false

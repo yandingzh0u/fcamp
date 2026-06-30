@@ -15,6 +15,8 @@ from .validation import short_body_name
 def log_validation_metrics(env, metrics: dict[str, float]) -> None:
     if "validation/steps_mean" in metrics:
         _log_validation_block(env, "VAL", "validation", metrics)
+    if "validation_directional/steps_mean" in metrics:
+        _log_validation_block(env, "VAL_DIR", "validation_directional", metrics)
     if "val_fixed/steps_mean" in metrics:
         _log_validation_block(env, "VAL_FIXED", "val_fixed", metrics)
 
@@ -53,5 +55,14 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
         f"anchor_grav={metrics.get(f'{prefix}/anchor_gravity', float('nan')):.5f} "
         f"ee_z_max={metrics.get(f'{prefix}/ee_z_max', float('nan')):.5f} "
         f"ee_z_mean={metrics.get(f'{prefix}/ee_z_mean', float('nan')):.5f}",
+        flush=True,
+    )
+    # Phase-absolute wall metrics (the §6 stand-up targets) over ALL initial envs.
+    print(
+        f"[{label}_WALL] "
+        f"alive@850={metrics.get(f'{prefix}/alive_at_phase_850', float('nan')):.4f} "
+        f"motion_complete={metrics.get(f'{prefix}/motion_complete_rate', float('nan')):.4f} "
+        f"wrist_fail_825_840={metrics.get(f'{prefix}/wrist_fail_825_840', float('nan')):.4f} "
+        f"steps_p50={metrics.get(f'{prefix}/steps_p50', float('nan')):.0f}",
         flush=True,
     )

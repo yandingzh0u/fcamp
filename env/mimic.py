@@ -109,28 +109,33 @@ class G1MimicEnv(
     def critic_observation_dim(self) -> int:
         return CRITIC_OBS_DIM
 
+    def _adaptive_phase_range(self, horizon: int) -> tuple[int, int]:
+        """Inclusive [min_phase, max_phase] valid reset/start range. Never starts on the final
+        frame: the last valid reference frame is the terminal frame, so an env spawned there
+        motion-times-out on its very first step. Hold back at least 2 frames (Holosoma retreats
+        the start to the second-to-last frame) so a fresh episode has a real tracking step."""
+        horizon = max(1, int(horizon))
+        min_phase = self.motion_start_phase
+        max_phase = min(
+            self.motion_end_phase,
+            max(0, self.motion.num_frames - max(horizon, 2)),
+        )
+        return int(min_phase), int(max_phase)
+
     def sample_phase_indices(self, num_samples: int, horizon: int) -> torch.Tensor:
         if num_samples < 0:
             raise ValueError(f"num_samples must be >= 0, got {num_samples}")
         if num_samples == 0:
             return torch.empty(0, dtype=torch.long, device=self.device)
-        horizon = max(1, int(horizon))
-        min_phase = self.motion_start_phase
-        # Never start on the final frame: the last valid reference frame is the terminal frame,
-        # so an env spawned there motion-times-out on its very first step. Hold back at least 2
-        # frames (Holosoma retreats the start to the second-to-last frame) so a fresh episode
-        # always has at least one real tracking step.
-        max_phase = min(
-            self.motion_end_phase,
-            max(0, self.motion.num_frames - max(horizon, 2)),
-        )
+        min_phase, max_phase = self._adaptive_phase_range(horizon)
         if max_phase < min_phase:
             return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
         if not self.adaptive_motion_sampling:
             return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
 
-        # Holosoma death-frame sampler: bins are weighted by the EMA of the frames the robot
-        # actually dies at (plus a uniform floor). The sampler is fed only by env.step().
+        # Holosoma causal-lookback sampler: start frames are drawn from the failure-lookback
+        # window (spawning the env shortly BEFORE the frames it dies at) plus a uniform floor.
+        # The sampler is fed only by env.step().
         return self.adaptive_sampler.sample_frames(num_samples, min_phase, max_phase)
 
     def reset(self, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
@@ -234,15 +239,14 @@ class G1MimicEnv(
 
     def _init_adaptive_motion_sampling(self) -> None:
         self.adaptive_motion_sampling = bool(self.task_cfg.adaptive_motion_sampling)
-        # ~1-second bins over the global motion-frame axis (env_fps = round(1/dt)).
-        env_fps = max(1, int(round(1.0 / self.dt)))
-        num_bins = max(1, int(self.motion.num_frames // env_fps) + 1)
         self.adaptive_sampler = AdaptiveTimestepsSampler(
             motion_time_step_total=int(self.motion.num_frames),
             device=self.device,
-            num_bins=num_bins,
-            adaptive_kernel_size=max(1, int(self.task_cfg.adaptive_kernel_size)),
-            adaptive_uniform_ratio=float(self.task_cfg.adaptive_uniform_ratio),
+            num_envs=int(self.num_envs),
+            lookback_min=int(self.task_cfg.adaptive_lookback_min),
+            lookback_max=int(self.task_cfg.adaptive_lookback_max),
+            hard_ratio=float(self.task_cfg.adaptive_hard_ratio),
+            uniform_ratio=float(self.task_cfg.adaptive_uniform_ratio),
             adaptive_alpha=float(self.task_cfg.adaptive_alpha),
         )
         # Per-env guard so the same termination is recorded by the sampler exactly once even
@@ -250,6 +254,10 @@ class G1MimicEnv(
         self._failure_recorded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         # Validation / probes flip this off so eval deaths do not feed the training sampler.
         self.record_motion_failures = True
+        # Training: motion end is NOT a termination -- a surviving env that reaches the final
+        # frame is teleported back into the clip (roll-in) with no done and the episode timer
+        # kept running. Validation flips this on so it stops + scores motion completion instead.
+        self.terminate_on_motion_end = False
 
     def _record_adaptive_failures(
         self,
@@ -263,14 +271,14 @@ class G1MimicEnv(
         NOT a failure, but a tracking failure that happens to coincide with a timeout on the same
         step IS still counted (Holosoma records any non-timeout termination cause).
 
-        Called BEFORE reset/phase-advance. Only touches ``current_bin_failed_count`` -- it does
+        Called BEFORE reset/phase-advance. Only touches ``current_failure_count`` -- it does
         NOT fold the EMA, so the reset that follows still samples from the OLD EMA. Guarded so a
         single termination is counted once per episode (matters when auto_reset=False)."""
         if not self.adaptive_motion_sampling or not self.record_motion_failures:
             return
         failure = tracking_failure & (~self._failure_recorded)
         if bool(failure.any()):
-            self.adaptive_sampler.update_current_bin_failed_count(death_phase_steps[failure])
+            self.adaptive_sampler.update_current_failure_count(death_phase_steps[failure])
             self._failure_recorded |= failure
 
     def _fold_adaptive_sampler(self) -> None:
@@ -281,17 +289,24 @@ class G1MimicEnv(
         in the sampling distribution when many envs die on the same step and are reset against it."""
         if not self.adaptive_motion_sampling or not self.record_motion_failures:
             return
-        self.adaptive_sampler.update_bin_failed_count()
+        self.adaptive_sampler.update_failure_ema()
 
     def adaptive_sampling_stats(self) -> dict[str, float]:
-        return self.adaptive_sampler.stats()
+        min_phase, max_phase = self._adaptive_phase_range(horizon=1)
+        return self.adaptive_sampler.stats(min_phase, max_phase)
 
     def _resample_finished_motions(self) -> None:
+        """Roll-in teleport: envs whose phase has advanced past the final frame are resampled to
+        a new start frame and teleported there WITHOUT a done and WITHOUT resetting the episode
+        timer (the 10s/max_episode_steps cap keeps running). The per-episode failure guard is
+        cleared so a death in the new motion segment is recorded by the sampler."""
         env_ids = torch.where(self.phase_steps >= self.motion.num_frames)[0]
         if env_ids.numel() == 0:
             return
         phase_indices = self.sample_phase_indices(env_ids.numel(), horizon=1)
         self.phase_steps[env_ids] = phase_indices
+        if hasattr(self, "_failure_recorded"):
+            self._failure_recorded[env_ids] = False
         reference = self.motion.get_frame(phase_indices)
         root_pos = reference["root_pos_w"].clone()
         root_quat = reference["root_quat_w"].clone()
