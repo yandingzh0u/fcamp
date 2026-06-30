@@ -49,7 +49,6 @@ def deterministic_sde_ode_actions(
             sigmas=sigma_schedule,
             index=step_index,
             eta=sde_eta,
-            deterministic=False,
             sample_noise=zero_step_noise,
         )
 

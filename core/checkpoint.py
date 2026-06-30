@@ -81,7 +81,7 @@ class Checkpointer:
         # relying only on a version mismatch would make the behavior accidental and would not
         # work when resuming another checkpoint with the current sampler version.
         if hasattr(t.env, "adaptive_sampler"):
-            reset_sampler = bool(getattr(t.train_cfg, "reset_sampler_on_resume", False))
+            reset_sampler = bool(t.train_cfg.reset_sampler_on_resume)
             if reset_sampler:
                 t.env.adaptive_sampler.init_buffers()
                 if hasattr(t.env, "_failure_recorded"):

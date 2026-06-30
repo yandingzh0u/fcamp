@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from torch.nn import functional as F
-
-MIN_POLICY_OBS_DIM = 154
 
 
 def _activation(name: str) -> nn.Module:
@@ -28,7 +25,6 @@ class FlowMatchingPolicy(nn.Module):
         horizon: int = 1,
         hidden_dims: tuple[int, ...] = (512, 256, 128),
         activation: str = "elu",
-        init_noise_std: float = 1.0,
         action_squash_scale: float = 5.0,
     ):
         super().__init__()
@@ -38,9 +34,8 @@ class FlowMatchingPolicy(nn.Module):
         # `horizon`-frame action chunk.
         self.chunk_dim = horizon * action_dim
         self.action_chunk_dim = horizon * action_dim
-        self.obs_dim = max(obs_dim, MIN_POLICY_OBS_DIM)
+        self.obs_dim = obs_dim
         self.hidden_dims = tuple(hidden_dims)
-        self.activation = activation
         if not self.hidden_dims:
             raise ValueError("hidden_dims must contain at least one layer")
         layers: list[nn.Module] = []
@@ -51,17 +46,16 @@ class FlowMatchingPolicy(nn.Module):
             in_dim = hidden_dim
         layers.append(nn.Linear(in_dim, self.chunk_dim))
         self.velocity_net = nn.Sequential(*layers)
-        self.init_noise_std = float(init_noise_std)
         if action_squash_scale <= 0.0:
             raise ValueError(f"action_squash_scale must be > 0, got {action_squash_scale}")
         self.action_squash_scale = float(action_squash_scale)
 
     def _prepare_observation(self, observation: torch.Tensor) -> torch.Tensor:
-        if observation.shape[-1] == self.obs_dim:
-            return observation
-        if observation.shape[-1] > self.obs_dim:
-            return observation[..., : self.obs_dim]
-        return F.pad(observation, (0, self.obs_dim - observation.shape[-1]))
+        if observation.shape[-1] != self.obs_dim:
+            raise ValueError(
+                f"Expected observation dim {self.obs_dim}, got {observation.shape[-1]}"
+            )
+        return observation
 
     def _validate_inputs(self, observation: torch.Tensor, flow_noise: torch.Tensor, steps: int) -> None:
         if steps < 1:

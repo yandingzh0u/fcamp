@@ -1,7 +1,7 @@
 """Play / visualize a trained checkpoint in IsaacLab (any algorithm).
 
     python play.py --checkpoint runs/<run>/checkpoints/last.pt [--num_envs 4] [--start_phase 0] \
-        [--loop_motion] [--reset_on_done] [--env_spacing 8]
+        [--loop_motion] [--reset_on_done]
 
 Reuses the unified config + algorithm system: the checkpoint stores asdict(Config), so we
 rebuild EnvCfg/AlgoCfg/TrainCfg, construct the env + the same Algorithm used for training, load
@@ -24,7 +24,6 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Play a trained checkpoint in IsaacLab.")
 parser.add_argument("--checkpoint", type=str, required=True, help="Path to a saved checkpoint (.pt).")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to play.")
-parser.add_argument("--env_spacing", type=float, default=2.5, help="Grid spacing between envs (m). Increase to spread per-env slopes apart for clean viz.")
 parser.add_argument("--max_steps", type=int, default=0, help="Hard stop. 0 runs until the app closes.")
 parser.add_argument("--start_phase", type=int, default=-1, help="Reset motion phase. Negative uses motion_start_phase.")
 parser.add_argument("--motion_file", type=str, default="", help="Optional motion npz override.")
@@ -36,7 +35,6 @@ parser.add_argument("--render_every", type=int, default=1, help="Render every N 
 parser.add_argument("--real_time", action="store_true", default=False, help="Throttle to wall-clock. GUI enables this automatically.")
 parser.add_argument("--no_real_time", action="store_true", default=False, help="Disable automatic wall-clock throttle in GUI.")
 parser.add_argument("--fix_root_link", action="store_true", default=False, help="Lock the robot base in place.")
-parser.add_argument("--contact_debug_vis", action=argparse.BooleanOptionalAction, default=False, help="Show contact-sensor debug viz (expensive).")
 parser.add_argument("--observation_noise", action=argparse.BooleanOptionalAction, default=False, help="Actor observation noise. Default off for clean deterministic playback.")
 parser.add_argument("--interval_pushes", action=argparse.BooleanOptionalAction, default=None, help="Override interval pushes. Default keeps checkpoint setting.")
 parser.add_argument("--reset_noise", action=argparse.BooleanOptionalAction, default=None, help="Override reset pose/velocity noise. Default keeps checkpoint setting.")

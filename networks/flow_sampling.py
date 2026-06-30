@@ -36,27 +36,20 @@ def flow_grpo_step(
     index: int,
     eta: float = 0.7,
     prev_sample: torch.Tensor | None = None,
-    deterministic: bool = False,
     sample_noise: torch.Tensor | None = None,
-    sample_noise_std: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """One MixGRPO SDE-ODE transition.
 
     Returns (prev_sample, log_prob) where log_prob is the joint chunk transition score for one
     flow step, shape (B,) (sum over every latent dimension).
     """
-    sigma = sigmas[index].to(model_output.device)
-    sigma_prev = sigmas[index + 1].to(model_output.device)
-    dt = sigma_prev - sigma
     prev_sample_mean, std, _ = flow_sde_transition(model_output, latents, sigmas, index, eta=eta)
 
     if prev_sample is None:
-        if deterministic:
-            prev_sample = latents + dt * model_output
-        elif bool(torch.as_tensor(std).abs().max() > 1e-12):
+        if bool(torch.as_tensor(std).abs().max() > 1e-12):
             if sample_noise is None:
                 sample_noise = torch.randn_like(model_output)
-            prev_sample = prev_sample_mean + std * float(sample_noise_std) * sample_noise
+            prev_sample = prev_sample_mean + std * sample_noise
         else:
             prev_sample = prev_sample_mean
 

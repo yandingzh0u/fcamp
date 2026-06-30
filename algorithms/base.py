@@ -24,10 +24,6 @@ import torch
 
 
 class Algorithm(ABC):
-    # Whether collect() returns the next starting observation under "next_observation"
-    # so the loop can avoid an extra reset. Informational; the loop calls reset_for_update.
-    name: str = "base"
-
     def __init__(self, cfg, env, simulation_app):
         self.cfg = cfg            # AlgoCfg
         self.env = env

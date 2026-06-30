@@ -35,19 +35,13 @@ class EnvCfg:
     interval_pushes: bool = True
     observation_noise: bool = True
     adaptive_motion_sampling: bool = True
-    # Holosoma failure-bin sampler + optional causal second stage. Base: p_b ∝ bin_failed_ema +
-    # uniform_ratio/num_bins (additive floor). Blend: p = (1-a_cau)·p_official + a_cau·p_causal,
-    # a_cau = beta·causal_max_ratio, beta ramps with death concentration at the bottleneck.
+    # Holosoma official failure-bin sampler: p_b ∝ bin_failed_ema + uniform_ratio/num_bins
+    # (an ADDITIVE uniform floor, NOT a fixed mixture weight).
     adaptive_num_bins: int = 0          # 0 -> auto ⌊num_frames/fps⌋+1 (~1s bins)
     adaptive_uniform_ratio: float = 0.1  # additive floor (official), NOT a fixed mixture weight
     adaptive_kernel_size: int = 1
     adaptive_lambda: float = 0.8
     adaptive_alpha: float = 0.001
-    adaptive_causal_max_ratio: float = 0.5
-    adaptive_causal_horizon: int = 0    # 0 -> injected by algorithm (= num_steps_per_env)
-    adaptive_causal_decay: float = 0.0  # 0 -> injected by algorithm (= gamma·lambda; gamma for GRPO)
-    adaptive_causal_arm_lo: float = 0.5
-    adaptive_causal_arm_hi: float = 0.8
     action_rate_weight: float = 0.1
     # GRPO observation-noise sharing: set by the algorithm (num_generations) at build time.
     num_generations: int = 1
@@ -73,7 +67,6 @@ class AlgoCfg:
     num_generations: int = 4
     # rollout
     rollout_env_steps: int = 48
-    chunks_per_rollout: int = 24
     tail_bootstrap_steps: int = 80
     terminal_penalty: float = 50.0
     discount_gamma: float = 0.99
@@ -99,7 +92,7 @@ class AlgoCfg:
     policy_lr: float = 1.0e-3
     value_lr: float = 1.0e-3   # critic LR. Decoupled from actor (adaptive) LR so the value head's
                                # large early gradient (esp. with terminal_penalty) cannot drag the
-                               # actor's adaptive schedule. <=0 -> follow policy_lr.
+                               # actor's adaptive schedule. Must be > 0.
 
     # --- PPO (actor-critic) specific. Unused by MixGRPO. ---
     num_steps_per_env: int = 24
@@ -127,9 +120,7 @@ class AlgoCfg:
     fpo_adv_clamp: float = 5.0                    # symmetric advantage clamp before the surrogate.
     cfm_loss_clamp_neg_adv: bool = True           # clamp the new CFM loss where advantage < 0.
     cfm_loss_clamp_neg_adv_max: float = 20.0      # cap for that negative-advantage CFM clamp.
-    trust_region_mode: str = "aspo"              # ppo | spo | aspo.
     num_micro_batches: int = 1                    # gradient-accum microbatches per logical minibatch.
-    storage_action_noise_std: float = 0.0         # extra noise added to stored actions (off by default).
 
 
 @dataclass
@@ -141,6 +132,7 @@ class TrainCfg:
     checkpoint_dir: str = ""
     resume: str = ""
     reset_optimizer_on_resume: bool = False
+    reset_sampler_on_resume: bool = False
     validation_every: int = 0
     validation_max_steps: int = 500
     validation_start_phase: int = 0
@@ -154,8 +146,6 @@ class TrainCfg:
     validation_done_frac_early_stop: float = 0.98
     target_validation_steps: int = 0
     success_checkpoint_name: str = "success_10s.pt"
-    debug_probe: bool = False
-    debug_probe_every: int = 1
 
 
 @dataclass

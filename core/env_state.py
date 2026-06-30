@@ -14,20 +14,12 @@ def snapshot_env_state(env) -> dict[str, torch.Tensor]:
         "root_state_w": robot.data.root_state_w.clone(),
         "joint_pos": robot.data.joint_pos.clone(),
         "joint_vel": robot.data.joint_vel.clone(),
-        "default_root_state": env.default_root_state.clone(),
-        "default_joint_pos": env.default_joint_pos.clone(),
-        "default_joint_vel": env.default_joint_vel.clone(),
-        "default_action_joint_pos": env.default_action_joint_pos.clone(),
-        "default_action_joint_vel": env.default_action_joint_vel.clone(),
         "phase_steps": env.phase_steps.clone(),
         "episode_steps": env.episode_steps.clone(),
         "last_action": env.last_action.clone(),
-        "prev_action": env.prev_action.clone(),
         "next_push_step": env.next_push_step.clone(),
         "adaptive_bin_failed_count": env.adaptive_sampler.bin_failed_count.clone(),
         "adaptive_current_bin_failed_count": env.adaptive_sampler.current_bin_failed_count.clone(),
-        "adaptive_frame_failed_count": env.adaptive_sampler.frame_failed_count.clone(),
-        "adaptive_current_frame_failed_count": env.adaptive_sampler.current_frame_failed_count.clone(),
         "failure_recorded": env._failure_recorded.clone(),
     }
 
@@ -49,21 +41,11 @@ def restore_env_state(env, snapshot: dict[str, torch.Tensor]) -> None:
     env.phase_steps = snapshot["phase_steps"].clone()
     env.episode_steps = snapshot["episode_steps"].clone()
     env.last_action = snapshot["last_action"].clone()
-    env.prev_action = snapshot.get("prev_action", torch.zeros_like(env.last_action)).clone()
     env.next_push_step = snapshot["next_push_step"].clone()
-    env.default_root_state = snapshot["default_root_state"].clone()
-    env.default_joint_pos = snapshot["default_joint_pos"].clone()
-    env.default_joint_vel = snapshot["default_joint_vel"].clone()
-    env.default_action_joint_pos = snapshot["default_action_joint_pos"].clone()
-    env.default_action_joint_vel = snapshot["default_action_joint_vel"].clone()
     sampler = env.adaptive_sampler
     sampler.bin_failed_count.copy_(snapshot["adaptive_bin_failed_count"].to(sampler.bin_failed_count))
     sampler.current_bin_failed_count.copy_(
         snapshot["adaptive_current_bin_failed_count"].to(sampler.current_bin_failed_count)
-    )
-    sampler.frame_failed_count.copy_(snapshot["adaptive_frame_failed_count"].to(sampler.frame_failed_count))
-    sampler.current_frame_failed_count.copy_(
-        snapshot["adaptive_current_frame_failed_count"].to(sampler.current_frame_failed_count)
     )
     env._failure_recorded = snapshot["failure_recorded"].clone()
     env.scene.update(env.physics_dt)

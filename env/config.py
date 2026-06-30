@@ -201,17 +201,12 @@ class MimicEnvConfig(EnvConfig):
     motion_start_phase: int = 0
     motion_end_phase: int = -1
     adaptive_motion_sampling: bool = True
-    # Holosoma failure-bin sampler + optional causal second stage (see core/config.py for the math).
+    # Holosoma official failure-bin sampler (see core/config.py for the math).
     adaptive_num_bins: int = 0          # 0 -> auto ⌊num_frames/fps⌋+1 (~1s bins)
     adaptive_uniform_ratio: float = 0.1  # additive floor (official), NOT a fixed mixture weight
     adaptive_kernel_size: int = 1
     adaptive_lambda: float = 0.8
     adaptive_alpha: float = 0.001
-    adaptive_causal_max_ratio: float = 0.5
-    adaptive_causal_horizon: int = 0    # 0 -> injected by algorithm (= num_steps_per_env)
-    adaptive_causal_decay: float = 0.0  # 0 -> injected by algorithm (= gamma·lambda; gamma for GRPO)
-    adaptive_causal_arm_lo: float = 0.5
-    adaptive_causal_arm_hi: float = 0.8
     reset_noise: bool = True
     interval_pushes: bool = True
     observation_noise: bool = True

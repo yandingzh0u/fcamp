@@ -69,10 +69,6 @@ class FakeEnv:
         self.motion = types.SimpleNamespace(num_frames=100)
         self._gen = torch.Generator().manual_seed(123)
         self._step = 0
-        self.sampler_calls = []
-
-    def update_adaptive_motion_statistics(self, phases, failed, rollout_steps):
-        self.sampler_calls.append((phases.clone(), failed.clone(), int(rollout_steps)))
 
     def _obs(self):
         return torch.randn(self.num_envs, self.observation_dim, generator=self._gen)
@@ -124,16 +120,15 @@ def _cfg(num_micro_batches=1):
     # Single-step FPO++ (official-aligned): horizon=1, flow acts directly in action space.
     return types.SimpleNamespace(
         action_dim=3, horizon=1, actor_hidden_dims=(32, 32), activation="elu",
-        init_noise_std=1.0, action_squash_scale=5.0,
         actor_scale=1.0, mlp_output_scale=1.0, timestep_embed_dim=8,
         cfm_loss_reduction="mean", action_perturb_std=0.1, cfm_loss_t_inverse_cdf_beta=1.0,
         empirical_normalization=True, policy_lr=1e-4, weight_decay=1e-4,
         fpo_num_mc=6, flow_steps=4, fpo_delta_clip=3.0, fpo_cfm_loss_clamp=3.0,
         cfm_loss_clamp_neg_adv=True, cfm_loss_clamp_neg_adv_max=20.0, fpo_adv_clamp=5.0,
-        schedule="adaptive", desired_kl=1e-4, trust_region_mode="aspo",
-        num_micro_batches=num_micro_batches, storage_action_noise_std=0.0,
+        schedule="adaptive", desired_kl=1e-4,
+        num_micro_batches=num_micro_batches,
         init_at_random_ep_len=True,
-        num_steps_per_env=6, discount_gamma=0.99, terminal_penalty=50.0,
+        num_steps_per_env=6, discount_gamma=0.99,
         num_mini_batches=2, num_learning_epochs=2, clip_range=0.01,
         value_loss_coef=1.0, max_grad_norm=1.0, gae_lambda=0.95, value_lr=1.0e-3,
     )
@@ -179,17 +174,12 @@ def test_end_to_end():
     check("no chunk-only keys (latent/fail/lost_frames/raw_obs) in rollout",
           not any(k in rollout for k in ("latent", "fail", "lost_frames", "raw_obs")))
 
-    # Survival objective: env 0 dies (non-timeout) every 5th step; its reward must be pushed far
-    # below the env reward scale by -terminal_penalty, and the failure must be recorded.
+    # FPO uses the env reward as-is (no terminal_penalty shaping); the death must still be recorded.
     rewards = rollout["rewards"]
-    check("terminal_penalty applied to failure rewards (min << env scale)",
-          float(rewards.min().item()) < -10.0)
+    check("rollout rewards finite", bool(torch.isfinite(rewards).all()))
     check("first_done_step recorded for env 0 (failure)", int(rollout["first_done_step"][0].item()) < T)
     check("env 0 death recorded as ee_body_bad", bool(rollout["first_done_ee_body"][0].item()))
     check("env 0 not a timeout", not bool(rollout["first_done_timeout"][0].item()))
-    # The adaptive sampler is now owned/updated by env.step() (death-frame binning), so the
-    # algorithm must NOT call back into it.
-    check("algorithm does not write the sampler", len(env.sampler_calls) == 0)
 
     # Snapshot actor params; one update must change them.
     before = [p.detach().clone() for p in algo.actor.parameters()]

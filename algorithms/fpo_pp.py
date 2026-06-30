@@ -77,8 +77,6 @@ def aspo_objective(ratio: torch.Tensor, advantage: torch.Tensor, clip: float) ->
 
 
 class FPOPP(Algorithm):
-    name = "fpo_pp"
-
     # ------------------------------------------------------------------ build
     def build(self) -> None:
         cfg = self.cfg
@@ -96,11 +94,6 @@ class FPOPP(Algorithm):
         self.num_act = int(cfg.action_dim)
         self.horizon = 1
         self.num_steps_per_env = max(1, int(cfg.num_steps_per_env))
-        # Bind the adaptive sampler's causal predecessor window to FPO's rollout credit horizon
-        # (T-step GAE rollout, discounted by (gamma*lambda)^k).
-        inject_credit = getattr(env, "configure_adaptive_credit", None)
-        if callable(inject_credit):
-            inject_credit(self.num_steps_per_env, float(cfg.discount_gamma) * float(cfg.gae_lambda))
         self.actor_obs_dim = env.observation_dim
         self.critic_obs_dim = env.critic_observation_dim
         device = env.device
@@ -136,11 +129,12 @@ class FPOPP(Algorithm):
         #   group "actor"  -> adaptive-KL learning rate (moves at runtime)
         #   group "critic" -> fixed value_lr
         # Crucially the actor and critic gradients are CLIPPED SEPARATELY in update() (see below),
-        # so the value head's large early gradient -- inflated by the terminal_penalty death credit
-        # -- can no longer dominate a shared global grad-norm and squash the actor's tiny gradient.
+        # so the value head's large early gradient can no longer dominate a shared global
+        # grad-norm and squash the actor's tiny gradient.
         self.learning_rate = float(cfg.policy_lr)
-        _value_lr = float(getattr(cfg, "value_lr", 0.0) or 0.0)
-        self.critic_learning_rate = _value_lr if _value_lr > 0.0 else self.learning_rate
+        if float(cfg.value_lr) <= 0.0:
+            raise ValueError(f"value_lr must be > 0, got {cfg.value_lr}")
+        self.critic_learning_rate = float(cfg.value_lr)
         self._optimizer = torch.optim.AdamW(
             [
                 {"params": list(self.actor.parameters()), "lr": self.learning_rate, "name": "actor"},
@@ -159,14 +153,7 @@ class FPOPP(Algorithm):
         self.adv_clamp = float(cfg.fpo_adv_clamp)                 # symmetric advantage clamp (5.0)
         self.schedule = str(cfg.schedule)                        # "adaptive"
         self.desired_kl = float(cfg.desired_kl)                  # 1e-4
-        self.trust_region_mode = str(cfg.trust_region_mode)      # "aspo"
         self.num_micro_batches = max(1, int(cfg.num_micro_batches))  # gradient-accum microbatches
-        self.storage_action_noise_std = float(cfg.storage_action_noise_std)  # 0.0
-        # Survival objective: non-timeout deaths get -terminal_penalty in their reward so the
-        # failure enters GAE directly (the crawl task has no env-level termination reward and a
-        # rollout often does not see the death, so bootstrap truncation alone is too weak). This
-        # mirrors MixGRPO's terminal_penalty. Set 0 to disable (pure official tracking behaviour).
-        self.terminal_penalty = float(cfg.terminal_penalty)
         self.lr_min = 1e-5
         self.lr_max = 1e-2
 
@@ -299,8 +286,6 @@ class FPOPP(Algorithm):
                 value = self.critic.evaluate(critic_obs_n).detach()
 
                 action = self.actor.act(actor_obs_n).detach()  # (N, A), linear scale + perturb
-                if self.storage_action_noise_std > 0.0:
-                    action = action + self.storage_action_noise_std * torch.randn_like(action)
                 action_abs_max = max(action_abs_max, float(action.abs().max().item()))
 
                 cfm_eps = torch.randn(N, M, A, device=device)
@@ -315,13 +300,6 @@ class FPOPP(Algorithm):
                 done_b = done.bool()
                 time_outs = info["done_terms"]["time_out"]
                 time_outs_b = time_outs.bool()
-                # Survival objective: a non-timeout death is a bad trajectory. Subtract
-                # terminal_penalty from its reward so the death enters GAE directly. Timeouts are
-                # truncations, NOT failures, and keep the value bootstrap below instead.
-                failure = done_b & ~time_outs_b
-                if self.terminal_penalty != 0.0 and bool(failure.any()):
-                    reward = reward - self.terminal_penalty * failure.to(reward.dtype)
-
                 # Record the first termination per env (phase + cause) for [FIRST_FAILURE] /
                 # adaptive phase sampling.
                 newly_done = (~ever_done) & done_b
@@ -616,7 +594,6 @@ class FPOPP(Algorithm):
         metrics["rollout/first_failure_anchor_ori_frac"] = float((rollout["first_done_anchor_ori"] & died).float().mean().item())
         metrics["rollout/first_failure_timeout_frac"] = float((timeout & died).float().mean().item())
         metrics["rollout/failure_frac"] = float((died & (~timeout)).float().mean().item())
-        metrics["fpo/terminal_penalty"] = float(self.terminal_penalty)
 
     def _build_metrics(self, rollout, agg, collect_time, update_time) -> dict:
         rewards = rollout["rewards"]
@@ -709,16 +686,11 @@ class FPOPP(Algorithm):
 
     def _add_sampler_metrics(self, metrics: dict) -> None:
         """Adaptive-sampler diagnostics ([SAMPLER]): the official failure-bin distribution
-        (top_bin/top_prob/entropy/failed_sum), the dominant failure frame, and the causal
-        second-stage blend state (bottleneck_concentration -> causal_beta).
-        Owned by env.step(); the algorithm only reads it. Absent when the env exposes no sampler
-        (e.g. test fakes)."""
+        (top_bin/top_prob/entropy/failed_sum) and the dominant failure bin. Owned by env.step();
+        the algorithm only reads it. Absent when the env exposes no sampler (e.g. test fakes)."""
         stats_fn = getattr(self.env, "adaptive_sampling_stats", None)
         stats = stats_fn() if callable(stats_fn) else {}
-        for key in (
-            "top_bin", "top_prob", "failed_sum", "entropy", "peak_bin",
-            "peak_fail_frame", "bottleneck_concentration", "causal_beta",
-        ):
+        for key in ("top_bin", "top_prob", "failed_sum", "entropy", "peak_bin"):
             metrics[f"sampler/{key}"] = float(stats.get(key, float("nan")))
 
     # ----------------------------------------------------------------- shared metric helpers
@@ -897,9 +869,6 @@ class FPOPP(Algorithm):
             f"top_bin={metrics.get('sampler/top_bin', float('nan')):.0f} "
             f"top_prob={metrics.get('sampler/top_prob', float('nan')):.3f} "
             f"peak_bin={metrics.get('sampler/peak_bin', float('nan')):.0f} "
-            f"peak_fail={metrics.get('sampler/peak_fail_frame', float('nan')):.0f} "
-            f"bottleneck={metrics.get('sampler/bottleneck_concentration', float('nan')):.3f} "
-            f"causal_beta={metrics.get('sampler/causal_beta', float('nan')):.3f} "
             f"failed_sum={metrics.get('sampler/failed_sum', float('nan')):.4f} "
             f"entropy={metrics.get('sampler/entropy', float('nan')):.4f}",
             flush=True,
@@ -953,8 +922,7 @@ class FPOPP(Algorithm):
             f"cfm_reduction={self.actor.cfm_loss_reduction} clip={cfg.clip_range} "
             f"cfm_diff_clamp_max={self.cfm_diff_clamp_max} cfm_loss_clamp={self.cfm_loss_clamp} "
             f"adv_clamp={self.adv_clamp} schedule={self.schedule} desired_kl={self.desired_kl} "
-            f"trust_region={self.trust_region_mode} num_micro_batches={self.num_micro_batches} "
-            f"terminal_penalty={self.terminal_penalty} "
+            f"num_micro_batches={self.num_micro_batches} "
             f"num_learning_epochs={cfg.num_learning_epochs} num_mini_batches={cfg.num_mini_batches} "
             f"gamma={cfg.discount_gamma} lam={cfg.gae_lambda} value_loss_coef={cfg.value_loss_coef} "
             f"lr={cfg.policy_lr} critic_lr={self.critic_learning_rate} weight_decay={cfg.weight_decay} "

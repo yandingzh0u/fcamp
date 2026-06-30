@@ -36,21 +36,14 @@ env:
   reset_noise: true
   interval_pushes: true
   observation_noise: true
-  # adaptive phase sampling (Holosoma failure-bin, owned by env.step) + optional causal second
-  # stage. Base: p_b ∝ bin_failed_ema + uniform_ratio/num_bins. Blend p=(1-a_cau)*p_official +
-  # a_cau*p_causal; a_cau=beta*causal_max_ratio ramps with death concentration at the bottleneck;
-  # causal predecessor starts are bound to the rollout credit window [f-(H-1), f-1].
+  # adaptive phase sampling (Holosoma official failure-bin, owned by env.step):
+  # p_b ∝ bin_failed_ema + uniform_ratio/num_bins (additive uniform floor).
   adaptive_motion_sampling: true
   adaptive_num_bins: 0            # 0 -> auto floor(num_frames/fps)+1 (~1s bins; 959->20)
   adaptive_uniform_ratio: 0.1    # additive floor (official), not a fixed mixture weight
   adaptive_kernel_size: 1
   adaptive_lambda: 0.8
   adaptive_alpha: 0.001
-  adaptive_causal_max_ratio: 0.5 # set 0 (via --set) to run the pure official baseline
-  adaptive_causal_horizon: 0     # 0 -> injected by algorithm (= num_steps_per_env = 24)
-  adaptive_causal_decay: 0.0     # 0 -> injected by algorithm (= gamma*lambda = 0.9405)
-  adaptive_causal_arm_lo: 0.5
-  adaptive_causal_arm_hi: 0.8
   # reward: official Holosoma WBT 9-term reward. action_rate is the only tunable weight.
   action_rate_weight: 0.1
 
@@ -61,7 +54,6 @@ algo:
   horizon: 1
   actor_hidden_dims: [1024, 512, 256]
   activation: elu
-  action_squash_scale: 5.0     # unused by the official Flow actor (kept for config compatibility)
   actor_scale: 1.0             # action = actor_scale * x_t (official, linear). MUST stay 1.0: CFM uses
                                # scaled_action = action/actor_scale, so actor_scale<1 inflates the
                                # effective action_perturb_std (0.1/scale) in the CFM target and
@@ -76,20 +68,12 @@ algo:
   flow_steps: 16               # Euler steps generating one action (official default 64; 16 is a
                                # compute/quality compromise -- 4 is too coarse, 64 makes collect ~16x
                                # slower for this single-step actor)
-  init_noise_std: 1.0          # informational; Euler uses standard N(0, I) noise
-  eval_initial_noise: zero
   # rollout
   num_steps_per_env: 24        # rollout horizon per update (NOT an episode cap -- envs run
                                # continuously across updates with critic bootstrap at the boundary).
                                # 24 halves collect/update cost & CFM cache vs the official 48; 8192
                                # envs still give plenty of terminations. Official G1 tracking = 48.
   discount_gamma: 0.99
-  # terminal_penalty: 0.0 = OFFICIAL RL logic. The FPO collect does NOT inject any extra death
-  # penalty into the reward; env dense reward enters storage as-is, timeout does value bootstrap,
-  # and a failure `done` only truncates GAE. PPO/MixGRPO already prove the env reward+termination
-  # is learnable, so FPO must not modify the MDP reward. (>0 re-enables the -penalty*failure
-  # injection in collect(); left configurable but off by default.)
-  terminal_penalty: 0.0
   # FPO++ objective (official G1 motion-tracking values)
   fpo_num_mc: 16               # Monte-Carlo (eps, t) samples per action (Eq. 10)
   fpo_delta_clip: 3.0          # STE clamp on log-ratio (l_old - l_new) before exp() (cfm_diff_clamp_max)
@@ -98,7 +82,6 @@ algo:
   cfm_loss_clamp_neg_adv_max: 20.0
   fpo_adv_clamp: 5.0           # symmetric advantage clamp before the surrogate
   clip_range: 0.01             # ASPO/PPO clip epsilon (official tracking)
-  trust_region_mode: aspo
   # actor-critic optimization
   schedule: adaptive           # KL-driven adaptive learning rate
   desired_kl: 1.0e-4           # target flow-endpoint KL drift (official)
@@ -115,7 +98,6 @@ algo:
   max_grad_norm: 1.0
   empirical_normalization: true
   init_at_random_ep_len: true
-  storage_action_noise_std: 0.0
 
 train:
   seed: 0
@@ -136,5 +118,3 @@ train:
   validation_done_frac_early_stop: 0.98
   target_validation_steps: 0
   success_checkpoint_name: success_10s.pt
-  debug_probe: false
-  debug_probe_every: 1

@@ -11,10 +11,8 @@ class MimicStepMixin:
         actions: torch.Tensor,
         auto_reset: bool = False,
         reset_horizon: int = 1,
-        loop_motion: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         previous_action = self.last_action.clone()
-        previous_previous_action = self.prev_action.clone()
         self._apply_action_targets(actions)
         for _ in range(self.decimation):
             self.scene.write_data_to_sim()
@@ -37,9 +35,8 @@ class MimicStepMixin:
 
         # Death frame = the phase that reward/termination are scored at (pre-advance).
         termination_phase_steps = self.phase_steps.clone()
-        reward, reward_terms = self.compute_reward(actions, previous_action, previous_previous_action)
+        reward, reward_terms = self.compute_reward(actions, previous_action)
         done, done_terms, debug_terms = self.compute_termination()
-        terminal_observation = None
         terminal_critic_observation = None
 
         # The env owns the adaptive sampler: record this step's tracking-failure death frames
@@ -51,9 +48,8 @@ class MimicStepMixin:
         self._record_adaptive_failures(tracking_failure, termination_phase_steps)
 
         if auto_reset and bool(done.any()):
-            # Capture the terminal observation at ref(t) (robot's post-physics death state)
-            # before reset, then reset done envs back into the clip.
-            terminal_observation = self.get_observation().clone()
+            # Capture the terminal critic observation at ref(t) (robot's post-physics death
+            # state) before reset, then reset done envs back into the clip.
             terminal_critic_observation = self.get_critic_observation().clone()
             env_ids = done.nonzero(as_tuple=False).squeeze(-1)
             reset_phases = self.sample_phase_indices(env_ids.numel(), horizon=max(1, reset_horizon))
@@ -74,23 +70,17 @@ class MimicStepMixin:
         # the reset above used the old EMA (official update order).
         self._fold_adaptive_sampler()
 
-        self.prev_action = previous_action.clone()
         self.last_action = actions.clone()
         if auto_reset and bool(done.any()):
-            self.prev_action[done] = 0.0
             self.last_action[done] = 0.0
         self._apply_interval_pushes()
         observation = self.get_observation()
         info = {
-            "phase_steps": self.phase_steps.clone(),
             "reward_terms": reward_terms,
             "done_terms": done_terms,
             "debug_terms": debug_terms,
             "termination_phase_steps": termination_phase_steps,
         }
-        if terminal_observation is not None:
-            info["final_observation"] = terminal_observation
-            info["_final_observation"] = done.clone()
         if terminal_critic_observation is not None:
             info["final_critic_observation"] = terminal_critic_observation
         return observation, reward, done, info

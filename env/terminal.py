@@ -21,13 +21,9 @@ class MimicTerminationMixin:
 
         anchor_z_error = torch.abs(reference["anchor_pos_w"][:, 2] - context["robot_anchor_pos_w"][:, 2])
         anchor_gravity_z_error = (motion_projected_gravity_b[:, 2] - robot_projected_gravity_b[:, 2]).abs()
-        # Full projected-gravity vector angle kept as a DIAGNOSTIC only (logged), no longer a
-        # termination gate. The official holosoma BadTrackingZOnly terminates purely on the
-        # z-component of projected gravity (anchor_gravity_z_error > 0.8); the previously added
-        # full-angle hard gate was non-official and was itself killing validation, so it is
-        # removed from the done condition to restore the official task feasibility region.
-        anchor_gravity_dot = torch.sum(motion_projected_gravity_b * robot_projected_gravity_b, dim=-1)
-        anchor_gravity_angle = torch.acos(torch.clamp(anchor_gravity_dot, -1.0, 1.0))
+        # The official holosoma BadTrackingZOnly terminates purely on the z-component of projected
+        # gravity (anchor_gravity_z_error > 0.8); the previously added full-angle hard gate was
+        # non-official and was itself killing validation, so it is not part of the done condition.
         robot_anchor_height = context["robot_anchor_pos_w"][:, 2]
         robot_anchor_tilt = torch.acos(torch.clamp(-robot_projected_gravity_b[:, 2], -1.0, 1.0)).abs()
         anchor_pos_bad = anchor_z_error > ANCHOR_Z_TERMINATION_THRESHOLD
@@ -43,8 +39,6 @@ class MimicTerminationMixin:
         ee_body_bad = torch.any(termination_z_error > EE_Z_TERMINATION_THRESHOLD, dim=-1)
         ee_z_error_max = ee_z_error.max(dim=-1).values
         ee_z_error_mean = ee_z_error.mean(dim=-1)
-        termination_z_error_max = termination_z_error.max(dim=-1).values
-        termination_z_error_mean = termination_z_error.mean(dim=-1)
         time_out = self.episode_steps >= self.task_cfg.max_episode_steps
         # Motion end is a SEPARATE event from the episode-length time-out. During training it is
         # not a termination at all (the env teleports the survivor back into the clip with no
@@ -65,12 +59,9 @@ class MimicTerminationMixin:
         }, {
             "anchor_z_error": anchor_z_error,
             "anchor_gravity_z_error": anchor_gravity_z_error,
-            "anchor_gravity_angle": anchor_gravity_angle,
             "robot_anchor_height": robot_anchor_height,
             "robot_anchor_tilt": robot_anchor_tilt,
             "ee_z_error_max": ee_z_error_max,
             "ee_z_error_mean": ee_z_error_mean,
             "ee_z_error_by_body": ee_z_error,
-            "termination_z_error_max": termination_z_error_max,
-            "termination_z_error_mean": termination_z_error_mean,
         }

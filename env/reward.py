@@ -12,7 +12,6 @@ class MimicRewardMixin:
         self,
         actions: torch.Tensor,
         previous_action: torch.Tensor,
-        previous_previous_action: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Official Holosoma WBT tracking reward -- exactly nine terms, all scaled by dt.
 

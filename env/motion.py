@@ -41,9 +41,7 @@ class MimicMotionReference:
             raise FileNotFoundError(f"Motion file not found: {motion_file}")
 
         data = np.load(motion_file, allow_pickle=True)
-        self.motion_file = motion_file
         self.device = device
-        self.fps = int(np.asarray(data["fps"]).reshape(-1)[0])
 
         if "joint_names" in data.files:
             frame = self._load_holosoma(data, robot_body_names, action_joint_names)

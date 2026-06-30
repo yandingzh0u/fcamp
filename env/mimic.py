@@ -90,7 +90,6 @@ class G1MimicEnv(
             self.task_cfg.max_episode_steps = int(self.motion.num_frames)
 
         self.last_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
-        self.prev_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self.phase_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.episode_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.motion_start_phase = max(0, min(int(cfg.motion_start_phase), self.motion.num_frames - 1))
@@ -133,9 +132,8 @@ class G1MimicEnv(
         if not self.adaptive_motion_sampling:
             return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
 
-        # Holosoma failure-bin sampler (+ optional causal second stage). Start frames are drawn
-        # from the official death-frame bin distribution, blended with causal predecessor starts
-        # once deaths concentrate at the bottleneck. The sampler is fed only by env.step().
+        # Holosoma failure-bin sampler. Start frames are drawn from the official death-frame bin
+        # distribution. The sampler is fed only by env.step().
         return self.adaptive_sampler.sample_frames(num_samples, min_phase, max_phase)
 
     def reset(self, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
@@ -158,7 +156,6 @@ class G1MimicEnv(
         self.phase_steps[env_ids] = phase_indices
         self.episode_steps[env_ids] = 0
         self.last_action[env_ids] = 0.0
-        self.prev_action[env_ids] = 0.0
         # New episode for these envs: clear the per-episode death-record guard so their next
         # termination is counted by the adaptive sampler exactly once.
         if hasattr(self, "_failure_recorded"):
@@ -248,11 +245,6 @@ class G1MimicEnv(
             adaptive_lambda=float(self.task_cfg.adaptive_lambda),
             adaptive_uniform_ratio=float(self.task_cfg.adaptive_uniform_ratio),
             adaptive_alpha=float(self.task_cfg.adaptive_alpha),
-            causal_max_ratio=float(self.task_cfg.adaptive_causal_max_ratio),
-            causal_horizon=int(self.task_cfg.adaptive_causal_horizon),
-            causal_decay=float(self.task_cfg.adaptive_causal_decay),
-            causal_arm_lo=float(self.task_cfg.adaptive_causal_arm_lo),
-            causal_arm_hi=float(self.task_cfg.adaptive_causal_arm_hi),
         )
         # Per-env guard so the same termination is recorded by the sampler exactly once even
         # when the env is not auto-reset (validation / GRPO branch rollouts replay dead envs).
@@ -299,19 +291,6 @@ class G1MimicEnv(
     def adaptive_sampling_stats(self) -> dict[str, float]:
         min_phase, max_phase = self._adaptive_phase_range(horizon=1)
         return self.adaptive_sampler.stats(min_phase, max_phase)
-
-    def configure_adaptive_credit(self, horizon: int, decay: float) -> None:
-        """Bind the causal predecessor window to the algorithm's rollout credit horizon. The YAML
-        keeps adaptive_causal_horizon/decay at 0; a positive YAML value overrides the algorithm
-        injection so the credit window never silently misconfigures when the rollout length
-        changes."""
-        if not getattr(self, "adaptive_motion_sampling", False):
-            return
-        cfg_h = int(self.task_cfg.adaptive_causal_horizon)
-        cfg_d = float(self.task_cfg.adaptive_causal_decay)
-        h = cfg_h if cfg_h > 0 else int(horizon)
-        d = cfg_d if cfg_d > 0.0 else float(decay)
-        self.adaptive_sampler.configure_credit(h, d)
 
     def _resample_finished_motions(self) -> None:
         """Roll-in teleport: envs whose phase has advanced past the final frame are resampled to

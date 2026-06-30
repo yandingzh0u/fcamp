@@ -24,8 +24,6 @@ from networks.flow_policy import FlowMatchingPolicy
 
 
 class MixGRPO(Algorithm):
-    name = "mixgrpo"
-
     # ------------------------------------------------------------------ build
     def build(self) -> None:
         cfg = self.cfg
@@ -50,7 +48,6 @@ class MixGRPO(Algorithm):
             horizon=cfg.horizon,
             hidden_dims=tuple(cfg.actor_hidden_dims),
             activation=cfg.activation,
-            init_noise_std=cfg.init_noise_std,
             action_squash_scale=cfg.action_squash_scale,
         ).to(env.device)
         self.chunk_dim = self._policy.chunk_dim
@@ -64,12 +61,6 @@ class MixGRPO(Algorithm):
         self._init_onpolicy_state_bank()
         # Resolved episode cap mirrored from env for reward projection.
         self.max_episode_steps = int(getattr(env.task_cfg, "max_episode_steps", -1))
-        # Bind the adaptive sampler's causal predecessor window to MixGRPO's rollout span: the
-        # GRPO rollout is horizon*chunks frames with NO GAE, so the credit decay is gamma (per
-        # frame), not gamma*lambda.
-        inject_credit = getattr(env, "configure_adaptive_credit", None)
-        if callable(inject_credit):
-            inject_credit(self._training_rollout_horizon(), float(cfg.discount_gamma))
 
     @property
     def policy(self) -> torch.nn.Module:
@@ -97,14 +88,14 @@ class MixGRPO(Algorithm):
     # ------------------------------------------------------------------ derived sizes
     def _chunks_per_grpo_update(self) -> int:
         rollout_env_steps = int(self.cfg.rollout_env_steps)
-        if rollout_env_steps > 0:
-            horizon = max(1, int(self.cfg.horizon))
-            if rollout_env_steps % horizon != 0:
-                raise ValueError(
-                    f"rollout_env_steps ({rollout_env_steps}) must be divisible by horizon ({horizon})."
-                )
-            return max(1, rollout_env_steps // horizon)
-        return max(1, int(self.cfg.chunks_per_rollout))
+        if rollout_env_steps <= 0:
+            raise ValueError(f"rollout_env_steps must be > 0, got {rollout_env_steps}")
+        horizon = max(1, int(self.cfg.horizon))
+        if rollout_env_steps % horizon != 0:
+            raise ValueError(
+                f"rollout_env_steps ({rollout_env_steps}) must be divisible by horizon ({horizon})."
+            )
+        return max(1, rollout_env_steps // horizon)
 
     def _training_rollout_horizon(self) -> int:
         return max(1, self.cfg.horizon * self._chunks_per_grpo_update())
@@ -162,7 +153,6 @@ class MixGRPO(Algorithm):
                 sigmas=sigma_schedule,
                 index=step_index,
                 eta=float(self.cfg.sde_eta),
-                deterministic=False,
                 sample_noise=sde_noise[:, step_index],
             )
             all_latents.append(latent.detach())
@@ -227,7 +217,6 @@ class MixGRPO(Algorithm):
                 index=step_index,
                 eta=float(self.cfg.sde_eta),
                 prev_sample=next_latent,
-                deterministic=False,
             )
             log_probs.append(log_prob)
         return torch.stack(log_probs, dim=1)
@@ -301,7 +290,6 @@ class MixGRPO(Algorithm):
         env.default_joint_vel[target_env_ids] = env.default_joint_vel.index_select(0, source_for_target)
         env.default_action_joint_pos[target_env_ids] = env.default_action_joint_pos.index_select(0, source_for_target)
         env.default_action_joint_vel[target_env_ids] = env.default_action_joint_vel.index_select(0, source_for_target)
-        env.prev_action[target_env_ids] = env.prev_action.index_select(0, source_for_target)
 
         target_cpu = target_env_ids.detach().cpu()
         source_cpu = source_for_target.detach().cpu()
@@ -331,7 +319,6 @@ class MixGRPO(Algorithm):
         env.phase_steps[target_env_ids] = env.phase_steps.index_select(0, source_for_target)
         env.episode_steps[target_env_ids] = env.episode_steps.index_select(0, source_for_target)
         env.last_action[target_env_ids] = env.last_action.index_select(0, source_for_target)
-        env.prev_action[target_env_ids] = env.prev_action.index_select(0, source_for_target)
         env.next_push_step[target_env_ids] = env.next_push_step.index_select(0, source_for_target)
         self._replicate_group_contact_history(target_env_ids, source_for_target)
         env.scene.update(env.physics_dt)
@@ -404,7 +391,6 @@ class MixGRPO(Algorithm):
             "joint_vel": robot.data.joint_vel.index_select(0, env_ids).clone(),
             "phase_steps": self.env.phase_steps.index_select(0, env_ids).clone(),
             "last_action": self.env.last_action.index_select(0, env_ids).clone(),
-            "prev_action": self.env.prev_action.index_select(0, env_ids).clone(),
         }
         contact = getattr(self.env, "contact_sensor", None)
         if contact is not None:
@@ -528,7 +514,6 @@ class MixGRPO(Algorithm):
         joint_vel_full = bank["joint_vel"].index_select(0, bank_idx)
         phase_steps = bank["phase_steps"].index_select(0, bank_idx)
         last_action = bank["last_action"].index_select(0, bank_idx)
-        prev_action = bank["prev_action"].index_select(0, bank_idx)
         self.env.scene.reset(env_ids=anchor_env_ids)
         self.env._write_robot_state(
             root_pos=root_state_local[:, :3],
@@ -542,7 +527,6 @@ class MixGRPO(Algorithm):
         self.env.phase_steps[anchor_env_ids] = phase_steps
         self.env.episode_steps[anchor_env_ids] = 0
         self.env.last_action[anchor_env_ids] = last_action
-        self.env.prev_action[anchor_env_ids] = prev_action
         contact = getattr(self.env, "contact_sensor", None)
         if contact is not None:
             data = contact.data
@@ -806,7 +790,6 @@ class MixGRPO(Algorithm):
             "metric_action_abs_max_all": metric_action_abs_max_all,
             "metric_rollout_info_items": metric_rollout_info_items,
             "next_observation": obs_t.detach().clone(),
-            "_update_sampler": True,
         }
 
     def _compute_tail_bootstrap(self, obs_start, alive_mask, *, tail_steps, gamma, terminal_penalty):
@@ -814,6 +797,10 @@ class MixGRPO(Algorithm):
             return torch.zeros(obs_start.shape[0], device=obs_start.device, dtype=obs_start.dtype)
         was_training = self._policy.training
         self._policy.eval()
+        # Tail-bootstrap steps roll the env PAST the rollout purely to estimate the bootstrap
+        # value; their deaths must NOT be folded into the adaptive failure sampler.
+        prev_record = self.env.record_motion_failures
+        self.env.record_motion_failures = False
         try:
             with torch.no_grad():
                 obs_t = obs_start
@@ -847,6 +834,7 @@ class MixGRPO(Algorithm):
                         break
                     discount = discount * float(gamma)
         finally:
+            self.env.record_motion_failures = prev_record
             if was_training:
                 self._policy.train()
         return (tail_return * alive_mask.to(dtype=tail_return.dtype)).detach()
@@ -1323,9 +1311,6 @@ class MixGRPO(Algorithm):
             "sampler/top_bin": sampler_stats.get("top_bin", float("nan")),
             "sampler/top_prob": sampler_stats.get("top_prob", float("nan")),
             "sampler/peak_bin": sampler_stats.get("peak_bin", float("nan")),
-            "sampler/peak_fail_frame": sampler_stats.get("peak_fail_frame", float("nan")),
-            "sampler/bottleneck_concentration": sampler_stats.get("bottleneck_concentration", float("nan")),
-            "sampler/causal_beta": sampler_stats.get("causal_beta", float("nan")),
             "sampler/failed_sum": sampler_stats.get("failed_sum", float("nan")),
             "sampler/entropy": sampler_stats.get("entropy", float("nan")),
             "timing/collect_s": collect_time,
@@ -1478,9 +1463,6 @@ class MixGRPO(Algorithm):
             f"sampler_top_bin={metrics.get('sampler/top_bin', float('nan')):.0f} "
             f"sampler_top_prob={metrics.get('sampler/top_prob', float('nan')):.3f} "
             f"sampler_peak_bin={metrics.get('sampler/peak_bin', float('nan')):.0f} "
-            f"sampler_peak_fail={metrics.get('sampler/peak_fail_frame', float('nan')):.0f} "
-            f"sampler_bottleneck={metrics.get('sampler/bottleneck_concentration', float('nan')):.3f} "
-            f"sampler_causal_beta={metrics.get('sampler/causal_beta', float('nan')):.3f} "
             f"sampler_failed_sum={metrics.get('sampler/failed_sum', float('nan')):.4f} "
             f"sampler_entropy={metrics.get('sampler/entropy', float('nan')):.3f}",
             flush=True,
@@ -1695,9 +1677,7 @@ class MixGRPO(Algorithm):
             f"future_ref_steps=0 "
             f"phase_sampler={'adaptive' if env.task_cfg.adaptive_motion_sampling else 'uniform'} "
             f"adaptive_uniform_ratio={env.task_cfg.adaptive_uniform_ratio} "
-            f"adaptive_causal_max_ratio={env.task_cfg.adaptive_causal_max_ratio} "
             f"num_envs={env.num_envs} rollout_env_steps_target={int(cfg.rollout_env_steps)} "
-            f"configured_chunks_per_rollout={cfg.chunks_per_rollout} "
             f"tail_bootstrap_steps={int(cfg.tail_bootstrap_steps)} "
             f"terminal_penalty={cfg.terminal_penalty} num_generations={cfg.num_generations} "
             f"grpo_groups={self.num_grpo_groups} init_noise_std={cfg.init_noise_std} "
