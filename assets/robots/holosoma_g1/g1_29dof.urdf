@@ -1,5 +1,7 @@
 <?xml version="1.0"?>
 
+<!-- G1 model from https://github.com/WhoKnowsssss/tracking_implementation/tree/master -->
+
 <robot name="g1">
 
     <link name="pelvis">
@@ -84,16 +86,10 @@
                 <color rgba="0.7 0.7 0.7 1"/>
             </material>
         </visual>
-        <!-- <collision>
+        <collision>
             <origin xyz="0.02 0 -0.1"/>
             <geometry>
                 <cylinder radius="0.05" length="0.2"/>
-            </geometry>
-        </collision> -->
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="meshes/left_hip_roll_link.STL"/>
             </geometry>
         </collision>
     </link>
@@ -119,12 +115,6 @@
                 <color rgba="0.7 0.7 0.7 1"/>
             </material>
         </visual>
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="meshes/left_hip_yaw_link.STL"/>
-            </geometry>
-        </collision>
     </link>
     <joint name="left_hip_yaw_joint" type="revolute">
         <origin xyz="0.025001 0 -0.12412" rpy="0 0 0"/>
@@ -255,6 +245,16 @@
             <mass value="0.001"/>
             <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
         </inertial>
+        <!-- Invisible visual required for USD conversion: IsaacLab expects visual prims for all links to avoid "Unresolved reference prim path" errors -->
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <box size="0.001 0.001 0.001"/>
+            </geometry>
+            <material name="invisible">
+                <color rgba="0 0 0 0"/>
+            </material>
+        </visual>
     </link>
     <joint name="left_foot_contact_point" type="fixed" dont_collapse="true">
         <parent link="left_ankle_roll_link"/>
@@ -299,16 +299,10 @@
                 <color rgba="0.7 0.7 0.7 1"/>
             </material>
         </visual>
-        <!-- <collision>
+        <collision>
             <origin xyz="0.02 0 -0.1"/>
             <geometry>
                 <cylinder radius="0.05" length="0.2"/>
-            </geometry>
-        </collision> -->
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="meshes/right_hip_roll_link.STL"/>
             </geometry>
         </collision>
     </link>
@@ -334,12 +328,6 @@
                 <color rgba="0.7 0.7 0.7 1"/>
             </material>
         </visual>
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="meshes/right_hip_yaw_link.STL"/>
-            </geometry>
-        </collision>
     </link>
     <joint name="right_hip_yaw_joint" type="revolute">
         <origin xyz="0.025001 0 -0.12412" rpy="0 0 0"/>
@@ -470,6 +458,16 @@
             <mass value="0.001"/>
             <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001"/>
         </inertial>
+        <!-- Invisible visual required for USD conversion: IsaacLab expects visual prims for all links to avoid "Unresolved reference prim path" errors -->
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <box size="0.001 0.001 0.001"/>
+            </geometry>
+            <material name="invisible">
+                <color rgba="0 0 0 0"/>
+            </material>
+        </visual>
     </link>
     <joint name="right_foot_contact_point" type="fixed" dont_collapse="true">
         <parent link="right_ankle_roll_link"/>
@@ -541,13 +539,9 @@
             </material>
         </visual>
         <collision>
-            <!-- <origin xyz="0.005 0 0.22" rpy="1.5708 0 0"/>
+            <origin xyz="0.005 0 0.22" rpy="1.5708 0 0"/>
             <geometry>
                 <cylinder radius="0.073" length="0.064"/>
-            </geometry> -->
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="meshes/torso_link_rev_1_0.STL"/>
             </geometry>
         </collision>
         <collision>
@@ -617,12 +611,6 @@
                 <color rgba="0.2 0.2 0.2 1"/>
             </material>
         </visual>
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="meshes/head_link.STL"/>
-            </geometry>
-        </collision>
     </link>
     <joint name="head_joint" type="fixed">
         <origin xyz="0.0039635 0 -0.044" rpy="0 0 0"/>
@@ -632,14 +620,36 @@
 
 
     <!-- IMU -->
-    <link name="imu_in_torso"></link>
+    <link name="imu_in_torso">
+        <!-- Invisible visual required for USD conversion: IsaacLab expects visual prims for all links to avoid "Unresolved reference prim path" errors -->
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <box size="0.001 0.001 0.001"/>
+            </geometry>
+            <material name="invisible">
+                <color rgba="0 0 0 0"/>
+            </material>
+        </visual>
+    </link>
     <joint name="imu_in_torso_joint" type="fixed">
         <origin xyz="-0.03959 -0.00224 0.14792" rpy="0 0 0"/>
         <parent link="torso_link"/>
         <child link="imu_in_torso"/>
     </joint>
 
-    <link name="imu_in_pelvis"></link>
+    <link name="imu_in_pelvis">
+        <!-- Invisible visual required for USD conversion: IsaacLab expects visual prims for all links to avoid "Unresolved reference prim path" errors -->
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <box size="0.001 0.001 0.001"/>
+            </geometry>
+            <material name="invisible">
+                <color rgba="0 0 0 0"/>
+            </material>
+        </visual>
+    </link>
     <joint name="imu_in_pelvis_joint" type="fixed">
         <origin xyz="0.04525 0 -0.08339" rpy="0 0 0"/>
         <parent link="pelvis"/>
@@ -647,7 +657,18 @@
     </joint>
 
     <!-- mid360 -->
-    <link name="mid360_link"></link>
+    <link name="mid360_link">
+        <!-- Invisible visual required for USD conversion: IsaacLab expects visual prims for all links to avoid "Unresolved reference prim path" errors -->
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <box size="0.001 0.001 0.001"/>
+            </geometry>
+            <material name="invisible">
+                <color rgba="0 0 0 0"/>
+            </material>
+        </visual>
+    </link>
     <joint name="mid360_joint" type="fixed">
         <origin xyz="0.0002835 0.00003 0.41618" rpy="0 3.101 3.1415"/>
         <parent link="torso_link"/>
@@ -746,9 +767,9 @@
             </material>
         </visual>
         <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <origin xyz="0.055 0 -0.01" rpy="0 -1.5708 0"/>
             <geometry>
-                <mesh filename="meshes/left_elbow_link.STL"/>
+                <cylinder radius="0.035" length="0.13"/>
             </geometry>
         </collision>
     </link>
@@ -782,12 +803,6 @@
                 <color rgba="0.7 0.7 0.7 1"/>
             </material>
         </visual>
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="meshes/left_wrist_roll_link.STL"/>
-            </geometry>
-        </collision>
     </link>
     <joint name="left_wrist_pitch_joint" type="revolute">
         <origin xyz="0.038 0 0" rpy="0 0 0"/>
@@ -812,12 +827,6 @@
                 <color rgba="0.7 0.7 0.7 1"/>
             </material>
         </visual>
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="meshes/left_wrist_pitch_link.STL"/>
-            </geometry>
-        </collision>
     </link>
     <joint name="left_wrist_yaw_joint" type="revolute">
         <origin xyz="0.046 0 0" rpy="0 0 0"/>
@@ -843,39 +852,33 @@
             </material>
         </visual>
         <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <origin xyz="0.075 0 0" rpy="0 -1.5708 0"/>
             <geometry>
-                <mesh filename="meshes/left_wrist_yaw_link.STL"/>
+                <cylinder radius="0.05" length="0.05"/>
             </geometry>
         </collision>
     </link>
     <joint name="left_hand_palm_joint" type="fixed">
-        <origin xyz="0.029 -0.003 0" rpy="0 1.57 0"/>
+        <origin xyz="0.0415 0.003 0" rpy="0 0 0"/>
         <parent link="left_wrist_yaw_link"/>
-        <child link="left_sphere_hand_link"/>
+        <child link="left_rubber_hand"/>
     </joint>
-    <link name="left_sphere_hand_link">
+    <link name="left_rubber_hand">
         <inertial>
-        <origin xyz="0 0 0" rpy="0 0 0"/>
-        <mass value="0.124"/>
-        <inertia ixx="0.0000446" ixy="0" ixz="0"
-                iyy="0.0000446" iyz="0" izz="0.0000446"/>
+            <origin xyz="0.05361310808 -0.00295905240 0.00215413091" rpy="0 0 0"/>
+            <mass value="0.170"/>
+            <inertia ixx="0.00010099485234748" ixy="0.00003618590790516" ixz="-0.00000074301518642"
+                     iyy="0.00028135871571621" iyz="0.00000330189743286" izz="0.00021894770413514"/>
         </inertial>
         <visual>
-        <origin xyz="0 0 0" rpy="0 0 0"/>
-        <geometry>
-            <mesh filename="meshes/half_sphere.obj"/>
-        </geometry>
-        <material name="white">
-            <color rgba="0.7 0.7 0.7 1"/>
-        </material>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <mesh filename="meshes/left_rubber_hand.STL"/>
+            </geometry>
+            <material name="white">
+                <color rgba="0.7 0.7 0.7 1"/>
+            </material>
         </visual>
-        <collision name="left_sphere_hand">
-        <origin xyz="0 0 0" rpy="0 0 0"/>
-        <geometry>
-            <mesh filename="meshes/half_sphere.obj"/>
-        </geometry>
-        </collision>
     </link>
     <link name="right_shoulder_pitch_link">
         <inertial>
@@ -968,9 +971,9 @@
             </material>
         </visual>
         <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <origin xyz="0.055 0 -0.01" rpy="0 -1.5708 0"/>
             <geometry>
-                <mesh filename="meshes/right_elbow_link.STL"/>
+                <cylinder radius="0.035" length="0.13"/>
             </geometry>
         </collision>
     </link>
@@ -1004,12 +1007,6 @@
                 <color rgba="0.7 0.7 0.7 1"/>
             </material>
         </visual>
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="meshes/right_wrist_roll_link.STL"/>
-            </geometry>
-        </collision>
     </link>
     <joint name="right_wrist_pitch_joint" type="revolute">
         <origin xyz="0.038 0 0" rpy="0 0 0"/>
@@ -1034,12 +1031,6 @@
                 <color rgba="0.7 0.7 0.7 1"/>
             </material>
         </visual>
-        <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
-            <geometry>
-                <mesh filename="meshes/right_wrist_pitch_link.STL"/>
-            </geometry>
-        </collision>
     </link>
     <joint name="right_wrist_yaw_joint" type="revolute">
         <origin xyz="0.046 0 0" rpy="0 0 0"/>
@@ -1065,39 +1056,33 @@
             </material>
         </visual>
         <collision>
-            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <origin xyz="0.075 0 0" rpy="0 -1.5708 0"/>
             <geometry>
-                <mesh filename="meshes/right_wrist_yaw_link.STL"/>
+                <cylinder radius="0.05" length="0.05"/>
             </geometry>
         </collision>
     </link>
     <joint name="right_hand_palm_joint" type="fixed">
-        <origin xyz="0.029 -0.003 0" rpy="0 1.57 0"/>
+        <origin xyz="0.0415 -0.003 0" rpy="0 0 0"/>
         <parent link="right_wrist_yaw_link"/>
-        <child link="right_sphere_hand_link"/>
+        <child link="right_rubber_hand"/>
     </joint>
-    <link name="right_sphere_hand_link">
+    <link name="right_rubber_hand">
         <inertial>
-        <origin xyz="0 0 0" rpy="0 0 0"/>
-        <mass value="0.124"/>
-        <inertia ixx="0.0000446" ixy="0" ixz="0"
-                iyy="0.0000446" iyz="0" izz="0.0000446"/>
+            <origin xyz="0.05361310808 0.00295905240 0.00215413091" rpy="0 0 0"/>
+            <mass value="0.170"/>
+            <inertia ixx="0.00010099485234748" ixy="-0.00003618590790516" ixz="-0.00000074301518642"
+                     iyy="0.00028135871571621" iyz="-0.00000330189743286" izz="0.00021894770413514"/>
         </inertial>
         <visual>
-        <origin xyz="0 0 0" rpy="0 0 0"/>
-        <geometry>
-            <mesh filename="meshes/half_sphere.obj"/>
-        </geometry>
-        <material name="white">
-            <color rgba="0.7 0.7 0.7 1"/>
-        </material>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <mesh filename="meshes/right_rubber_hand.STL"/>
+            </geometry>
+            <material name="white">
+                <color rgba="0.7 0.7 0.7 1"/>
+            </material>
         </visual>
-        <collision name="right_sphere_hand">
-        <origin xyz="0 0 0" rpy="0 0 0"/>
-        <geometry>
-            <mesh filename="meshes/half_sphere.obj"/>
-        </geometry>
-        </collision>
     </link>
 
     <link name="LL_FOOT">
@@ -1106,6 +1091,16 @@
             <mass value="1e-9"/>
             <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
         </inertial>
+        <!-- Invisible visual required for USD conversion: IsaacLab expects visual prims for all links to avoid "Unresolved reference prim path" errors -->
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <box size="0.001 0.001 0.001"/>
+            </geometry>
+            <material name="invisible">
+                <color rgba="0 0 0 0"/>
+            </material>
+        </visual>
     </link>
     <joint name="LL_FOOT_frame" type="fixed">
         <origin xyz="0.04 0 -0.037" rpy="0 0 0"/>
@@ -1119,6 +1114,16 @@
             <mass value="1e-9"/>
             <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
         </inertial>
+        <!-- Invisible visual required for USD conversion: IsaacLab expects visual prims for all links to avoid "Unresolved reference prim path" errors -->
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <box size="0.001 0.001 0.001"/>
+            </geometry>
+            <material name="invisible">
+                <color rgba="0 0 0 0"/>
+            </material>
+        </visual>
     </link>
     <joint name="LR_FOOT_frame" type="fixed">
         <origin xyz="0.04 0 -0.037" rpy="0 0 0"/>

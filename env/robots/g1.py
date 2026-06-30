@@ -9,16 +9,18 @@ from isaaclab.assets import ArticulationCfg
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-# Holosoma G1 (29 DOF, half-sphere hand) converted from the URDF that ships with the
-# holosoma whole-body-tracking task. This replaces the original Unitree factory USD so
-# the crawl_slope motion (recorded on this exact robot) tracks correctly.
-G1_LOCAL_USD_PATH = (
+# Standard Holosoma G1 used by the non-object whole-body-tracking experiment.  Keep the
+# source URDF in-tree and let IsaacLab convert it with the same settings as Holosoma.  In
+# particular, this is NOT main_mesh_collision_halfspherehand.urdf (that asset is only used
+# by Holosoma's robot+object experiment).
+G1_LOCAL_URDF_PATH = (
     PROJECT_ROOT
     / "assets"
     / "robots"
     / "holosoma_g1"
-    / "g1_29dof.usd"
+    / "g1_29dof.urdf"
 )
+G1_CONVERTED_USD_DIR = G1_LOCAL_URDF_PATH.parent / "converted"
 
 # Action / observation / motion joint order. Matches the holosoma motion file's
 # `joint_names` (URDF serial-chain order). The env resolves these names against the
@@ -60,8 +62,23 @@ G1_29DOF_ACTION_NAMES = G1_29DOF_ASSET_JOINT_NAMES
 
 
 G1_BASE_CFG = ArticulationCfg(
-    spawn=sim_utils.UsdFileCfg(
-        usd_path=str(G1_LOCAL_USD_PATH),
+    # Match Holosoma's Isaac Sim asset path exactly: dynamically convert the standard URDF,
+    # merge fixed joints, replace cylinders with capsules, and leave drives unconfigured in
+    # the generated USD (the IdealPDActuatorCfg blocks below own the control gains).
+    spawn=sim_utils.UrdfFileCfg(
+        asset_path=str(G1_LOCAL_URDF_PATH),
+        usd_dir=str(G1_CONVERTED_USD_DIR),
+        fix_base=False,
+        merge_fixed_joints=True,
+        replace_cylinders_with_capsules=True,
+        force_usd_conversion=True,
+        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
+                stiffness=0.0,
+                damping=0.0,
+            ),
+            target_type="none",
+        ),
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
@@ -255,11 +272,10 @@ G1_BASE_CFG = ArticulationCfg(
 
 
 def make_g1_cfg(prim_path: str = "/World/Robot", fix_root_link: bool = False) -> ArticulationCfg:
-    if not G1_LOCAL_USD_PATH.is_file():
-        raise FileNotFoundError(f"G1 USD not found: {G1_LOCAL_USD_PATH}")
+    if not G1_LOCAL_URDF_PATH.is_file():
+        raise FileNotFoundError(f"G1 URDF not found: {G1_LOCAL_URDF_PATH}")
 
     cfg = deepcopy(G1_BASE_CFG)
     cfg.prim_path = prim_path
-    cfg.spawn.usd_path = str(G1_LOCAL_USD_PATH)
     cfg.spawn.articulation_props.fix_root_link = fix_root_link
     return cfg
