@@ -4,28 +4,66 @@ from collections import deque
 
 import torch
 from torch import nn
-from torch.distributions import Normal, kl_divergence
 
 from algorithms.base import Algorithm
-from networks.mlp_actor_critic import Critic, EmpiricalNormalization, GaussianActor
+from networks.fpo_actor import FPOActor
+from networks.mlp_actor_critic import Critic, EmpiricalNormalization
 
 
-class PPO(Algorithm):
+def clamp_ste(x: torch.Tensor, *, min: float | None = None, max: float | None = None) -> torch.Tensor:
+
+    clamped = x.clamp(min=min, max=max)
+    return x + (clamped - x).detach()
+
+
+def fpo_ratio(old_cfm: torch.Tensor, new_cfm: torch.Tensor, delta_clip: float) -> torch.Tensor:
+
+    diff = old_cfm - new_cfm
+    if delta_clip > 0.0:
+        diff = clamp_ste(diff, max=float(delta_clip))
+    return torch.exp(diff)
+
+
+def aspo_objective(ratio: torch.Tensor, advantage: torch.Tensor, clip: float) -> torch.Tensor:
+
+    if clip <= 0.0:
+        raise ValueError(f"ASPO/PPO clip must be > 0, got {clip}")
+    ppo = torch.minimum(ratio * advantage, torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * advantage)
+    spo = ratio * advantage - advantage.abs() / (2.0 * clip) * (ratio - 1.0) ** 2
+    return torch.where(advantage >= 0.0, ppo, spo)
+
+
+class FPO(Algorithm):
 
     def build(self) -> None:
         cfg = self.cfg
         env = self.env
         self.num_act = env.action_dim
+        self.num_steps_per_env = max(1, int(cfg.num_steps_per_env))
         self.actor_obs_dim = env.observation_dim
         self.critic_obs_dim = env.critic_observation_dim
         device = env.device
 
-        self.actor = GaussianActor(
-            self.actor_obs_dim, self.num_act, tuple(cfg.actor_hidden_dims), cfg.activation, cfg.init_noise_std
+        self.flow_steps = max(1, int(cfg.flow_steps))
+        self.actor = FPOActor(
+            obs_dim=self.actor_obs_dim,
+            action_dim=self.num_act,
+            hidden_dims=tuple(cfg.actor_hidden_dims),
+            activation=cfg.activation,
+            actor_scale=float(cfg.actor_scale),
+            mlp_output_scale=float(cfg.mlp_output_scale),
+            timestep_embed_dim=int(cfg.timestep_embed_dim),
+            cfm_loss_reduction=str(cfg.cfm_loss_reduction),
+            sampling_steps=self.flow_steps,
+            action_perturb_std=float(cfg.action_perturb_std),
+            cfm_loss_t_inverse_cdf_beta=float(cfg.cfm_loss_t_inverse_cdf_beta),
         ).to(device)
+        self.actor.train()
 
 
         self.critic = Critic(self.critic_obs_dim, tuple(cfg.critic_hidden_dims), cfg.activation).to(device)
+
+        self.chunk_dim = self.num_act
 
         self.empirical_normalization = bool(cfg.empirical_normalization)
         if self.empirical_normalization:
@@ -35,22 +73,35 @@ class PPO(Algorithm):
             self.actor_obs_normalizer = nn.Identity()
             self.critic_obs_normalizer = nn.Identity()
 
-        self.actor_learning_rate = float(cfg.actor_learning_rate)
-        self.critic_learning_rate = float(cfg.critic_learning_rate)
-        self.max_lr = 1e-2
-        self.min_lr = 1e-5
+
+        self.learning_rate = float(cfg.policy_lr)
+        if float(cfg.value_lr) <= 0.0:
+            raise ValueError(f"value_lr must be > 0, got {cfg.value_lr}")
+        self.critic_learning_rate = float(cfg.value_lr)
         self.actor_optimizer = torch.optim.AdamW(
-            self.actor.parameters(), lr=self.actor_learning_rate, weight_decay=cfg.weight_decay
+            self.actor.parameters(), lr=self.learning_rate,
+            betas=(0.9, 0.999), weight_decay=float(cfg.weight_decay),
         )
         self.critic_optimizer = torch.optim.AdamW(
-            self.critic.parameters(), lr=self.critic_learning_rate, weight_decay=cfg.critic_weight_decay
+            self.critic.parameters(), lr=self.critic_learning_rate,
+            betas=(0.9, 0.999), weight_decay=float(cfg.critic_weight_decay),
         )
 
-        self.num_steps_per_env = int(cfg.num_steps_per_env)
+        self.num_mc = max(1, int(cfg.fpo_num_mc))
+
+        self.cfm_diff_clamp_max = float(cfg.fpo_delta_clip)
+        self.cfm_loss_clamp = float(cfg.fpo_cfm_loss_clamp)
+        self.cfm_loss_clamp_neg_adv = bool(cfg.cfm_loss_clamp_neg_adv)
+        self.cfm_loss_clamp_neg_adv_max = float(cfg.cfm_loss_clamp_neg_adv_max)
+        self.adv_clamp = float(cfg.fpo_adv_clamp)
+        self.schedule = str(cfg.schedule)
+        self.desired_kl = float(cfg.desired_kl)
+        self.num_micro_batches = max(1, int(cfg.num_micro_batches))
+        self.lr_min = 1e-5
+        self.lr_max = 1e-2
+
         self.max_episode_steps = env.max_episode_steps
         self._init_train_episode_stats()
-
-
         self._policy_module = nn.ModuleDict({"actor": self.actor, "critic": self.critic})
 
     @property
@@ -59,6 +110,8 @@ class PPO(Algorithm):
 
     @property
     def optimizer(self) -> torch.optim.Optimizer:
+
+
         return self.actor_optimizer
 
     @property
@@ -68,7 +121,7 @@ class PPO(Algorithm):
     def extra_checkpoint_state(self) -> dict:
         return {
             "critic_optimizer": self.critic_optimizer.state_dict(),
-            "actor_learning_rate": self.actor_learning_rate,
+            "learning_rate": self.learning_rate,
             "critic_learning_rate": self.critic_learning_rate,
             "actor_obs_normalizer": self.actor_obs_normalizer.state_dict() if self.empirical_normalization else None,
             "critic_obs_normalizer": self.critic_obs_normalizer.state_dict() if self.empirical_normalization else None,
@@ -81,14 +134,21 @@ class PPO(Algorithm):
 
 
             for pg in self.actor_optimizer.param_groups:
-                pg["lr"] = self.actor_learning_rate
+                pg["lr"] = self.learning_rate
             for pg in self.critic_optimizer.param_groups:
                 pg["lr"] = self.critic_learning_rate
         else:
+
+            self.learning_rate = float(payload.get("learning_rate", self.learning_rate))
+            self.critic_learning_rate = float(
+                payload.get("critic_learning_rate", self.critic_learning_rate)
+            )
+            for pg in self.actor_optimizer.param_groups:
+                pg["lr"] = self.learning_rate
             if "critic_optimizer" in payload:
                 self.critic_optimizer.load_state_dict(payload["critic_optimizer"])
-            self.actor_learning_rate = float(payload.get("actor_learning_rate", self.actor_learning_rate))
-            self.critic_learning_rate = float(payload.get("critic_learning_rate", self.critic_learning_rate))
+            for pg in self.critic_optimizer.param_groups:
+                pg["lr"] = self.critic_learning_rate
         if self.empirical_normalization:
             if payload.get("actor_obs_normalizer") is not None:
                 self.actor_obs_normalizer.load_state_dict(payload["actor_obs_normalizer"])
@@ -126,8 +186,6 @@ class PPO(Algorithm):
 
     def initial_reset(self) -> torch.Tensor:
         obs = self.env.reset()
-
-
         if bool(self.cfg.init_at_random_ep_len) and self.max_episode_steps > 0:
             self.env.episode_steps = torch.randint_like(self.env.episode_steps, high=int(self.max_episode_steps))
         self._obs = obs
@@ -140,27 +198,32 @@ class PPO(Algorithm):
 
 
     def collect(self, current_obs: torch.Tensor) -> dict:
+
         env = self.env
         device = env.device
         N = env.num_envs
+        M = self.num_mc
+        A = self.num_act
         T = self.num_steps_per_env
         gamma = float(self.cfg.discount_gamma)
 
         actor_obs_buf = torch.zeros(T, N, self.actor_obs_dim, device=device)
         critic_obs_buf = torch.zeros(T, N, self.critic_obs_dim, device=device)
-        actions_buf = torch.zeros(T, N, self.num_act, device=device)
+        actions_buf = torch.zeros(T, N, A, device=device)
+        cfm_t_buf = torch.zeros(T, N, M, 1, device=device)
+        cfm_eps_buf = torch.zeros(T, N, M, A, device=device)
+        old_cfm_buf = torch.zeros(T, N, M, device=device)
+        x1_pred_buf = torch.zeros(T, N, M, A, device=device)
+        values_buf = torch.zeros(T, N, 1, device=device)
         rewards_buf = torch.zeros(T, N, 1, device=device)
         dones_buf = torch.zeros(T, N, 1, dtype=torch.bool, device=device)
-        values_buf = torch.zeros(T, N, 1, device=device)
-        logp_buf = torch.zeros(T, N, 1, device=device)
-        mu_buf = torch.zeros(T, N, self.num_act, device=device)
-        sigma_buf = torch.zeros(T, N, self.num_act, device=device)
 
         obs = self._obs
         critic_obs = self._critic_obs
         done_terms_union: dict[str, torch.Tensor] = {}
         rollout_info_items: list[tuple] = []
         first_chunk_infos: list[dict] = []
+        action_abs_max = 0.0
 
 
         ever_done = torch.zeros(N, dtype=torch.bool, device=device)
@@ -173,62 +236,72 @@ class PPO(Algorithm):
 
         with torch.no_grad():
             for t in range(T):
-                actor_obs = self._norm_actor(obs)
+                actor_obs_n = self._norm_actor(obs)
                 critic_obs_n = self._norm_critic(critic_obs)
-                actions = self.actor.act(actor_obs)
-                values = self.critic.evaluate(critic_obs_n).detach()
-                logp = self.actor.get_actions_log_prob(actions).detach().unsqueeze(1)
-                mu = self.actor.action_mean.detach()
-                sigma = self.actor.action_std.detach()
+                value = self.critic.evaluate(critic_obs_n).detach()
 
-                next_obs, rewards, dones, infos = env.step(actions, auto_reset=True)
+                action = self.actor.act(actor_obs_n).detach()
+                action_abs_max = max(action_abs_max, float(action.abs().max().item()))
+
+                cfm_eps = torch.randn(N, M, A, device=device)
+                cfm_t = self.actor.sample_cfm_timesteps(N, M, device=device)
+                old_cfm, x1_pred, _ = self.actor.get_cfm_loss(actor_obs_n, action, cfm_eps, cfm_t)
+                old_cfm = old_cfm.detach()
+                x1_pred = x1_pred.detach()
+
+                next_obs, reward, done, info = env.step(action, auto_reset=True)
                 next_critic_obs = env.get_critic_observation()
 
-
-                final_rewards = torch.zeros_like(rewards)
-                time_outs = infos["done_terms"]["time_out"]
-                if bool(time_outs.any()) and "final_critic_observation" in infos:
-                    fco = self._norm_critic(infos["final_critic_observation"], update=False)
-                    final_values = self.critic.evaluate(fco).detach().squeeze(1)
-                    final_rewards = final_rewards + gamma * final_values * time_outs.to(dtype=rewards.dtype)
-
-                actor_obs_buf[t] = actor_obs
-                critic_obs_buf[t] = critic_obs_n
-                actions_buf[t] = actions
-                values_buf[t] = values
-                logp_buf[t] = logp
-                mu_buf[t] = mu
-                sigma_buf[t] = sigma
-                rewards_buf[t] = (rewards + final_rewards).view(-1, 1)
-                dones_buf[t] = dones.view(-1, 1)
-
-                self._record_episode_stats(rewards, dones)
-                if t == 0:
-                    first_chunk_infos.append(infos)
+                done_b = done.bool()
+                time_outs = info["done_terms"]["time_out"]
+                time_outs_b = time_outs.bool()
 
 
-                rollout_info_items.append((infos, torch.ones_like(dones, dtype=torch.bool)))
-                for key, val in infos["done_terms"].items():
-                    done_terms_union[key] = val.bool().clone() if key not in done_terms_union else (done_terms_union[key] | val.bool())
-
-
-                done_b = dones.bool()
                 newly_done = (~ever_done) & done_b
                 if bool(newly_done.any()):
                     ids = newly_done.nonzero(as_tuple=False).squeeze(-1)
                     first_done_step[ids] = t
-                    first_done_timeout[ids] = time_outs.bool()[ids]
-                    dterms = infos["done_terms"]
+                    first_done_timeout[ids] = time_outs_b[ids]
+                    dterms = info["done_terms"]
                     if "ee_body_bad" in dterms:
                         first_done_ee_body[ids] = dterms["ee_body_bad"].bool()[ids]
                     if "anchor_pos_bad" in dterms:
                         first_done_anchor_pos[ids] = dterms["anchor_pos_bad"].bool()[ids]
                     if "anchor_ori_bad" in dterms:
                         first_done_anchor_ori[ids] = dterms["anchor_ori_bad"].bool()[ids]
-                    tps = infos.get("termination_phase_steps")
+                    tps = info.get("termination_phase_steps")
                     if torch.is_tensor(tps):
                         first_done_phase[ids] = tps.long().to(device)[ids]
                     ever_done[ids] = True
+
+
+                final_rewards = torch.zeros_like(reward)
+                if bool(time_outs.any()) and "final_critic_observation" in info:
+                    fco = self._norm_critic(info["final_critic_observation"], update=False)
+                    final_values = self.critic.evaluate(fco).detach().squeeze(1)
+                    final_rewards = final_rewards + gamma * final_values * time_outs.to(dtype=reward.dtype)
+
+                actor_obs_buf[t] = actor_obs_n
+                critic_obs_buf[t] = critic_obs_n
+                actions_buf[t] = action
+                cfm_t_buf[t] = cfm_t
+                cfm_eps_buf[t] = cfm_eps
+                old_cfm_buf[t] = old_cfm
+                x1_pred_buf[t] = x1_pred
+                values_buf[t] = value
+                rewards_buf[t] = (reward + final_rewards).view(-1, 1)
+                dones_buf[t] = done.view(-1, 1)
+
+                self._record_episode_stats(reward, done)
+                if t == 0:
+                    first_chunk_infos.append(info)
+
+
+                valid = torch.ones_like(done, dtype=torch.bool)
+                rollout_info_items.append((info, valid.detach()))
+                for key, val in info["done_terms"].items():
+                    b = val.bool()
+                    done_terms_union[key] = b.clone() if key not in done_terms_union else (done_terms_union[key] | b)
 
                 obs = next_obs
                 critic_obs = next_critic_obs
@@ -239,15 +312,19 @@ class PPO(Algorithm):
 
         self._obs = obs
         self._critic_obs = critic_obs
+
+
         return {
             "actor_obs": actor_obs_buf, "critic_obs": critic_obs_buf, "actions": actions_buf,
-            "values": values_buf, "logp": logp_buf, "mu": mu_buf, "sigma": sigma_buf,
-            "returns": returns, "advantages": advantages, "rewards": rewards_buf, "dones": dones_buf,
+            "cfm_t": cfm_t_buf, "cfm_eps": cfm_eps_buf, "old_cfm": old_cfm_buf, "x1_pred": x1_pred_buf,
+            "values": values_buf, "returns": returns, "advantages": advantages,
+            "rewards": rewards_buf, "dones": dones_buf,
             "done_terms_union": done_terms_union, "rollout_info_items": rollout_info_items,
-            "first_chunk_infos": first_chunk_infos, "next_observation": obs,
+            "first_chunk_infos": first_chunk_infos, "action_abs_max": action_abs_max,
             "first_done_step": first_done_step, "first_done_phase": first_done_phase,
             "first_done_ee_body": first_done_ee_body, "first_done_anchor_pos": first_done_anchor_pos,
             "first_done_anchor_ori": first_done_anchor_ori, "first_done_timeout": first_done_timeout,
+            "next_observation": obs,
         }
 
     def _compute_gae(self, last_values, values, dones, rewards, gamma):
@@ -269,103 +346,151 @@ class PPO(Algorithm):
     def update(self, rollout: dict, collect_time: float) -> dict:
         import time as _time
         device = self.env.device
-        N = self.env.num_envs
-        T = self.num_steps_per_env
-        flat = lambda x: x.reshape(T * N, -1)
-        actor_obs = flat(rollout["actor_obs"])
-        critic_obs = flat(rollout["critic_obs"])
-        actions = flat(rollout["actions"])
-        old_logp = flat(rollout["logp"])
-        old_values = flat(rollout["values"])
-        returns = flat(rollout["returns"])
-        advantages = flat(rollout["advantages"])
-        old_mu = flat(rollout["mu"])
-        old_sigma = flat(rollout["sigma"])
+        T, N = rollout["actions"].shape[0], rollout["actions"].shape[1]
+        B = T * N
+        M = self.num_mc
+        A = self.num_act
 
-        batch_size = T * N
-        num_mini_batches = int(self.cfg.num_mini_batches)
-        mini_batch_size = batch_size // num_mini_batches
+        actor_obs = rollout["actor_obs"].reshape(B, self.actor_obs_dim)
+        critic_obs = rollout["critic_obs"].reshape(B, self.critic_obs_dim)
+        actions = rollout["actions"].reshape(B, A)
+        cfm_t = rollout["cfm_t"].reshape(B, M, 1)
+        cfm_eps = rollout["cfm_eps"].reshape(B, M, A)
+        old_cfm = rollout["old_cfm"].reshape(B, M)
+        old_x1_pred = rollout["x1_pred"].reshape(B, M, A)
+        returns = rollout["returns"].reshape(B, 1)
+        advantages = rollout["advantages"].reshape(B, 1)
+        old_values = rollout["values"].reshape(B, 1)
+
+        num_mini_batches = max(1, int(self.cfg.num_mini_batches))
+        mini_batch_size = max(1, B // num_mini_batches)
         epochs = int(self.cfg.num_learning_epochs)
         clip = float(self.cfg.clip_range)
         value_clip = float(self.cfg.value_clip_range)
+        value_coef = float(self.cfg.value_loss_coef)
 
-        totals = {"value": 0.0, "surrogate": 0.0, "entropy": 0.0, "kl": 0.0}
-        num_updates = epochs * num_mini_batches
-        grad_norm_accum = 0.0
+        totals = {
+            "actor_loss": 0.0, "value_loss": 0.0, "ratio": 0.0, "ratio_min": float("inf"),
+            "ratio_max": 0.0, "clip_frac": 0.0, "cfm_new": 0.0, "cfm_old": 0.0, "grad_norm": 0.0,
+            "grad_norm_critic": 0.0, "kl": 0.0,
+        }
+        num_updates = 0
 
 
         probe_count = min(128, N)
         with torch.no_grad():
             probe_obs_n = rollout["actor_obs"][0, :probe_count]
-            probe_before = self.actor.act_inference(probe_obs_n)
+            probe_before = self.actor.act_inference(probe_obs_n, eval_mode="zero")
             params_before = [p.detach().clone() for p in self.actor.parameters()]
 
         t1 = _time.perf_counter()
         for _ in range(epochs):
-            perm = torch.randperm(batch_size, device=device)
+            perm = torch.randperm(B, device=device)
             for mb in range(num_mini_batches):
                 idx = perm[mb * mini_batch_size:(mb + 1) * mini_batch_size]
-                mb_actor_obs = actor_obs[idx]
-                mb_critic_obs = critic_obs[idx]
-                mb_actions = actions[idx]
-                mb_old_logp = old_logp[idx]
-                mb_old_values = old_values[idx]
-                mb_returns = returns[idx]
-                mb_adv = advantages[idx]
-                mb_old_mu = old_mu[idx]
-                mb_old_sigma = old_sigma[idx]
+                mb_size = idx.numel()
+                if mb_size == 0:
+                    continue
 
-                self.actor.update_distribution(mb_actor_obs)
-                value_batch = self.critic.evaluate(mb_critic_obs)
-                logp_batch = self.actor.get_actions_log_prob(mb_actions)
-                mu_batch = self.actor.action_mean
-                sigma_batch = self.actor.action_std
-                entropy_batch = self.actor.entropy
+                mb_adv_full = advantages[idx].clamp(-self.adv_clamp, self.adv_clamp)
+
+                self.actor_optimizer.zero_grad(set_to_none=True)
+                self.critic_optimizer.zero_grad(set_to_none=True)
+                micro_chunks = torch.chunk(torch.arange(mb_size, device=device), self.num_micro_batches)
+                agg = {k: 0.0 for k in ("actor_loss", "value_loss", "ratio", "clip_frac", "cfm_new", "cfm_old", "kl")}
+                agg_ratio_min = float("inf")
+                agg_ratio_max = 0.0
+                for sub in micro_chunks:
+                    if sub.numel() == 0:
+                        continue
+                    weight = float(sub.numel()) / float(mb_size)
+                    li = idx[sub]
+                    new_cfm, x1_pred, _ = self.actor.get_cfm_loss(
+                        actor_obs[li], actions[li], cfm_eps[li], cfm_t[li]
+                    )
+                    value = self.critic.evaluate(critic_obs[li])
+                    mb_adv = mb_adv_full[sub]
+                    mb_old_cfm = old_cfm[li]
 
 
-                if self.cfg.desired_kl is not None and self.cfg.desired_kl > 0.0:
+                    if self.cfm_loss_clamp > 0.0:
+                        mb_old_cfm = mb_old_cfm.clamp(max=self.cfm_loss_clamp)
+                        new_cfm = new_cfm.clamp(max=self.cfm_loss_clamp)
+
+
+                    if self.cfm_loss_clamp_neg_adv:
+                        new_cfm = torch.where(
+                            mb_adv < 0, new_cfm.clamp(max=self.cfm_loss_clamp_neg_adv_max), new_cfm
+                        )
+
+                    ratio = fpo_ratio(mb_old_cfm, new_cfm, self.cfm_diff_clamp_max)
+                    surrogate = aspo_objective(ratio, mb_adv, clip)
+                    actor_loss = -surrogate.mean()
+
+
+                    mb_old_values = old_values[li]
+                    value_clipped = mb_old_values + (value - mb_old_values).clamp(-value_clip, value_clip)
+                    value_losses = (value - returns[li]).pow(2)
+                    value_losses_clipped = (value_clipped - returns[li]).pow(2)
+                    value_loss = torch.max(value_losses, value_losses_clipped).mean()
+
+                    loss = actor_loss + value_coef * value_loss
+                    (loss * weight).backward()
+
                     with torch.no_grad():
-                        kl = kl_divergence(Normal(mb_old_mu, mb_old_sigma), Normal(mu_batch, sigma_batch)).sum(-1)
-                        kl_mean = torch.mean(kl)
-                    self._update_lr(kl_mean)
-                else:
-                    kl_mean = torch.zeros((), device=device)
+                        agg["actor_loss"] += float(actor_loss.item()) * weight
+                        agg["value_loss"] += float(value_loss.item()) * weight
+                        agg["ratio"] += float(ratio.mean().item()) * weight
+                        agg["clip_frac"] += float((torch.abs(ratio - 1.0) > clip).float().mean().item()) * weight
+                        agg["cfm_new"] += float(new_cfm.mean().item()) * weight
+                        agg["cfm_old"] += float(mb_old_cfm.mean().item()) * weight
+                        agg_ratio_min = min(agg_ratio_min, float(ratio.min().item()))
+                        agg_ratio_max = max(agg_ratio_max, float(ratio.max().item()))
 
-                ratio = torch.exp(logp_batch - torch.squeeze(mb_old_logp))
-                surrogate = -torch.squeeze(mb_adv) * ratio
-                surrogate_clipped = -torch.squeeze(mb_adv) * torch.clamp(ratio, 1.0 - clip, 1.0 + clip)
-                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+                        kl_micro = ((x1_pred.detach() - old_x1_pred[li]) ** 2).mean()
+                        agg["kl"] += float(kl_micro.item()) * weight
 
-                value_clipped = mb_old_values + (value_batch - mb_old_values).clamp(-value_clip, value_clip)
-                value_losses = (value_batch - mb_returns).pow(2)
-                value_losses_clipped = (value_clipped - mb_returns).pow(2)
-                value_loss = torch.max(value_losses, value_losses_clipped).mean()
 
-                entropy_loss = entropy_batch.mean()
-                actor_loss = surrogate_loss - float(self.cfg.entropy_coef) * entropy_loss
-                critic_loss = float(self.cfg.value_loss_coef) * value_loss
+                if self.schedule == "adaptive":
+                    kl_mean = agg["kl"]
+                    if kl_mean > self.desired_kl * 2.0:
+                        self.learning_rate = max(self.lr_min, self.learning_rate / 1.5)
+                        self.critic_learning_rate = max(
+                            self.lr_min, self.critic_learning_rate / 1.5
+                        )
+                    elif 0.0 < kl_mean < self.desired_kl / 2.0:
+                        self.learning_rate = min(self.lr_max, self.learning_rate * 1.5)
+                        self.critic_learning_rate = min(
+                            self.lr_max, self.critic_learning_rate * 1.5
+                        )
+                    for group in self.actor_optimizer.param_groups:
+                        group["lr"] = self.learning_rate
+                    for group in self.critic_optimizer.param_groups:
+                        group["lr"] = self.critic_learning_rate
 
-                self.actor_optimizer.zero_grad()
-                self.critic_optimizer.zero_grad()
-                (actor_loss + critic_loss).backward()
-                gn_a = nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm)
-                nn.utils.clip_grad_norm_(self.critic.parameters(), self.cfg.max_grad_norm)
+
+                grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm)
+                grad_norm_critic = nn.utils.clip_grad_norm_(self.critic.parameters(), self.cfg.max_grad_norm)
                 self.actor_optimizer.step()
                 self.critic_optimizer.step()
 
-                totals["value"] += float(value_loss.item())
-                totals["surrogate"] += float(surrogate_loss.item())
-                totals["entropy"] += float(entropy_loss.item())
-                totals["kl"] += float(kl_mean.item())
-                grad_norm_accum += float(gn_a.item() if torch.is_tensor(gn_a) else gn_a)
+                totals["actor_loss"] += agg["actor_loss"]
+                totals["value_loss"] += agg["value_loss"]
+                totals["ratio"] += agg["ratio"]
+                totals["ratio_min"] = min(totals["ratio_min"], agg_ratio_min)
+                totals["ratio_max"] = max(totals["ratio_max"], agg_ratio_max)
+                totals["clip_frac"] += agg["clip_frac"]
+                totals["cfm_new"] += agg["cfm_new"]
+                totals["cfm_old"] += agg["cfm_old"]
+                totals["kl"] += agg["kl"]
+                totals["grad_norm"] += float(grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm)
+                totals["grad_norm_critic"] += float(grad_norm_critic.item() if torch.is_tensor(grad_norm_critic) else grad_norm_critic)
+                num_updates += 1
 
         update_time = _time.perf_counter() - t1
-        for key in totals:
-            totals[key] /= num_updates
-        grad_norm_accum /= num_updates
-
+        denom = max(num_updates, 1)
         with torch.no_grad():
-            probe_after = self.actor.act_inference(probe_obs_n)
+            probe_after = self.actor.act_inference(probe_obs_n, eval_mode="zero")
             action_delta = float(torch.mean(torch.abs(probe_after - probe_before)).item())
             param_delta_sq = torch.zeros((), device=device)
             param_count = 0
@@ -375,50 +500,92 @@ class PPO(Algorithm):
                 param_count += d.numel()
             param_rms_delta = float(torch.sqrt(param_delta_sq / max(param_count, 1)).item())
 
-        return self._build_metrics(
-            rollout, totals, grad_norm_accum, collect_time, update_time, action_delta, param_rms_delta
-        )
+        agg_out = {
+            "actor_loss": totals["actor_loss"] / denom,
+            "value_loss": totals["value_loss"] / denom,
+            "ratio": totals["ratio"] / denom,
+            "ratio_min": totals["ratio_min"] if totals["ratio_min"] != float("inf") else 0.0,
+            "ratio_max": totals["ratio_max"],
+            "clip_frac": totals["clip_frac"] / denom,
+            "cfm_new": totals["cfm_new"] / denom,
+            "cfm_old": totals["cfm_old"] / denom,
+            "grad_norm": totals["grad_norm"] / denom,
+            "grad_norm_critic": totals["grad_norm_critic"] / denom,
+            "kl": totals["kl"] / denom,
+            "action_delta": action_delta,
+            "param_rms_delta": param_rms_delta,
+            "mini_batch_size": float(mini_batch_size),
+        }
+        return self._build_metrics(rollout, agg_out, collect_time, update_time)
 
-    def _update_lr(self, kl_mean: torch.Tensor) -> None:
-        desired_kl = float(self.cfg.desired_kl)
-        if kl_mean > desired_kl * 2.0:
-            self.actor_learning_rate = max(self.min_lr, self.actor_learning_rate / 1.5)
-            self.critic_learning_rate = max(self.min_lr, self.critic_learning_rate / 1.5)
-        elif 0.0 < kl_mean < desired_kl / 2.0:
-            self.actor_learning_rate = min(self.max_lr, self.actor_learning_rate * 1.5)
-            self.critic_learning_rate = min(self.max_lr, self.critic_learning_rate * 1.5)
-        for pg in self.actor_optimizer.param_groups:
-            pg["lr"] = self.actor_learning_rate
-        for pg in self.critic_optimizer.param_groups:
-            pg["lr"] = self.critic_learning_rate
 
     def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
-        actor_obs = self._norm_actor(obs, update=False)
-        mean = self.actor.act_inference(actor_obs)
-        return mean.unsqueeze(1)
+
+        actor_obs_n = self._norm_actor(obs, update=False)
+        action = self.actor.act_inference(actor_obs_n, eval_mode="zero")
+        return action.unsqueeze(1)
 
 
-    def _build_metrics(self, rollout, totals, grad_norm, collect_time, update_time,
-                       action_delta, param_rms_delta) -> dict:
+    def _add_first_failure_metrics(self, metrics: dict, rollout: dict) -> None:
+
+        T = self.num_steps_per_env
+        fds = rollout.get("first_done_step")
+        if fds is None:
+            for k in ("first_failure_chunk_mean", "first_failure_chunk_min", "first_failure_chunk_max",
+                      "first_failure_phase_mean", "first_failure_phase_min", "first_failure_phase_max"):
+                metrics[f"rollout/{k}"] = float("nan")
+            return
+        died = fds < T
+        timeout = rollout["first_done_timeout"]
+        if bool(died.any()):
+            steps = fds[died].float()
+            metrics["rollout/first_failure_chunk_mean"] = float(steps.mean().item())
+            metrics["rollout/first_failure_chunk_min"] = float(steps.min().item())
+            metrics["rollout/first_failure_chunk_max"] = float(steps.max().item())
+        else:
+            for k in ("first_failure_chunk_mean", "first_failure_chunk_min", "first_failure_chunk_max"):
+                metrics[f"rollout/{k}"] = float("nan")
+        phase = rollout["first_done_phase"]
+        valid_phase = phase[phase >= 0]
+        if valid_phase.numel() > 0:
+            metrics["rollout/first_failure_phase_mean"] = float(valid_phase.float().mean().item())
+            metrics["rollout/first_failure_phase_min"] = float(valid_phase.min().item())
+            metrics["rollout/first_failure_phase_max"] = float(valid_phase.max().item())
+        else:
+            for k in ("first_failure_phase_mean", "first_failure_phase_min", "first_failure_phase_max"):
+                metrics[f"rollout/{k}"] = float("nan")
+        metrics["rollout/first_failure_ee_body_frac"] = float((rollout["first_done_ee_body"] & died).float().mean().item())
+        metrics["rollout/first_failure_anchor_pos_frac"] = float((rollout["first_done_anchor_pos"] & died).float().mean().item())
+        metrics["rollout/first_failure_anchor_ori_frac"] = float((rollout["first_done_anchor_ori"] & died).float().mean().item())
+        metrics["rollout/first_failure_timeout_frac"] = float((timeout & died).float().mean().item())
+        metrics["rollout/failure_frac"] = float((died & (~timeout)).float().mean().item())
+
+    def _build_metrics(self, rollout, agg, collect_time, update_time) -> dict:
         rewards = rollout["rewards"]
         dones = rollout["dones"]
         metrics = {
-            "ppo/value_loss": totals["value"],
-            "ppo/surrogate_loss": totals["surrogate"],
-            "ppo/entropy": totals["entropy"],
-            "ppo/kl": totals["kl"],
-            "ppo/actor_lr": self.actor_learning_rate,
-            "ppo/critic_lr": self.critic_learning_rate,
-            "ppo/grad_norm": grad_norm,
-            "ppo/action_std_mean": float(self.actor.std.detach().mean().item()),
+            "fpo/actor_loss": agg["actor_loss"],
+            "fpo/value_loss": agg["value_loss"],
+            "fpo/ratio": agg["ratio"],
+            "fpo/ratio_min": agg["ratio_min"],
+            "fpo/ratio_max": agg["ratio_max"],
+            "fpo/clip_frac": agg["clip_frac"],
+            "fpo/cfm_new": agg["cfm_new"],
+            "fpo/cfm_old": agg["cfm_old"],
+            "fpo/grad_norm": agg["grad_norm"],
+            "fpo/grad_norm_critic": agg["grad_norm_critic"],
+            "fpo/kl": agg["kl"],
+            "fpo/lr": self.learning_rate,
+            "fpo/critic_lr": self.critic_learning_rate,
             "rollout/reward_step_mean": float(rewards.mean().item()),
             "rollout/done_frac": float(dones.float().mean().item()),
+            "act/abs_max_all": float(rollout.get("action_abs_max", 0.0)),
             "timing/collect_s": collect_time,
             "timing/update_s": update_time,
-            "policy/action_delta": action_delta,
-            "policy/param_rms_delta": param_rms_delta,
+            "policy/action_delta": agg["action_delta"],
+            "policy/param_rms_delta": agg["param_rms_delta"],
+            "policy/effective_mini_batch_size": agg["mini_batch_size"],
         }
-
         for key, mask in rollout["done_terms_union"].items():
             metrics[f"done/{key}_frac"] = float(mask.float().mean().item())
 
@@ -445,11 +612,9 @@ class PPO(Algorithm):
         if done_rollout_steps > 0:
             for k, s in done_rollout_sums.items():
                 metrics[f"done_rollout/{k}_frac"] = s / done_rollout_steps
-
         for info in rollout["first_chunk_infos"]:
             for k, v in info["reward_terms"].items():
                 metrics[f"reward/{k}_mean"] = float(v.mean().item())
-
         if self._train_reward_buffer:
             metrics["train/mean_reward"] = float(sum(self._train_reward_buffer) / len(self._train_reward_buffer))
             metrics["train/mean_episode_length"] = float(sum(self._train_length_buffer) / len(self._train_length_buffer))
@@ -462,7 +627,7 @@ class PPO(Algorithm):
 
 
         with torch.no_grad():
-            greedy = self.actor.act_inference(rollout["actor_obs"][0])
+            greedy = self.actor.act_inference(rollout["actor_obs"][0], eval_mode="zero")
             g_abs = greedy.abs()
             g_flat = g_abs.reshape(-1)
             act_abs = g_abs.mean(dim=0)
@@ -487,35 +652,6 @@ class PPO(Algorithm):
         for key in ("top_bin", "top_prob", "failed_sum", "entropy", "peak_bin"):
             metrics[f"sampler/{key}"] = float(stats.get(key, float("nan")))
 
-
-    def _add_first_failure_metrics(self, metrics: dict, rollout: dict) -> None:
-
-        T = self.num_steps_per_env
-        fds = rollout["first_done_step"]
-        died = fds < T
-        timeout = rollout["first_done_timeout"]
-        if bool(died.any()):
-            steps = fds[died].float()
-            metrics["rollout/first_failure_chunk_mean"] = float(steps.mean().item())
-            metrics["rollout/first_failure_chunk_min"] = float(steps.min().item())
-            metrics["rollout/first_failure_chunk_max"] = float(steps.max().item())
-        else:
-            for k in ("first_failure_chunk_mean", "first_failure_chunk_min", "first_failure_chunk_max"):
-                metrics[f"rollout/{k}"] = float("nan")
-        phase = rollout["first_done_phase"]
-        valid_phase = phase[phase >= 0]
-        if valid_phase.numel() > 0:
-            metrics["rollout/first_failure_phase_mean"] = float(valid_phase.float().mean().item())
-            metrics["rollout/first_failure_phase_min"] = float(valid_phase.min().item())
-            metrics["rollout/first_failure_phase_max"] = float(valid_phase.max().item())
-        else:
-            for k in ("first_failure_phase_mean", "first_failure_phase_min", "first_failure_phase_max"):
-                metrics[f"rollout/{k}"] = float("nan")
-        metrics["rollout/first_failure_ee_body_frac"] = float((rollout["first_done_ee_body"] & died).float().mean().item())
-        metrics["rollout/first_failure_anchor_pos_frac"] = float((rollout["first_done_anchor_pos"] & died).float().mean().item())
-        metrics["rollout/first_failure_anchor_ori_frac"] = float((rollout["first_done_anchor_ori"] & died).float().mean().item())
-        metrics["rollout/first_failure_timeout_frac"] = float((timeout & died).float().mean().item())
-        metrics["rollout/failure_frac"] = float((died & (~timeout)).float().mean().item())
 
     def _add_joint_group_metrics(self, metrics: dict, act_abs: torch.Tensor) -> None:
 
@@ -574,11 +710,12 @@ class PPO(Algorithm):
             flush=True,
         )
         print(
-            f"[PPO] value_loss={metrics['ppo/value_loss']:.5f} "
-            f"surrogate={metrics['ppo/surrogate_loss']:.5f} "
-            f"entropy={metrics['ppo/entropy']:.5f} kl={metrics['ppo/kl']:.5f} "
-            f"actor_lr={metrics['ppo/actor_lr']:.6f} critic_lr={metrics['ppo/critic_lr']:.6f} "
-            f"grad={metrics['ppo/grad_norm']:.5f} action_std={metrics['ppo/action_std_mean']:.4f}",
+            f"[FPO++] actor_loss={metrics['fpo/actor_loss']:.5f} value_loss={metrics['fpo/value_loss']:.5f} "
+            f"ratio={metrics['fpo/ratio']:.4f} [{metrics['fpo/ratio_min']:.3f},{metrics['fpo/ratio_max']:.3f}] "
+            f"clip_frac={metrics['fpo/clip_frac']:.4f} cfm_old={metrics['fpo/cfm_old']:.4f} "
+            f"cfm_new={metrics['fpo/cfm_new']:.4f} kl={metrics['fpo/kl']:.6f} "
+            f"grad={metrics['fpo/grad_norm']:.4f} grad_c={metrics.get('fpo/grad_norm_critic', float('nan')):.4f} "
+            f"lr={metrics['fpo/lr']:.6f} critic_lr={metrics.get('fpo/critic_lr', float('nan')):.6f}",
             flush=True,
         )
 
@@ -675,7 +812,8 @@ class PPO(Algorithm):
             f"abs_mean={metrics.get('act/rollout_abs_mean', float('nan')):.4f} "
             f"abs_p95={metrics.get('act/rollout_abs_p95', float('nan')):.4f} "
             f"abs_p99={metrics.get('act/rollout_abs_p99', float('nan')):.4f} "
-            f"abs_max={metrics.get('act/rollout_abs_max', float('nan')):.4f}",
+            f"abs_max={metrics.get('act/rollout_abs_max', float('nan')):.4f} "
+            f"abs_max_all={metrics.get('act/abs_max_all', float('nan')):.4f}",
             flush=True,
         )
         print(
@@ -725,20 +863,25 @@ class PPO(Algorithm):
     def log_banner(self) -> None:
         cfg = self.cfg
         env = self.env
-        print("[INFO] Starting PPO training", flush=True)
+        print("[INFO] Starting FPO++ training", flush=True)
         print(
             f"[INFO] task={env.task.name} terrain={env.task.terrain} motion_file={env.task.motion_file}",
             flush=True,
         )
         print(
-            f"[INFO] algo=ppo actor_obs_dim={self.actor_obs_dim} critic_obs_dim={self.critic_obs_dim} "
-            f"action_dim={self.num_act} num_envs={env.num_envs} num_steps_per_env={self.num_steps_per_env} "
+            f"[INFO] algorithm=fpo actor_obs_dim={self.actor_obs_dim} critic_obs_dim={self.critic_obs_dim} "
+            f"action_dim={self.num_act} horizon=1 "
+            f"chunk_dim={self.chunk_dim} num_envs={env.num_envs} num_steps_per_env={self.num_steps_per_env} "
+            f"flow_steps={self.flow_steps} num_mc={self.num_mc} actor_scale={self.actor.actor_scale} "
+            f"action_perturb_std={self.actor.action_perturb_std} timestep_embed_dim={self.actor.timestep_embed_dim} "
+            f"cfm_reduction={self.actor.cfm_loss_reduction} clip={cfg.clip_range} "
+            f"cfm_diff_clamp_max={self.cfm_diff_clamp_max} cfm_loss_clamp={self.cfm_loss_clamp} "
+            f"adv_clamp={self.adv_clamp} schedule={self.schedule} desired_kl={self.desired_kl} "
+            f"num_micro_batches={self.num_micro_batches} "
             f"num_learning_epochs={cfg.num_learning_epochs} num_mini_batches={cfg.num_mini_batches} "
-            f"gamma={cfg.discount_gamma} lam={cfg.gae_lambda} clip={cfg.clip_range} "
-            f"entropy_coef={cfg.entropy_coef} value_loss_coef={cfg.value_loss_coef} "
-            f"desired_kl={cfg.desired_kl} actor_lr={cfg.actor_learning_rate} critic_lr={cfg.critic_learning_rate} "
-            f"init_noise_std={cfg.init_noise_std} empirical_normalization={cfg.empirical_normalization} "
-            f"init_at_random_ep_len={cfg.init_at_random_ep_len} "
+            f"gamma={cfg.discount_gamma} lam={cfg.gae_lambda} value_loss_coef={cfg.value_loss_coef} "
+            f"lr={cfg.policy_lr} critic_lr={self.critic_learning_rate} weight_decay={cfg.weight_decay} "
+            f"empirical_normalization={cfg.empirical_normalization} "
             f"actor_hidden_dims={list(cfg.actor_hidden_dims)} activation={cfg.activation}",
             flush=True,
         )

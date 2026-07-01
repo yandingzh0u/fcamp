@@ -1,7 +1,3 @@
-"""Unit tests for the failure-predecessor adaptive motion sampler.
-
-Run:  python tests/test_adaptive_sampling.py   (from the repo root)
-"""
 from __future__ import annotations
 
 import torch
@@ -9,13 +5,13 @@ import torch
 from env.adaptive_sampling import ADAPTIVE_SAMPLER_VERSION, AdaptiveTimestepsSampler
 
 
-MOTION_FRAMES = 959  # frames 0..958
+MOTION_FRAMES = 959
 ENV_FPS = 50
 
 
 def _sampler(**kw) -> AdaptiveTimestepsSampler:
     params = dict(
-        num_bins=0,          # auto -> floor(959/50)+1 = 20
+        num_bins=0,
         env_fps=ENV_FPS,
         adaptive_alpha=0.001,
         adaptive_predecessor_ratio=0.8,
@@ -36,7 +32,7 @@ def check(name, cond):
 
 
 def test_auto_num_bins() -> None:
-    # ~1 bin per second: floor(959/50)+1 = 20.
+
     sampler = _sampler(num_bins=0)
     check("auto num_bins == 20", sampler.num_bins == 20)
     explicit = _sampler(num_bins=33)
@@ -48,7 +44,7 @@ def test_bin_ema_fold_and_zero() -> None:
     sampler.update_current_failure_count(torch.full((10,), 834, dtype=torch.long))
     check("bin accumulator holds raw deaths pre-fold", float(sampler.current_bin_failed_count.sum()) == 10.0)
     sampler.update_failure_ema()
-    # alpha * count: 0.5 * 10 = 5 in the death frame's bin.
+
     bin834 = sampler.frames_to_bins(torch.tensor([834]))[0].item()
     check("bin EMA = alpha*count (first fold)", abs(float(sampler.bin_failed_count[bin834]) - 5.0) < 1e-6)
     check("bin accumulator zeroed after fold", float(sampler.current_bin_failed_count.sum()) == 0.0)
@@ -63,7 +59,7 @@ def test_empty_failures_is_noop() -> None:
 
 
 def test_bin_maps_death_to_bin17() -> None:
-    # Death 834 -> bin floor(834*20/959) = 17 (range [815,862]).
+
     sampler = _sampler()
     b = int(sampler.frames_to_bins(torch.tensor([834]))[0].item())
     check("death 834 maps to bin 17", b == 17)
@@ -94,7 +90,7 @@ def test_predecessor_sampler_shifts_death_bin_back_one() -> None:
 
 
 def test_conditional_no_boundary_spikes() -> None:
-    # Deaths far below the range must not leak in nor pile on a boundary (conditional, not clamp).
+
     torch.manual_seed(0)
     sampler = _sampler()
     sampler.update_current_failure_count(torch.full((4096,), 200, dtype=torch.long))

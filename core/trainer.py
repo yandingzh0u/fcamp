@@ -1,9 +1,3 @@
-"""Algorithm-agnostic training loop.
-
-Owns: the env, the per-update schedule (collect -> update -> log -> validate -> checkpoint),
-and resume. Knows nothing about flow matching, GRPO groups, chunks, or critics — all of that
-lives behind the Algorithm interface.
-"""
 from __future__ import annotations
 
 import time
@@ -12,37 +6,28 @@ from pathlib import Path
 import torch
 
 from .checkpoint import Checkpointer
-from .config import Config
-from .env_factory_adapter import build_env
-from .logging import log_validation_metrics
+from .config import ExperimentConfig
+from .validation_logging import log_validation_metrics
 from .validation import run_validation_rollout, validation_max_steps
+from env.mimic import G1MimicEnv
 
 
 class CoreTrainer:
-    def __init__(self, simulation_app, cfg: Config, algo_factory):
+    def __init__(self, simulation_app, cfg: ExperimentConfig, algo_factory, checkpoint_dir: Path):
         self.simulation_app = simulation_app
         self.cfg = cfg
-        self.env_cfg = cfg.env
-        self.algo_cfg = cfg.algo
-        self.train_cfg = cfg.train
+        self.env_cfg = cfg.environment
+        self.algo_cfg = cfg.parameters
+        self.train_cfg = cfg.training
         self.start_update = 1
 
-        torch.manual_seed(cfg.train.seed)
+        torch.manual_seed(cfg.training.seed)
         if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(cfg.train.seed)
+            torch.cuda.manual_seed_all(cfg.training.seed)
 
-        self.env = build_env(cfg)
-        # The env resolves max_episode_steps<=0 to the motion clip length; mirror it back so
-        # reward projection / validation horizon use the real cap.
-        resolved = int(getattr(self.env.task_cfg, "max_episode_steps", cfg.env.max_episode_steps))
-        if resolved > 0:
-            cfg.env.max_episode_steps = resolved
-
-        self.checkpoint_dir = (
-            Path(cfg.train.checkpoint_dir).expanduser().resolve() if cfg.train.checkpoint_dir else None
-        )
-        if self.checkpoint_dir is not None:
-            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.env = G1MimicEnv(cfg.environment, cfg.observation_group_size)
+        self.checkpoint_dir = checkpoint_dir.resolve()
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         self.algo = algo_factory(self.algo_cfg, self.env, simulation_app)
         self.algo.build()
@@ -50,14 +35,13 @@ class CoreTrainer:
 
         self.current_observation = self.algo.initial_reset()
 
-        if cfg.train.resume:
-            self.checkpointer.load(Path(cfg.train.resume).expanduser().resolve())
+        if cfg.training.resume:
+            self.checkpointer.load(Path(cfg.training.resume))
 
     def train(self) -> None:
         tcfg = self.train_cfg
         self.algo.log_banner()
-        if self.checkpoint_dir is not None:
-            print(f"[INFO] checkpoint_dir={self.checkpoint_dir}", flush=True)
+        print(f"[INFO] checkpoint_dir={self.checkpoint_dir}", flush=True)
         if tcfg.resume:
             print(f"[INFO] resumed_from={tcfg.resume}", flush=True)
 
@@ -68,18 +52,15 @@ class CoreTrainer:
             current_obs = self.algo.reset_for_update(update_idx)
             self.current_observation = current_obs
             rollout = self.algo.collect(current_obs)
-            self.current_observation = rollout.get("next_observation", current_obs)
+            self.current_observation = rollout["next_observation"]
             collect_time = time.perf_counter() - t0
 
             metrics = self.algo.update(rollout, collect_time)
 
-            # Free the rollout BEFORE the next iteration's collect() runs. Otherwise the old
-            # rollout's large MC buffers (cfm_eps / x1_pred, ~1.4GiB at 8192x48x16) stay alive
-            # while the next collect() allocates a fresh rollout + CFM activations, doubling peak
-            # memory and OOM-ing on the 2nd collect. empty_cache() returns the freed blocks to the
-            # CUDA allocator so Isaac/PhysX (non-PyTorch) can reuse that VRAM.
+
             del rollout
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             if update_idx % tcfg.log_every == 0:
                 self.algo.log(update_idx, tcfg.max_updates, metrics)
@@ -94,7 +75,7 @@ class CoreTrainer:
                 )
                 vt0 = time.perf_counter()
                 metrics.update(run_validation_rollout(self))
-                dir_phase = int(getattr(tcfg, "validation_directional_start_phase", -1))
+                dir_phase = tcfg.validation_directional_start_phase
                 if dir_phase >= 0:
                     dir_metrics = run_validation_rollout(self, start_phase_override=dir_phase)
                     for key, value in dir_metrics.items():
@@ -108,16 +89,15 @@ class CoreTrainer:
                 if update_idx % tcfg.log_every == 0:
                     log_validation_metrics(self.env, metrics)
 
-            if self.checkpoint_dir is not None and (
+            if (
                 update_idx == tcfg.max_updates or (tcfg.save_every > 0 and update_idx % tcfg.save_every == 0)
             ):
                 self.checkpointer.save(update_idx, metrics)
             if self.checkpointer.target_reached(metrics):
-                if self.checkpoint_dir is not None:
-                    self.checkpointer.save(update_idx, metrics, filename=tcfg.success_checkpoint_name)
+                self.checkpointer.save(update_idx, metrics, filename="success.pt")
                 print(
                     f"[SUCCESS] validation reached {tcfg.target_validation_steps} steps; "
-                    f"saved {tcfg.success_checkpoint_name}",
+                    "saved success.pt",
                     flush=True,
                 )
                 break

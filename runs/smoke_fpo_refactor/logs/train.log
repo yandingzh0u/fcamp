@@ -1,0 +1,64 @@
+[INFO] run_dir=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/smoke_fpo_refactor
+[INFO] log_file=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/smoke_fpo_refactor/logs/train.log
+[INFO] algorithm=fpo
+[INFO] IsaacLab logging to file: /tmp/isaaclab_2026-07-01_16-51-27.log
+[INFO] Starting FPO++ training
+[INFO] task=largebox_plane terrain=plane motion_file=/home/y/my_mimic_mixgrpo/holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj.npz
+[INFO] algorithm=fpo actor_obs_dim=171 critic_obs_dim=286 action_dim=29 horizon=1 chunk_dim=29 num_envs=8192 num_steps_per_env=24 flow_steps=16 num_mc=16 actor_scale=1.0 action_perturb_std=0.1 timestep_embed_dim=8 cfm_reduction=mean clip=0.01 cfm_diff_clamp_max=3.0 cfm_loss_clamp=3.0 adv_clamp=5.0 schedule=adaptive desired_kl=0.0001 num_micro_batches=8 num_learning_epochs=5 num_mini_batches=4 gamma=0.99 lam=0.95 value_loss_coef=1.0 lr=0.0001 critic_lr=0.001 weight_decay=0.0001 empirical_normalization=True actor_hidden_dims=[1024, 512, 256] activation=elu
+[INFO] checkpoint_dir=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/smoke_fpo_refactor/checkpoints
+[UPDATE] 1/3 reward_step=-0.08086 done_frac=0.04685 mean_reward=-1.35250 mean_len=16.33
+[FPO++] actor_loss=0.00073 value_loss=0.28016 ratio=0.9999 [0.955,1.046] clip_frac=0.1170 cfm_old=1.9961 cfm_new=1.9962 kl=0.000051 grad=0.0462 grad_c=0.9913 lr=0.001139 critic_lr=0.010000
+[TRAIN] mean_reward=-1.35250 mean_len=16.33 recent_eps=100 completed_eps=9211
+[UPDATE_EFFECT] action_delta=0.01051241 param_rms_delta=0.00058868
+[TIME] collect=6.852s update=5.877s
+[DONE] timeout=0.03186 anchor_pos=0.00073 anchor_ori=0.00696 ee_body=0.74792
+[DONE_ROLLOUT] timeout=0.00133 anchor_pos=0.00003 anchor_ori=0.00029 ee_body=0.04539
+[FIRST_FAILURE] step_mean=12.50 step_min=0 step_max=23 phase_mean=160.90 phase_min=3 phase_max=324 anchor_pos=0.00073 anchor_ori=0.00696 ee_body=0.73364 timeout=0.03186
+[TRACK_CHUNK0] anchor_pos=0.97816 anchor_ori=0.83062 body_pos=0.97885 body_ori=0.79468 body_lin=0.49937 body_ang=0.02593
+[TRACK_ROLLOUT] anchor_pos=0.79856 anchor_ori=0.46529 body_pos=0.79397 body_ori=0.28462 body_lin=0.25144 body_ang=0.01488
+[TRAIN_COST] action_rate=29.51160 joint_limit=0.03034 undesired_contacts=1.82617
+[REWARD_WEIGHTED] pos=0.03954 penalty=-0.12040 total=-0.08087 act_rate=-0.11212 contacts=-0.00233
+[ACT_GREEDY] abs_mean=0.0624 abs_p95=0.1518 abs_p99=0.1966 abs_max=0.3941 legs=0.0638 waist=0.0629 arms=0.0611
+[ACT_ROLLOUT] abs_mean=0.8042 abs_p95=1.9748 abs_p99=2.5966 abs_max=5.3313 abs_max_all=5.3313
+[SAMPLER] top_bin=0 top_prob=0.360 peak_bin=0 failed_sum=8.8873 entropy=0.8829
+[TRAIN_BODY] torso_ori=6.03deg l_wrist_ori=12.49deg r_wrist_ori=14.01deg l_elbow_ori=10.39deg r_elbow_ori=12.34deg l_shoulder_ori=7.78deg r_shoulder_ori=7.86deg
+[TRAIN_ANG] torso=2.825 l_wrist=8.003 r_wrist=10.062 l_elbow=6.322 r_elbow=8.598 l_shoulder=4.646 r_shoulder=5.491
+[TRAIN_ACT] l_wrist_r=0.0802 l_wrist_p=0.0415 l_wrist_y=0.0643 r_wrist_r=0.0569 r_wrist_p=0.0862 r_wrist_y=0.0522 l_elbow=0.0511 r_elbow=0.0601
+[UPDATE] 2/3 reward_step=-0.08666 done_frac=0.06060 mean_reward=-1.43875 mean_len=16.73
+[FPO++] actor_loss=0.00077 value_loss=0.28677 ratio=0.9998 [0.944,1.061] clip_frac=0.1440 cfm_old=1.9945 cfm_new=1.9947 kl=0.000061 grad=0.0320 grad_c=2.7050 lr=0.001709 critic_lr=0.010000
+[TRAIN] mean_reward=-1.43875 mean_len=16.73 recent_eps=100 completed_eps=21125
+[UPDATE_EFFECT] action_delta=0.01032229 param_rms_delta=0.00105111
+[TIME] collect=5.320s update=5.822s
+[DONE] timeout=0.00500 anchor_pos=0.00439 anchor_ori=0.01562 ee_body=0.85486
+[DONE_ROLLOUT] timeout=0.00021 anchor_pos=0.00018 anchor_ori=0.00065 ee_body=0.05982
+[FIRST_FAILURE] step_mean=7.91 step_min=0 step_max=23 phase_mean=151.55 phase_min=1 phase_max=324 anchor_pos=0.00427 anchor_ori=0.01294 ee_body=0.84851 timeout=0.00500
+[TRACK_CHUNK0] anchor_pos=0.73068 anchor_ori=0.39700 body_pos=0.73402 body_ori=0.23617 body_lin=0.22150 body_ang=0.01350
+[TRACK_ROLLOUT] anchor_pos=0.72726 anchor_ori=0.39117 body_pos=0.72389 body_ori=0.21968 body_lin=0.22907 body_ang=0.01342
+[TRAIN_COST] action_rate=56.27509 joint_limit=0.03064 undesired_contacts=1.19263
+[REWARD_WEIGHTED] pos=0.03491 penalty=-0.12141 total=-0.08650 act_rate=-0.11328 contacts=-0.00217
+[ACT_GREEDY] abs_mean=0.0691 abs_p95=0.1693 abs_p99=0.2200 abs_max=0.3845 legs=0.0705 waist=0.0693 arms=0.0679
+[ACT_ROLLOUT] abs_mean=0.8036 abs_p95=1.9733 abs_p99=2.5940 abs_max=5.6489 abs_max_all=5.6489
+[SAMPLER] top_bin=0 top_prob=0.374 peak_bin=0 failed_sum=20.4159 entropy=0.8758
+[TRAIN_BODY] torso_ori=21.09deg l_wrist_ori=39.34deg r_wrist_ori=45.42deg l_elbow_ori=36.45deg r_elbow_ori=41.69deg l_shoulder_ori=29.22deg r_shoulder_ori=31.50deg
+[TRAIN_ANG] torso=3.887 l_wrist=9.661 r_wrist=10.248 l_elbow=8.048 r_elbow=8.578 l_shoulder=6.176 r_shoulder=6.435
+[TRAIN_ACT] l_wrist_r=0.0900 l_wrist_p=0.0577 l_wrist_y=0.0683 r_wrist_r=0.0679 r_wrist_p=0.0898 r_wrist_y=0.0610 l_elbow=0.0602 r_elbow=0.0650
+[UPDATE] 3/3 reward_step=-0.08645 done_frac=0.06031 mean_reward=-1.48397 mean_len=16.91
+[FPO++] actor_loss=0.00097 value_loss=0.15922 ratio=0.9998 [0.870,1.133] clip_frac=0.1610 cfm_old=1.9954 cfm_new=1.9956 kl=0.000071 grad=0.0260 grad_c=1.5787 lr=0.002563 critic_lr=0.010000
+[TRAIN] mean_reward=-1.48397 mean_len=16.91 recent_eps=100 completed_eps=32982
+[UPDATE_EFFECT] action_delta=0.01086293 param_rms_delta=0.00182665
+[TIME] collect=5.394s update=5.820s
+[DONE] timeout=0.00049 anchor_pos=0.00952 anchor_ori=0.01782 ee_body=0.86646
+[DONE_ROLLOUT] timeout=0.00002 anchor_pos=0.00040 anchor_ori=0.00074 ee_body=0.05948
+[FIRST_FAILURE] step_mean=8.35 step_min=0 step_max=23 phase_mean=151.85 phase_min=7 phase_max=324 anchor_pos=0.00952 anchor_ori=0.01685 ee_body=0.85791 timeout=0.00049
+[TRACK_CHUNK0] anchor_pos=0.71302 anchor_ori=0.38473 body_pos=0.70919 body_ori=0.21533 body_lin=0.23518 body_ang=0.01379
+[TRACK_ROLLOUT] anchor_pos=0.72160 anchor_ori=0.38962 body_pos=0.71495 body_ori=0.21551 body_lin=0.24092 body_ang=0.01400
+[TRAIN_COST] action_rate=56.63140 joint_limit=0.02974 undesired_contacts=1.03223
+[REWARD_WEIGHTED] pos=0.03482 penalty=-0.12126 total=-0.08644 act_rate=-0.11334 contacts=-0.00211
+[ACT_GREEDY] abs_mean=0.0689 abs_p95=0.1695 abs_p99=0.2209 abs_max=0.3858 legs=0.0702 waist=0.0714 arms=0.0672
+[ACT_ROLLOUT] abs_mean=0.8041 abs_p95=1.9748 abs_p99=2.5970 abs_max=5.4088 abs_max_all=5.4088
+[SAMPLER] top_bin=0 top_prob=0.374 peak_bin=0 failed_sum=31.6488 entropy=0.8758
+[TRAIN_BODY] torso_ori=21.65deg l_wrist_ori=43.75deg r_wrist_ori=50.20deg l_elbow_ori=40.43deg r_elbow_ori=46.14deg l_shoulder_ori=31.91deg r_shoulder_ori=35.11deg
+[TRAIN_ANG] torso=4.043 l_wrist=9.626 r_wrist=10.025 l_elbow=7.913 r_elbow=8.329 l_shoulder=6.128 r_shoulder=6.341
+[TRAIN_ACT] l_wrist_r=0.0835 l_wrist_p=0.0597 l_wrist_y=0.0678 r_wrist_r=0.0680 r_wrist_p=0.0836 r_wrist_y=0.0635 l_elbow=0.0580 r_elbow=0.0627
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/smoke_fpo_refactor/checkpoints/update_0003.pt
+[INFO] Training finished.

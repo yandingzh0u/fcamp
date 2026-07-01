@@ -11,7 +11,7 @@ from isaaclab.utils.math import (
     yaw_quat,
 )
 
-from .config import CRITIC_OBS_DIM, OBS_DIM
+from .spec import CRITIC_OBS_DIM, OBS_DIM
 
 
 class MimicObservationMixin:
@@ -103,11 +103,8 @@ class MimicObservationMixin:
             reference,
         )
         anchor_z_err = (reference["anchor_pos_w"][:, 2] - context["robot_anchor_pos_w"][:, 2]).unsqueeze(-1)
-        # Signed z-error of the termination bodies (ankles + wrists) -- the EXACT quantity the
-        # termination gate checks (terminal.py: |ref_z - robot_z| > EE_Z_TERMINATION_THRESHOLD).
-        # The actor previously only saw anchor_z_err + foot_contact, so at the chunk start it
-        # was blind to how close the wrists/ankles were to the death line (the dominant crawl
-        # death cause). Feed the signed margin so the policy can react before the gate fires.
+
+
         termination_z_err = (
             context["body_pos_relative_w"][:, self.termination_body_indices, 2]
             - context["robot_body_pos_w"][:, self.termination_body_indices, 2]
@@ -117,9 +114,8 @@ class MimicObservationMixin:
             torch.max(torch.norm(net_contact_forces[:, :, self.foot_contact_body_ids], dim=-1), dim=1)[0]
             > 1.0
         ).to(dtype=motion_anchor_ori_b.dtype)
-        # Contact state of the termination bodies (ankles + wrists). Wrist contact (the
-        # half-sphere hands touching the slope) is part of the support during crawl and is
-        # directly tied to the wrist-z release that kills the episode at the stand-up phase.
+
+
         termination_contact = (
             torch.max(torch.norm(net_contact_forces[:, :, self.termination_contact_body_ids], dim=-1), dim=1)[0]
             > 1.0
@@ -196,20 +192,16 @@ class MimicObservationMixin:
         return observation
 
     def _add_uniform_noise(self, value: torch.Tensor, n_min: float, n_max: float) -> torch.Tensor:
-        if hasattr(self, "task_cfg") and not getattr(self.task_cfg, "observation_noise", True):
+        if not self.observation_noise:
             return value
-        generation_count = int(getattr(self.task_cfg, "num_generations", 1)) if hasattr(self, "task_cfg") else 1
+        generation_count = self.observation_group_size
         if (
             generation_count > 1
             and value.shape[0] == self.num_envs
             and self.num_envs % generation_count == 0
         ):
-            # GRPO same-state contract: draw one noise sample per group and share it across
-            # the group's generation branches. Sibling branches start from the identical
-            # group state, so giving them identical observation noise means the ONLY
-            # intra-group difference is the SDE action noise (what GRPO's group-relative
-            # advantage is supposed to isolate). Per-env independent noise would inject a
-            # second, uncontrolled source of variation into the group baseline.
+
+
             group_count = self.num_envs // generation_count
             group_shape = (group_count, *value.shape[1:])
             group_noise = torch.empty(group_shape, dtype=value.dtype, device=value.device).uniform_(n_min, n_max)

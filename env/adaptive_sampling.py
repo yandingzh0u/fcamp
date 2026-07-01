@@ -2,21 +2,12 @@ from __future__ import annotations
 
 import torch
 
-# Bumped whenever the on-disk sampler state layout changes. Old checkpoints that carry an
-# incompatible sampler state (version mismatch / absent) are NOT restored -- resuming an older
-# checkpoint therefore starts the sampler fresh.
-#   v5: per-bin death-frame EMA. The persisted statistic remains compatible with old v5
-#       checkpoints; only reset sampling uses the causal predecessor distribution.
+
 ADAPTIVE_SAMPLER_VERSION = 5
 
 
 class AdaptiveTimestepsSampler:
-    """Failure-predecessor motion start sampler.
 
-    Death frames are accumulated in ~1-second bins. Before reset, failure mass in bin ``b`` is
-    shifted to ``b - lookback_bins`` and mixed with global-uniform exploration. Reset never
-    samples the death bin merely because the robot died there.
-    """
 
     def __init__(
         self,
@@ -33,7 +24,7 @@ class AdaptiveTimestepsSampler:
         self.motion_time_step_total = int(max(1, motion_time_step_total))
         self.num_frames = self.motion_time_step_total
         if int(num_bins) <= 0:
-            # ~1 bin per second of motion; auto-derived for different clips.
+
             num_bins = self.num_frames // int(max(1, env_fps)) + 1
         self.num_bins = int(max(1, num_bins))
         self.adaptive_alpha = min(1.0, max(0.0, float(adaptive_alpha)))
@@ -45,7 +36,7 @@ class AdaptiveTimestepsSampler:
         self.current_bin_failed_count = torch.zeros(self.num_bins, dtype=torch.float32, device=self.device)
         self.bin_failed_count = torch.zeros(self.num_bins, dtype=torch.float32, device=self.device)
 
-    # --------------------------------------------------------------------- failure recording
+
     def frames_to_bins(self, failed_at_time_step: torch.Tensor) -> torch.Tensor:
         return torch.clamp(
             (failed_at_time_step.reshape(-1).long() * self.num_bins) // self.motion_time_step_total,
@@ -54,7 +45,7 @@ class AdaptiveTimestepsSampler:
         )
 
     def update_current_failure_count(self, failed_at_time_step: torch.Tensor) -> None:
-        """Accumulate this step's tracking-failure death frames into the per-step bin accumulator."""
+
         if failed_at_time_step.numel() == 0:
             return
         idx = torch.clamp(failed_at_time_step.reshape(-1).long(), 0, self.num_frames - 1)
@@ -64,12 +55,12 @@ class AdaptiveTimestepsSampler:
         )
 
     def update_failure_ema(self) -> None:
-        """Fold the per-step bin accumulator into its EMA, then zero it. Called every step."""
+
         a = self.adaptive_alpha
         self.bin_failed_count = a * self.current_bin_failed_count + (1.0 - a) * self.bin_failed_count
         self.current_bin_failed_count.zero_()
 
-    # --------------------------------------------------------------------- predecessor sampler
+
     @property
     def sampling_probabilities(self) -> torch.Tensor:
         uniform = torch.full(
@@ -97,22 +88,17 @@ class AdaptiveTimestepsSampler:
         return lo, hi
 
     def _sample_predecessor(self, num_samples: int, min_phase: int, max_phase: int) -> torch.Tensor:
-        """Failure-predecessor sampling conditioned inside [min_phase, max_phase].
 
-        True conditional sampling (NOT a post-hoc clamp): each bin is intersected with the range,
-        empty-intersection bins are masked, the remaining bin probabilities are renormalized by the
-        per-frame density, and offsets are drawn only within each bin's intersection."""
         if num_samples <= 0:
             return torch.empty(0, dtype=torch.long, device=self.device)
         all_bins = torch.arange(self.num_bins, device=self.device)
-        lo, hi = self.bin_frame_bounds(all_bins)  # global [lo, hi) per bin
+        lo, hi = self.bin_frame_bounds(all_bins)
         full_span = (hi - lo).clamp_min(1).to(torch.float32)
         lo_eff = torch.clamp(lo, min=min_phase)
         hi_eff = torch.clamp(hi, max=max_phase + 1)
-        span_eff = (hi_eff - lo_eff).clamp_min(0)  # 0 => no overlap with the range
+        span_eff = (hi_eff - lo_eff).clamp_min(0)
 
-        # Bin weight = (global frame density P_b / full_span_b) * in-range frame count, so the
-        # per-FRAME density is the exact conditional restriction of the global distribution.
+
         probs = self.sampling_probabilities / full_span * span_eff.to(torch.float32)
         total = probs.sum()
         if not bool(torch.isfinite(total)) or float(total.item()) <= 0.0:
@@ -129,8 +115,7 @@ class AdaptiveTimestepsSampler:
         return torch.clamp(frames, min=min_phase, max=max_phase)
 
     def sample_frames(self, num_samples: int, min_phase: int, max_phase: int) -> torch.Tensor:
-        """Draw ``num_samples`` start frames from the predecessor distribution,
-        conditioned on the valid range [min_phase, max_phase]."""
+
         if num_samples <= 0:
             return torch.empty(0, dtype=torch.long, device=self.device)
         min_phase = max(0, int(min_phase))
@@ -139,7 +124,7 @@ class AdaptiveTimestepsSampler:
             return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
         return self._sample_predecessor(num_samples, min_phase, max_phase)
 
-    # --------------------------------------------------------------------- persistence
+
     def state_dict(self) -> dict:
         return {
             "version": ADAPTIVE_SAMPLER_VERSION,
@@ -150,8 +135,7 @@ class AdaptiveTimestepsSampler:
         }
 
     def load_state_dict(self, state: dict | None) -> bool:
-        """Restore the bin EMA. Returns False (keeping fresh zeros) on version / shape mismatch --
-        incompatible (e.g. pre-v5) stats are intentionally NOT restored."""
+
         if not state:
             return False
         if int(state.get("version", -1)) != ADAPTIVE_SAMPLER_VERSION:
@@ -165,9 +149,9 @@ class AdaptiveTimestepsSampler:
             self.current_bin_failed_count.copy_(cbfc.to(self.current_bin_failed_count))
         return True
 
-    # --------------------------------------------------------------------- diagnostics
+
     def stats(self, min_phase: int = 0, max_phase: int | None = None) -> dict[str, float]:
-        """Diagnostics for the predecessor reset distribution."""
+
         probabilities = self.sampling_probabilities
         top_prob, top_bin = probabilities.max(dim=0)
         entropy = -(probabilities * probabilities.clamp_min(1.0e-12).log()).sum()

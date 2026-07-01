@@ -7,24 +7,7 @@ import torch
 
 
 class MimicMotionReference:
-    """Loads a reference motion clip and exposes per-frame robot state.
 
-    Supports two on-disk layouts:
-
-    * **Legacy / asset-order** (the original dance npz): ``joint_pos`` is already in the
-      robot action-joint order, ``body_*`` arrays are already in the robot asset-body order,
-      quaternions are wxyz, body 0 is the root. No ``joint_names`` key.
-
-    * **Holosoma whole-body-tracking** npz: carries ``joint_names`` and ``body_names``.
-      ``joint_pos`` has 7 leading root DOFs (xyz + wxyz) then 29 joints in URDF order,
-      ``joint_vel`` has 6 leading root DOFs then 29 joints, ``body_*`` arrays carry every
-      URDF body (incl. a leading ``world`` body) and quaternions are wxyz. We strip the root
-      DOFs and reorder joints/bodies by name into the robot's action/asset order so the rest
-      of the pipeline is unchanged.
-
-    To reorder by name the loader needs the live articulation's body names and the action
-    joint names; the env passes those in.
-    """
 
     def __init__(
         self,
@@ -82,7 +65,7 @@ class MimicMotionReference:
         motion_joint_names = [str(n) for n in data["joint_names"]]
         motion_body_names = [str(n) for n in data["body_names"]]
 
-        # --- joints: strip leading root DOFs, then reorder to action-joint order ---
+
         joint_pos_raw = np.asarray(data["joint_pos"], dtype=np.float32)
         joint_vel_raw = np.asarray(data["joint_vel"], dtype=np.float32)
         num_joints = len(motion_joint_names)
@@ -92,7 +75,7 @@ class MimicMotionReference:
         joint_pos = joint_pos_joints[:, j_idx]
         joint_vel = joint_vel_joints[:, j_idx]
 
-        # --- bodies: reorder to robot asset-body order; quats wxyz kept as wxyz ---
+
         body_pos_raw = np.asarray(data["body_pos_w"], dtype=np.float32)
         body_quat_raw = np.asarray(data["body_quat_w"], dtype=np.float32)
         body_lin_raw = np.asarray(data["body_lin_vel_w"], dtype=np.float32)

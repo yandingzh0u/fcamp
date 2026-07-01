@@ -3,16 +3,22 @@ from __future__ import annotations
 import torch
 
 from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
+from core.config import EnvironmentConfig
 
 from .adaptive_sampling import AdaptiveTimestepsSampler
-from .config import (
+from .spec import (
     CRITIC_OBS_DIM,
     OBS_DIM,
     PUSH_INTERVAL_STEP_RANGE,
     RESET_JOINT_POSITION_RANGE,
     RESET_ROOT_POSE_RANGE,
-    MimicEnvConfig,
     VELOCITY_RANGE,
+    CONTACT_ALLOWED_SUBSTRINGS,
+    MIMIC_ANCHOR_BODY_NAME,
+    MIMIC_BODY_NAMES,
+    MIMIC_EE_BODY_NAMES,
+    MIMIC_FOOT_BODY_NAMES,
+    MIMIC_TERMINATION_BODY_NAMES,
 )
 from .motion import MimicMotionReference
 from .observation import MimicObservationMixin
@@ -21,6 +27,7 @@ from .robot import G1Env
 from .robots.g1 import G1_29DOF_ACTION_NAMES
 from .step import MimicStepMixin
 from .terminal import MimicTerminationMixin
+from .tasks import resolve_task
 
 
 class G1MimicEnv(
@@ -30,19 +37,35 @@ class G1MimicEnv(
     MimicObservationMixin,
     G1Env,
 ):
-    def __init__(self, cfg: MimicEnvConfig):
-        self.task_cfg = cfg
-        super().__init__(cfg)
-        track_body_ids, track_body_names = self.robot.find_bodies(list(cfg.track_body_names), preserve_order=True)
+    def __init__(
+        self,
+        cfg: EnvironmentConfig,
+        observation_group_size: int,
+        *,
+        render: bool = False,
+        render_every: int = 1,
+        contact_debug_vis: bool = False,
+    ):
+        self.config = cfg
+        self.task = resolve_task(cfg.task)
+        self.observation_group_size = observation_group_size
+        self.observation_noise = cfg.observation_noise
+        super().__init__(
+            cfg,
+            self.task,
+            render=render,
+            render_every=render_every,
+            contact_debug_vis=contact_debug_vis,
+        )
+        track_body_ids, track_body_names = self.robot.find_bodies(list(MIMIC_BODY_NAMES), preserve_order=True)
         self.track_body_ids = torch.tensor(track_body_ids, dtype=torch.long, device=self.device)
         self.track_body_names = list(track_body_names)
-        self.anchor_body_id = self.robot.body_names.index(cfg.anchor_body_name)
-        self.ee_body_names = list(cfg.ee_body_names)
-        self.ee_body_indices = [self.track_body_names.index(name) for name in cfg.ee_body_names]
-        termination_names = getattr(cfg, "termination_body_names", None) or cfg.ee_body_names
+        self.anchor_body_id = self.robot.body_names.index(MIMIC_ANCHOR_BODY_NAME)
+        self.ee_body_names = list(MIMIC_EE_BODY_NAMES)
+        self.ee_body_indices = [self.track_body_names.index(name) for name in MIMIC_EE_BODY_NAMES]
+        termination_names = MIMIC_TERMINATION_BODY_NAMES
         self.termination_body_indices = [self.track_body_names.index(name) for name in termination_names]
         self.contact_sensor = self.scene["contact_forces"]
-        from .config import CONTACT_ALLOWED_SUBSTRINGS
 
         def _contact_allowed(body_name: str) -> bool:
             return any(token in body_name for token in CONTACT_ALLOWED_SUBSTRINGS)
@@ -56,23 +79,21 @@ class G1MimicEnv(
             dtype=torch.long,
             device=self.device,
         )
-        self.foot_body_names = list(cfg.foot_body_names)
+        self.foot_body_names = list(MIMIC_FOOT_BODY_NAMES)
         self.foot_contact_body_ids = torch.tensor(
             [self.contact_sensor.body_names.index(name) for name in self.foot_body_names],
             dtype=torch.long,
             device=self.device,
         )
-        # Contact-sensor ids for the termination bodies (ankles + wrists). The actor needs to
-        # see the current contact state of the exact bodies whose z-error kills the episode,
-        # otherwise its chunk-start observation is blind to how close the wrists/ankles are to
-        # the termination gate (the dominant death cause in crawl).
+
+
         self.termination_contact_body_ids = torch.tensor(
             [self.contact_sensor.body_names.index(name) for name in termination_names],
             dtype=torch.long,
             device=self.device,
         )
         self.motion = MimicMotionReference(
-            cfg.motion_file,
+            str(self.task.motion_file),
             self.track_body_ids,
             self.anchor_body_id,
             self.device,
@@ -82,12 +103,10 @@ class G1MimicEnv(
         )
         self._init_adaptive_motion_sampling()
 
-        # Adaptive episode cap: when max_episode_steps <= 0, the time-out follows the motion
-        # length so "survive the whole clip" is the real success bar instead of an arbitrary
-        # fixed horizon. The motion-end termination already caps episodes at num_frames; this
-        # keeps the explicit time_out consistent with the clip and robust to clip-length changes.
-        if int(cfg.max_episode_steps) <= 0:
-            self.task_cfg.max_episode_steps = int(self.motion.num_frames)
+
+        self.max_episode_steps = (
+            int(cfg.max_episode_steps) if int(cfg.max_episode_steps) > 0 else int(self.motion.num_frames)
+        )
 
         self.last_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self.phase_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -109,10 +128,7 @@ class G1MimicEnv(
         return CRITIC_OBS_DIM
 
     def _adaptive_phase_range(self, horizon: int) -> tuple[int, int]:
-        """Inclusive [min_phase, max_phase] valid reset/start range. Never starts on the final
-        frame: the last valid reference frame is the terminal frame, so an env spawned there
-        motion-times-out on its very first step. Hold back at least 2 frames (Holosoma retreats
-        the start to the second-to-last frame) so a fresh episode has a real tracking step."""
+
         horizon = max(1, int(horizon))
         min_phase = self.motion_start_phase
         max_phase = min(
@@ -132,7 +148,7 @@ class G1MimicEnv(
         if not self.adaptive_motion_sampling:
             return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
 
-        # Failure-predecessor sampler. The sampler is fed only by env.step().
+
         return self.adaptive_sampler.sample_frames(num_samples, min_phase, max_phase)
 
     def reset(self, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
@@ -155,10 +171,9 @@ class G1MimicEnv(
         self.phase_steps[env_ids] = phase_indices
         self.episode_steps[env_ids] = 0
         self.last_action[env_ids] = 0.0
-        # New episode for these envs: clear the per-episode death-record guard so their next
-        # termination is counted by the adaptive sampler exactly once.
-        if hasattr(self, "_failure_recorded"):
-            self._failure_recorded[env_ids] = False
+
+
+        self._failure_recorded[env_ids] = False
         min_push, max_push = PUSH_INTERVAL_STEP_RANGE
         self.next_push_step[env_ids] = torch.randint(
             min_push,
@@ -176,7 +191,7 @@ class G1MimicEnv(
         root_ang_vel = reference["root_ang_vel_w"].clone()
         joint_pos = reference["joint_pos"].clone()
         joint_vel = reference["joint_vel"].clone()
-        if self.task_cfg.reset_noise:
+        if self.config.reset_noise:
             self._apply_official_reset_noise(env_ids, root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos)
         self._write_robot_state(
             root_pos=root_pos,
@@ -222,10 +237,8 @@ class G1MimicEnv(
         joint_pos[:] = torch.clamp(joint_pos, soft_limits[:, self.action_joint_ids, 0], soft_limits[:, self.action_joint_ids, 1])
 
     def _apply_action_targets(self, actions: torch.Tensor) -> None:
-        # Official WBT action semantics (use_default_offset=True): the PD target is the default
-        # joint pose plus the scaled policy action,  q_target = q_default + S * a_t.
-        # The raw action is clipped to +-100 before forming the PD target (official); the
-        # unclipped action is what reaches the action-rate reward (handled in step.py).
+
+
         if actions.shape != (self.num_envs, self.action_dim):
             raise ValueError(f"Expected action shape {(self.num_envs, self.action_dim)}, got {tuple(actions.shape)}")
 
@@ -234,24 +247,23 @@ class G1MimicEnv(
         self.robot.set_joint_position_target(action_targets, joint_ids=self.action_joint_ids)
 
     def _init_adaptive_motion_sampling(self) -> None:
-        self.adaptive_motion_sampling = bool(self.task_cfg.adaptive_motion_sampling)
+        self.adaptive_motion_sampling = bool(self.config.adaptive_motion_sampling)
         self.adaptive_sampler = AdaptiveTimestepsSampler(
             motion_time_step_total=int(self.motion.num_frames),
             device=self.device,
-            num_bins=int(self.task_cfg.adaptive_num_bins),
-            env_fps=int(round(1.0 / float(self.task_cfg.sim_dt))) if float(self.task_cfg.sim_dt) > 0 else 50,
-            adaptive_alpha=float(self.task_cfg.adaptive_alpha),
-            adaptive_predecessor_ratio=float(self.task_cfg.adaptive_predecessor_ratio),
-            adaptive_predecessor_lookback_bins=int(self.task_cfg.adaptive_predecessor_lookback_bins),
+            num_bins=int(self.config.adaptive_num_bins),
+            env_fps=int(round(1.0 / float(self.config.sim_dt))) if float(self.config.sim_dt) > 0 else 50,
+            adaptive_alpha=float(self.config.adaptive_alpha),
+            adaptive_predecessor_ratio=float(self.config.adaptive_predecessor_ratio),
+            adaptive_predecessor_lookback_bins=int(self.config.adaptive_predecessor_lookback_bins),
         )
-        # Per-env guard so the same termination is recorded by the sampler exactly once even
-        # when the env is not auto-reset (validation / GRPO branch rollouts replay dead envs).
+
+
         self._failure_recorded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        # Validation / probes flip this off so eval deaths do not feed the training sampler.
+
         self.record_motion_failures = True
-        # Training: motion end is NOT a termination -- a surviving env that reaches the final
-        # frame is teleported back into the clip (roll-in) with no done and the episode timer
-        # kept running. Validation flips this on so it stops + scores motion completion instead.
+
+
         self.terminate_on_motion_end = False
 
     def _record_adaptive_failures(
@@ -259,16 +271,7 @@ class G1MimicEnv(
         tracking_failure: torch.Tensor,
         death_phase_steps: torch.Tensor,
     ) -> None:
-        """Record this step's tracking-failure death frames into the per-step accumulator.
 
-        ``tracking_failure`` is the union of the real tracking terminations
-        (anchor_pos_bad | anchor_ori_bad | ee_body_bad). A pure motion-end/episode-cap timeout is
-        NOT a failure, but a tracking failure that happens to coincide with a timeout on the same
-        step IS still counted (Holosoma records any non-timeout termination cause).
-
-        Called BEFORE reset/phase-advance. Only touches ``current_failure_count`` -- it does
-        NOT fold the EMA, so the reset that follows still samples from the OLD EMA. Guarded so a
-        single termination is counted once per episode (matters when auto_reset=False)."""
         if not self.adaptive_motion_sampling or not self.record_motion_failures:
             return
         failure = tracking_failure & (~self._failure_recorded)
@@ -277,11 +280,7 @@ class G1MimicEnv(
             self._failure_recorded |= failure
 
     def _fold_adaptive_sampler(self) -> None:
-        """Fold the per-step failure accumulator into the EMA, then zero it.
 
-        Called at the END of the step, AFTER reset/phase-advance (official order: record death
-        -> reset using the old EMA -> update the EMA). Folding here avoids an instantaneous jump
-        in the sampling distribution when many envs die on the same step and are reset against it."""
         if not self.adaptive_motion_sampling or not self.record_motion_failures:
             return
         self.adaptive_sampler.update_failure_ema()
@@ -291,17 +290,13 @@ class G1MimicEnv(
         return self.adaptive_sampler.stats(min_phase, max_phase)
 
     def _resample_finished_motions(self) -> None:
-        """Roll-in teleport: envs whose phase has advanced past the final frame are resampled to
-        a new start frame and teleported there WITHOUT a done and WITHOUT resetting the episode
-        timer (the 10s/max_episode_steps cap keeps running). The per-episode failure guard is
-        cleared so a death in the new motion segment is recorded by the sampler."""
+
         env_ids = torch.where(self.phase_steps >= self.motion.num_frames)[0]
         if env_ids.numel() == 0:
             return
         phase_indices = self.sample_phase_indices(env_ids.numel(), horizon=1)
         self.phase_steps[env_ids] = phase_indices
-        if hasattr(self, "_failure_recorded"):
-            self._failure_recorded[env_ids] = False
+        self._failure_recorded[env_ids] = False
         reference = self.motion.get_frame(phase_indices)
         root_pos = reference["root_pos_w"].clone()
         root_quat = reference["root_quat_w"].clone()
@@ -309,7 +304,7 @@ class G1MimicEnv(
         root_ang_vel = reference["root_ang_vel_w"].clone()
         joint_pos = reference["joint_pos"].clone()
         joint_vel = reference["joint_vel"].clone()
-        if self.task_cfg.reset_noise:
+        if self.config.reset_noise:
             self._apply_official_reset_noise(env_ids, root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos)
         self._write_robot_state(
             root_pos=root_pos,

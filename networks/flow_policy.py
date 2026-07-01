@@ -30,8 +30,8 @@ class FlowMatchingPolicy(nn.Module):
         super().__init__()
         self.action_dim = action_dim
         self.horizon = horizon
-        # Flat per-frame parametrization: the flow / latent / log_prob operate directly on the
-        # `horizon`-frame action chunk.
+
+
         self.chunk_dim = horizon * action_dim
         self.action_chunk_dim = horizon * action_dim
         self.obs_dim = obs_dim

@@ -14,7 +14,7 @@ def deterministic_sde_ode_actions(
     sde_eta: float = 0.7,
     initial_noise: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Generate actions through the zero-noise SDE mean path used by MixGRPO training."""
+
     if initial_noise is None:
         initial_noise = torch.zeros(
             observation.shape[0],

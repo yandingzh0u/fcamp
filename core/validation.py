@@ -1,16 +1,10 @@
-"""Deterministic validation rollout. Algorithm-agnostic.
-
-Resets all envs to validation_start_phase and rolls the algorithm's greedy action chunk
-continuously, recording survival steps and termination causes. Preserves and restores the
-training env state + RNG so validation never perturbs training.
-"""
 from __future__ import annotations
 
 import time
 
 import torch
 
-from env.config import EE_Z_TERMINATION_THRESHOLD
+from env.spec import EE_Z_TERMINATION_THRESHOLD
 from .env_state import restore_env_state, snapshot_env_state
 
 
@@ -23,12 +17,8 @@ def short_body_name(body_name: str) -> str:
 
 
 def validation_max_steps(train_cfg, env) -> int:
-    """VAL horizon = the full motion clip length (validate over the whole dataset), unless the
-    user explicitly requests a longer survival target. validation_max_steps in the config is
-    only a floor/explicit override; it must NOT cap VAL below the clip length (that would stop
-    validation before the motion ends)."""
-    motion = getattr(env, "motion", None)
-    motion_frames = int(getattr(motion, "num_frames", 0) or 0)
+
+    motion_frames = env.motion.num_frames
     steps = int(train_cfg.validation_max_steps)
     if motion_frames > 0:
         steps = max(steps, motion_frames)
@@ -45,39 +35,33 @@ def run_validation_rollout(
     env = trainer.env
     policy = algo.policy
     tcfg = trainer.train_cfg
-    horizon = int(algo.cfg.horizon)
+    horizon = algo.horizon
     num_envs = env.num_envs
 
     was_training = policy.training
     policy.eval()
-    preserve_state = bool(tcfg.validation_preserve_state)
-    training_snapshot = snapshot_env_state(env) if preserve_state else None
-    training_observation = getattr(trainer, "current_observation", None)
+    training_snapshot = snapshot_env_state(env)
+    training_observation = trainer.current_observation
     env_device = torch.device(env.device)
     cpu_rng_state = torch.random.get_rng_state()
     cuda_rng_state = None
-    original_obs_noise = getattr(env.task_cfg, "observation_noise", True)
-    env.task_cfg.observation_noise = bool(tcfg.validation_observation_noise)
-    # Eval deaths must not feed the training adaptive sampler.
-    original_record_failures = getattr(env, "record_motion_failures", True)
+    original_obs_noise = env.observation_noise
+    env.observation_noise = False
+
+    original_record_failures = env.record_motion_failures
     env.record_motion_failures = False
-    # Validation scores survival to motion end: reaching the final frame is a clean stop
-    # recorded as motion_complete (success), NOT a teleport roll-in and NOT disguised as a
-    # time_out / tracking failure. A directional run (e.g. start_phase 800) therefore stops at
-    # the final frame (~159 steps) instead of resampling and continuing.
-    original_terminate_on_motion_end = getattr(env, "terminate_on_motion_end", False)
+
+
+    original_terminate_on_motion_end = env.terminate_on_motion_end
     env.terminate_on_motion_end = True
-    # Validate over the WHOLE motion clip: lift the training episode-length time-out so envs
-    # are not force-timed-out at max_episode_steps (e.g. 500) before the motion ends (959).
-    # Survival is then bounded only by the real tracking-failure terminations + motion end.
-    original_max_episode_steps = int(getattr(env.task_cfg, "max_episode_steps", -1))
-    motion_frames = int(getattr(getattr(env, "motion", None), "num_frames", 0) or 0)
+
+
+    original_max_episode_steps = env.max_episode_steps
+    motion_frames = env.motion.num_frames
     if motion_frames > 0:
-        # The full phase-0 validation scores the final reference frame on control step
-        # ``motion_frames``. With a cap equal to motion_frames, ``episode_steps >= cap`` and
-        # motion_complete become true on the same step, falsely labelling every successful run
-        # as a timeout too. One extra step keeps motion_complete as the sole clean-success cause.
-        env.task_cfg.max_episode_steps = motion_frames + 1
+
+
+        env.max_episode_steps = motion_frames + 1
     if torch.cuda.is_available() and env_device.type == "cuda":
         cuda_rng_state = torch.cuda.get_rng_state(env_device)
     if fixed_seed is not None:
@@ -98,9 +82,8 @@ def run_validation_rollout(
     chunk_index = horizon
     done = torch.zeros(num_envs, dtype=torch.bool, device=env.device)
     survived_steps = torch.zeros(num_envs, dtype=torch.long, device=env.device)
-    # Actual motion frame the env was scored at when it died (info["termination_phase_steps"],
-    # the pre-advance phase). NOT start_phase + survived_steps, which is off-by-one after the
-    # Holosoma phase-timing change and ignores adaptive reset start frames.
+
+
     death_phase_record = torch.zeros(num_envs, dtype=torch.long, device=env.device)
     cumulative_reward = torch.zeros(num_envs, device=env.device)
     done_term_record = {
@@ -177,15 +160,12 @@ def run_validation_rollout(
                 if bool(done.all()):
                     break
     finally:
-        env.task_cfg.observation_noise = original_obs_noise
+        env.observation_noise = original_obs_noise
         env.record_motion_failures = original_record_failures
         env.terminate_on_motion_end = original_terminate_on_motion_end
-        env.task_cfg.max_episode_steps = original_max_episode_steps
-        if training_snapshot is not None:
-            restore_env_state(env, training_snapshot)
-            trainer.current_observation = training_observation if training_observation is not None else env.get_observation()
-        else:
-            trainer.current_observation = env.get_observation()
+        env.max_episode_steps = original_max_episode_steps
+        restore_env_state(env, training_snapshot)
+        trainer.current_observation = training_observation
         torch.random.set_rng_state(cpu_rng_state)
         if cuda_rng_state is not None:
             torch.cuda.set_rng_state(cuda_rng_state, env_device)
@@ -201,10 +181,8 @@ def run_validation_rollout(
         "validation/return_mean": float(cumulative_reward.mean().item()),
         "validation/done_frac": float(done.float().mean().item()),
     }
-    # Phase-absolute success/failure rates over ALL initial envs (death_phase_record holds the
-    # actual motion phase scored at death). alive_at_phase_850: share that did not terminate
-    # before phase 850. wrist_fail_825_840: share that died of a wrist z-gate inside [825, 840].
-    # motion_complete_rate: share that reached the final frame.
+
+
     alive_phase = 850
     wall_lo, wall_hi = 825, 840
     died = done & (~done_term_record["motion_complete"])

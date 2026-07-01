@@ -7,41 +7,44 @@ from isaaclab.assets import Articulation, AssetBaseCfg
 from isaaclab.scene import InteractiveScene
 from isaaclab.sim import SimulationContext
 
-from .config import (
-    EnvConfig,
-    G1SceneCfg,
+from .spec import (
+    G1SceneConfig,
     G1_MIMIC_ACTION_SCALE_VALUES,
     PUSH_INTERVAL_STEP_RANGE,
     STARTUP_BASE_COM_RANGE,
     STARTUP_JOINT_DEFAULT_POS_RANGE,
 )
 from .robots.g1 import G1_29DOF_ACTION_NAMES, make_g1_cfg
+from .tasks import TaskSpec
+from core.config import EnvironmentConfig
 
 
 class G1Env:
-    def __init__(self, cfg: EnvConfig):
-        self.cfg = cfg
+    def __init__(
+        self,
+        cfg: EnvironmentConfig,
+        task: TaskSpec,
+        *,
+        render: bool = False,
+        render_every: int = 1,
+        contact_debug_vis: bool = False,
+    ):
         if cfg.decimation < 1:
             raise ValueError(f"decimation must be >= 1, got {cfg.decimation}")
         self.dt = cfg.sim_dt
         self.decimation = int(cfg.decimation)
         self.physics_dt = cfg.sim_dt / float(self.decimation)
         self._render_step_index = 0
+        self.render = render
+        self.render_every = max(1, int(render_every))
 
         sim_cfg = sim_utils.SimulationCfg(
             device=cfg.device,
             dt=self.physics_dt,
-            render_interval=self.decimation * max(1, int(getattr(cfg, "render_every", 1))),
+            render_interval=self.decimation * self.render_every,
         )
-        # Align the ground physics contract with the official holosoma crawl scene. The
-        # official load_obj terrain binds an explicit RigidBodyMaterialCfg(static=1.0,
-        # dynamic=1.0, restitution=0.0) to the slope mesh. Our per-env slope is spawned via
-        # UsdFileCfg, and spawn_from_usd does NOT apply UsdFileCfg.physics_material to the
-        # collision mesh, so without this the slope silently inherited the simulation default
-        # friction of 0.5 -- half the official value. Crawling up a ramp is extremely
-        # friction-sensitive, so this is a physics-contract mismatch, not a tuning knob. The
-        # robot keeps its own (randomized) per-shape material; the slope, having no material
-        # of its own, now falls back to this 1.0/1.0/0.0 default exactly like the official mesh.
+
+
         sim_cfg.physics_material = sim_utils.RigidBodyMaterialCfg(
             static_friction=1.0,
             dynamic_friction=1.0,
@@ -50,10 +53,9 @@ class G1Env:
         sim_cfg.physx.gpu_max_rigid_patch_count = 10 * 2**15
         self.sim = SimulationContext(sim_cfg)
 
-        scene_cfg = G1SceneCfg(num_envs=cfg.num_envs, env_spacing=cfg.env_spacing)
-        terrain_type = str(cfg.terrain_type).strip().lower()
-        if terrain_type == "plane":
-            scene_cfg.slope = AssetBaseCfg(
+        scene_cfg = G1SceneConfig(num_envs=cfg.num_envs, env_spacing=2.5)
+        if task.terrain == "plane":
+            scene_cfg.terrain = AssetBaseCfg(
                 prim_path="/World/ground",
                 spawn=sim_utils.GroundPlaneCfg(
                     size=(100.0, 100.0),
@@ -64,14 +66,12 @@ class G1Env:
                     ),
                 ),
             )
-        elif terrain_type != "slope":
-            raise ValueError(f"terrain_type must be 'plane' or 'slope', got {cfg.terrain_type!r}")
         scene_cfg.robot = make_g1_cfg("{ENV_REGEX_NS}/Robot", fix_root_link=cfg.fix_root_link)
-        scene_cfg.contact_forces.debug_vis = bool(getattr(cfg, "contact_debug_vis", False))
+        scene_cfg.contact_forces.debug_vis = contact_debug_vis
         self.scene = InteractiveScene(scene_cfg)
         self.robot: Articulation = self.scene["robot"]
 
-        self.sim.set_camera_view(cfg.camera_eye, cfg.camera_target)
+        self.sim.set_camera_view((2.5, 2.5, 1.6), (0.0, 0.0, 0.8))
         self.sim.reset()
         if cfg.startup_randomization:
             self._apply_official_startup_events()

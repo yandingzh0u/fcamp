@@ -9,10 +9,8 @@ from isaaclab.assets import ArticulationCfg
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-# Standard Holosoma G1 used by the non-object whole-body-tracking experiment.  Keep the
-# source URDF in-tree and let IsaacLab convert it with the same settings as Holosoma.  In
-# particular, this is NOT main_mesh_collision_halfspherehand.urdf (that asset is only used
-# by Holosoma's robot+object experiment).
+
+
 G1_LOCAL_URDF_PATH = (
     PROJECT_ROOT
     / "assets"
@@ -20,12 +18,9 @@ G1_LOCAL_URDF_PATH = (
     / "holosoma_g1"
     / "g1_29dof.urdf"
 )
-G1_CONVERTED_USD_DIR = G1_LOCAL_URDF_PATH.parent / "converted"
+G1_CONVERTED_USD_DIR = Path.home() / ".cache" / "my_mimic_mixgrpo" / "g1"
 
-# Action / observation / motion joint order. Matches the holosoma motion file's
-# `joint_names` (URDF serial-chain order). The env resolves these names against the
-# articulation with find_joints(preserve_order=True), so the physical asset order does
-# not need to match this list.
+
 G1_29DOF_ASSET_JOINT_NAMES = [
     "left_hip_pitch_joint",
     "left_hip_roll_joint",
@@ -62,9 +57,8 @@ G1_29DOF_ACTION_NAMES = G1_29DOF_ASSET_JOINT_NAMES
 
 
 G1_BASE_CFG = ArticulationCfg(
-    # Match Holosoma's Isaac Sim asset path exactly: dynamically convert the standard URDF,
-    # merge fixed joints, replace cylinders with capsules, and leave drives unconfigured in
-    # the generated USD (the IdealPDActuatorCfg blocks below own the control gains).
+
+
     spawn=sim_utils.UrdfFileCfg(
         asset_path=str(G1_LOCAL_URDF_PATH),
         usd_dir=str(G1_CONVERTED_USD_DIR),

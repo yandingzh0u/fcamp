@@ -12,7 +12,7 @@ def flow_sde_transition(
     index: int,
     eta: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Official MixGRPO SDE transition mean/std for one flow-matching step."""
+
     device = model_output.device
     sigma = sigmas[index].to(device=device, dtype=model_output.dtype)
     sigma_prev = sigmas[index + 1].to(device=device, dtype=model_output.dtype)
@@ -38,11 +38,7 @@ def flow_grpo_step(
     prev_sample: torch.Tensor | None = None,
     sample_noise: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One MixGRPO SDE-ODE transition.
 
-    Returns (prev_sample, log_prob) where log_prob is the joint chunk transition score for one
-    flow step, shape (B,) (sum over every latent dimension).
-    """
     prev_sample_mean, std, _ = flow_sde_transition(model_output, latents, sigmas, index, eta=eta)
 
     if prev_sample is None:

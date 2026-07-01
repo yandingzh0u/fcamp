@@ -4,7 +4,7 @@ import torch
 
 from isaaclab.utils.math import quat_apply_inverse
 
-from .config import (
+from .spec import (
     ANCHOR_ORI_TERMINATION_THRESHOLD,
     ANCHOR_Z_TERMINATION_THRESHOLD,
     EE_Z_TERMINATION_THRESHOLD,
@@ -21,9 +21,8 @@ class MimicTerminationMixin:
 
         anchor_z_error = torch.abs(reference["anchor_pos_w"][:, 2] - context["robot_anchor_pos_w"][:, 2])
         anchor_gravity_z_error = (motion_projected_gravity_b[:, 2] - robot_projected_gravity_b[:, 2]).abs()
-        # The official holosoma BadTrackingZOnly terminates purely on the z-component of projected
-        # gravity (anchor_gravity_z_error > 0.8); the previously added full-angle hard gate was
-        # non-official and was itself killing validation, so it is not part of the done condition.
+
+
         robot_anchor_height = context["robot_anchor_pos_w"][:, 2]
         robot_anchor_tilt = torch.acos(torch.clamp(-robot_projected_gravity_b[:, 2], -1.0, 1.0)).abs()
         anchor_pos_bad = anchor_z_error > ANCHOR_Z_TERMINATION_THRESHOLD
@@ -39,16 +38,12 @@ class MimicTerminationMixin:
         ee_body_bad = torch.any(termination_z_error > EE_Z_TERMINATION_THRESHOLD, dim=-1)
         ee_z_error_max = ee_z_error.max(dim=-1).values
         ee_z_error_mean = ee_z_error.mean(dim=-1)
-        time_out = self.episode_steps >= self.task_cfg.max_episode_steps
-        # Motion end is a SEPARATE event from the episode-length time-out. During training it is
-        # not a termination at all (the env teleports the survivor back into the clip with no
-        # done -- see step.py). Only when terminate_on_motion_end is set (validation) does
-        # reaching the final frame end the episode, and then it is recorded as motion_complete
-        # (a successful full-clip run), never disguised as a time_out or a tracking failure.
-        motion_end = getattr(self, "_motion_end_mask", None)
+        time_out = self.episode_steps >= self.max_episode_steps
+
+
         motion_complete = torch.zeros_like(time_out)
-        if motion_end is not None and bool(getattr(self, "terminate_on_motion_end", False)):
-            motion_complete = motion_end
+        if self.terminate_on_motion_end:
+            motion_complete = self._motion_end_mask
         done = time_out | anchor_pos_bad | anchor_ori_bad | ee_body_bad | motion_complete
         return done, {
             "time_out": time_out,

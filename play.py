@@ -1,18 +1,9 @@
-"""Play / visualize a trained checkpoint in IsaacLab (any algorithm).
-
-    python play.py --checkpoint runs/<run>/checkpoints/last.pt [--num_envs 4] [--start_phase 0] \
-        [--loop_motion] [--reset_on_done]
-
-Reuses the unified config + algorithm system: the checkpoint stores asdict(Config), so we
-rebuild EnvCfg/AlgoCfg/TrainCfg, construct the env + the same Algorithm used for training, load
-the policy weights, and roll the algorithm's greedy action chunk. Works for MixGRPO today and
-any future algorithm (PPO/FPO) with no playback code changes.
-"""
 from __future__ import annotations
 
 import argparse
 import sys
 import time
+from dataclasses import fields, replace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -26,7 +17,7 @@ parser.add_argument("--checkpoint", type=str, required=True, help="Path to a sav
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to play.")
 parser.add_argument("--max_steps", type=int, default=0, help="Hard stop. 0 runs until the app closes.")
 parser.add_argument("--start_phase", type=int, default=-1, help="Reset motion phase. Negative uses motion_start_phase.")
-parser.add_argument("--motion_file", type=str, default="", help="Optional motion npz override.")
+parser.add_argument("--task", choices=("largebox_plane", "crawl_slope"), default="")
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--reset_on_done", action="store_true", default=False, help="Reset when a termination fires.")
 parser.add_argument("--loop_motion", action="store_true", default=False, help="Reset to start_phase when the motion ends.")
@@ -47,20 +38,50 @@ simulation_app = app_launcher.app
 
 import torch
 
-from core.config import Config, EnvCfg, AlgoCfg, TrainCfg
-from core.env_factory_adapter import build_env
+from core.config import (
+    ALGORITHM_CONFIGS,
+    EnvironmentConfig,
+    ExperimentConfig,
+    MixGRPOConfig,
+    TrainingConfig,
+    config_from_dict,
+)
+from env.mimic import G1MimicEnv
 from algorithms import make_algorithm
 
 
-def _rebuild_config(payload: dict) -> Config:
-    """Rebuild the typed Config from the checkpoint's asdict(Config)."""
+def _select(cls, values: dict) -> dict:
+    return {field.name: values[field.name] for field in fields(cls) if field.name in values}
+
+
+def _rebuild_config(payload: dict) -> ExperimentConfig:
     raw = payload.get("config", {})
-    if "env" in raw and "algo" in raw:  # new nested format
-        env = EnvCfg(**raw["env"])
-        algo = AlgoCfg(**{**raw["algo"], "actor_hidden_dims": tuple(raw["algo"]["actor_hidden_dims"])})
-        train = TrainCfg(**raw["train"])
-        return Config(algo_name=raw.get("algo_name", "mixgrpo"), env=env, algo=algo, train=train)
-    raise KeyError("Checkpoint config is not in the expected nested {env, algo, train} format.")
+    if "algorithm" in raw:
+        return config_from_dict(raw)
+    if not {"algo_name", "env", "algo", "train"}.issubset(raw):
+        raise KeyError("Checkpoint has no supported configuration schema")
+    algorithm = "fpo" if raw["algo_name"] == "fpo_pp" else raw["algo_name"]
+    parameter_cls = ALGORITHM_CONFIGS[algorithm]
+    legacy_env = raw["env"]
+    environment = _select(EnvironmentConfig, legacy_env)
+    environment["task"] = "largebox_plane" if legacy_env.get("terrain_type") == "plane" else "crawl_slope"
+    environment["decimation"] = 4
+    parameters = _select(parameter_cls, raw["algo"])
+    if algorithm == "ppo":
+        parameters.setdefault("critic_hidden_dims", parameters["actor_hidden_dims"])
+        parameters.setdefault("critic_weight_decay", 0.0)
+        parameters.setdefault("value_clip_range", parameters["clip_range"])
+    elif algorithm == "fpo":
+        parameters.setdefault("critic_hidden_dims", (512, 256, 128))
+        parameters.setdefault("critic_weight_decay", 0.0)
+        parameters.setdefault("value_clip_range", 0.2)
+    tree = {
+        "algorithm": algorithm,
+        "environment": environment,
+        "parameters": parameters,
+        "training": _select(TrainingConfig, raw["train"]),
+    }
+    return config_from_dict(tree)
 
 
 def main() -> None:
@@ -69,47 +90,49 @@ def main() -> None:
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     device = torch.device(args_cli.device)
     load_device = device if (device.type != "cuda" or torch.cuda.is_available()) else torch.device("cpu")
-    payload = torch.load(checkpoint_path, map_location=load_device)
+    payload = torch.load(checkpoint_path, map_location=load_device, weights_only=False)
     if "policy" not in payload:
         raise KeyError("Checkpoint must contain a 'policy' state dict.")
     cfg = _rebuild_config(payload)
 
-    # Playback overrides on the env section.
-    cfg.env.device = args_cli.device
-    cfg.env.num_envs = args_cli.num_envs
-    cfg.env.render = not args_cli.headless
-    cfg.env.render_every = max(1, args_cli.render_every)
-    cfg.env.fix_root_link = args_cli.fix_root_link or cfg.env.fix_root_link
-    cfg.env.observation_noise = bool(args_cli.observation_noise)
-    # Play the whole clip: lift the episode cap.
-    cfg.env.max_episode_steps = int(1.0e9)
-    if args_cli.motion_file:
-        cfg.env.motion_file = args_cli.motion_file
-    if args_cli.start_phase >= 0:
-        cfg.env.motion_start_phase = args_cli.start_phase
-    if args_cli.interval_pushes is not None:
-        cfg.env.interval_pushes = bool(args_cli.interval_pushes)
-    if args_cli.reset_noise is not None:
-        cfg.env.reset_noise = bool(args_cli.reset_noise)
-    if args_cli.startup_randomization is not None:
-        cfg.env.startup_randomization = bool(args_cli.startup_randomization)
-    # Playback does not use GRPO groups; force single-branch so any num_envs is valid and the
-    # observation-noise group sharing is disabled.
-    cfg.algo.num_generations = 1
-    cfg.env.num_generations = 1
+    environment = replace(
+        cfg.environment,
+        task=args_cli.task or cfg.environment.task,
+        device=args_cli.device,
+        num_envs=args_cli.num_envs,
+        fix_root_link=args_cli.fix_root_link or cfg.environment.fix_root_link,
+        observation_noise=bool(args_cli.observation_noise),
+        max_episode_steps=int(1.0e9),
+        motion_start_phase=(args_cli.start_phase if args_cli.start_phase >= 0 else cfg.environment.motion_start_phase),
+        interval_pushes=(cfg.environment.interval_pushes if args_cli.interval_pushes is None else args_cli.interval_pushes),
+        reset_noise=(cfg.environment.reset_noise if args_cli.reset_noise is None else args_cli.reset_noise),
+        startup_randomization=(
+            cfg.environment.startup_randomization
+            if args_cli.startup_randomization is None
+            else args_cli.startup_randomization
+        ),
+    )
+    parameters = cfg.parameters
+    if isinstance(parameters, MixGRPOConfig):
+        parameters = replace(parameters, num_generations=1)
 
     torch.manual_seed(args_cli.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args_cli.seed)
 
-    env = build_env(cfg)
-    algo = make_algorithm(cfg.algo_name)(cfg.algo, env, simulation_app)
+    env = G1MimicEnv(
+        environment,
+        1,
+        render=not args_cli.headless,
+        render_every=args_cli.render_every,
+    )
+    algo = make_algorithm(cfg.algorithm)(parameters, env, simulation_app)
     algo.build()
     algo.policy.load_state_dict(payload["policy"])
     algo.policy.eval()
 
-    horizon = int(cfg.algo.horizon)
-    reset_start_phase = cfg.env.motion_start_phase if args_cli.start_phase < 0 else args_cli.start_phase
+    horizon = algo.horizon
+    reset_start_phase = environment.motion_start_phase
     reset_phases = torch.full((env.num_envs,), max(0, reset_start_phase), dtype=torch.long, device=env.device)
     current_obs = env.reset(phase_indices=reset_phases)
     cached_chunk: torch.Tensor | None = None
@@ -121,11 +144,15 @@ def main() -> None:
 
     print("[INFO] Playing trained checkpoint", flush=True)
     print(f"[INFO] checkpoint={checkpoint_path}", flush=True)
-    print(f"[INFO] algo={cfg.algo_name} motion_file={env.task_cfg.motion_file}", flush=True)
     print(
-        f"[INFO] horizon={horizon} action_dim={cfg.algo.action_dim} flow_steps={cfg.algo.flow_steps} "
-        f"observation_noise={cfg.env.observation_noise} interval_pushes={cfg.env.interval_pushes} "
-        f"reset_noise={cfg.env.reset_noise}",
+        f"[INFO] algorithm={cfg.algorithm} task={env.task.name} terrain={env.task.terrain} "
+        f"motion_file={env.task.motion_file}",
+        flush=True,
+    )
+    print(
+        f"[INFO] horizon={horizon} action_dim={env.action_dim} "
+        f"observation_noise={environment.observation_noise} interval_pushes={environment.interval_pushes} "
+        f"reset_noise={environment.reset_noise}",
         flush=True,
     )
 

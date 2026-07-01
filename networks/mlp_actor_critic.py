@@ -1,9 +1,3 @@
-"""MLP actor-critic for PPO, ported from holosoma's PPOActor/PPOCritic numerical core.
-
-Plain MLP (no CNN/encoder/history machinery): a Gaussian actor with a learnable per-action
-log-std parameter and an MLP value critic. Matches holosoma's update_distribution /
-get_actions_log_prob / evaluate behavior so the PPO math is identical.
-"""
 from __future__ import annotations
 
 import torch
@@ -27,7 +21,7 @@ def _build_mlp(input_dim: int, hidden_dims: tuple[int, ...], output_dim: int, ac
 
 
 class GaussianActor(nn.Module):
-    """Gaussian policy: MLP mean + learnable per-action std (holosoma PPOActor core)."""
+
 
     def __init__(self, obs_dim: int, action_dim: int, hidden_dims, activation: str, init_noise_std: float):
         super().__init__()
@@ -73,7 +67,7 @@ class Critic(nn.Module):
 
 
 class EmpiricalNormalization(nn.Module):
-    """Running mean/std normalizer (holosoma EmpiricalNormalization, single-GPU path)."""
+
 
     def __init__(self, shape: int, device, eps: float = 1e-2, until: int | None = None):
         super().__init__()
@@ -100,9 +94,8 @@ class EmpiricalNormalization(nn.Module):
         batch_mean = torch.mean(x, dim=0, keepdim=True)
         batch_var = torch.var(x, dim=0, keepdim=True, unbiased=False)
         new_count = self.count + batch_size
-        # delta is the difference of the two batch means BEFORE the running mean is updated;
-        # Chan's parallel-variance combination uses exactly this pre-update delta (using the
-        # post-update delta underestimates the merged variance).
+
+
         delta = batch_mean - self._mean
         self._mean.copy_(self._mean + delta * (batch_size / new_count))
         m_a = self._var * self.count

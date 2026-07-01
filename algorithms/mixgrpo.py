@@ -1,14 +1,3 @@
-"""MixGRPO algorithm plugin.
-
-Critic-free flow-matching policy with MixGRPO SDE exploration and chunk-level group-relative
-PPO. Owns: the flow network, SDE sampling + transition log-probs, GRPO group reset/replicate,
-the on-policy state bank, chunk-level rollout collection, RTG/terminal-penalty credit
-assignment, the chunk-level PPO update, and MixGRPO-specific metrics + logging.
-
-The chunk-level PPO ratio is the joint probability ratio of the whole horizon-frame action
-chunk (summed over the latent/coefficient dimensions), per SDE transition step. There is no
-per-frame factorization here.
-"""
 from __future__ import annotations
 
 import math
@@ -17,14 +6,13 @@ from collections import deque
 import torch
 
 from algorithms.base import Algorithm
-from core.env_state import restore_env_state, snapshot_env_state
 from networks.flow_inference import deterministic_sde_ode_actions
 from networks.flow_sampling import flow_grpo_step
 from networks.flow_policy import FlowMatchingPolicy
 
 
 class MixGRPO(Algorithm):
-    # ------------------------------------------------------------------ build
+
     def build(self) -> None:
         cfg = self.cfg
         env = self.env
@@ -36,15 +24,13 @@ class MixGRPO(Algorithm):
             raise ValueError(
                 f"num_envs ({env.num_envs}) must be divisible by num_generations ({cfg.num_generations})"
             )
-        if env.action_dim != cfg.action_dim:
-            raise ValueError(f"Expected env action_dim {env.action_dim}, got {cfg.action_dim}")
-
+        self.num_act = env.action_dim
         self.num_grpo_groups = env.num_envs // cfg.num_generations
-        self.action_chunk_dim = cfg.horizon * cfg.action_dim
+        self.action_chunk_dim = cfg.horizon * self.num_act
 
         self._policy = FlowMatchingPolicy(
             obs_dim=env.observation_dim,
-            action_dim=cfg.action_dim,
+            action_dim=self.num_act,
             horizon=cfg.horizon,
             hidden_dims=tuple(cfg.actor_hidden_dims),
             activation=cfg.activation,
@@ -58,9 +44,8 @@ class MixGRPO(Algorithm):
         self.learning_rate = float(cfg.policy_lr)
 
         self._init_train_episode_stats()
-        self._init_onpolicy_state_bank()
-        # Resolved episode cap mirrored from env for reward projection.
-        self.max_episode_steps = int(getattr(env.task_cfg, "max_episode_steps", -1))
+
+        self.max_episode_steps = env.max_episode_steps
 
     @property
     def policy(self) -> torch.nn.Module:
@@ -70,13 +55,17 @@ class MixGRPO(Algorithm):
     def optimizer(self) -> torch.optim.Optimizer:
         return self._optimizer
 
+    @property
+    def horizon(self) -> int:
+        return self.cfg.horizon
+
     def extra_checkpoint_state(self) -> dict:
         return {"learning_rate": float(self.learning_rate)}
 
     def load_extra_checkpoint_state(self, payload: dict, reset_optimizer: bool = False) -> None:
         if reset_optimizer:
-            # Fresh-optimizer resume: use the config LR directly (honour a fine-tune override),
-            # ignoring the checkpoint's adapted LR.
+
+
             resume_lr = float(self.cfg.policy_lr)
         else:
             checkpoint_lr = float(payload.get("learning_rate", self.cfg.policy_lr))
@@ -85,7 +74,7 @@ class MixGRPO(Algorithm):
             group["lr"] = resume_lr
         self.learning_rate = resume_lr
 
-    # ------------------------------------------------------------------ derived sizes
+
     def _chunks_per_grpo_update(self) -> int:
         rollout_env_steps = int(self.cfg.rollout_env_steps)
         if rollout_env_steps <= 0:
@@ -103,7 +92,7 @@ class MixGRPO(Algorithm):
     def _train_step_indices(self, device) -> torch.Tensor:
         return torch.arange(int(self.cfg.flow_steps), device=device, dtype=torch.long)
 
-    # ------------------------------------------------------------------ episode stats
+
     def _init_train_episode_stats(self) -> None:
         env = self.env
         self._train_reward_sum = torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
@@ -127,7 +116,7 @@ class MixGRPO(Algorithm):
         self._train_reward_sum[done_ids] = 0.0
         self._train_episode_length[done_ids] = 0.0
 
-    # ------------------------------------------------------------------ flow sampling
+
     def _sde_ode_rollout_actions(self, obs, *, initial_noise, sde_noise=None):
         self._policy._validate_inputs(obs, initial_noise, self.cfg.flow_steps)
         obs_prep = self._policy._prepare_observation(obs)
@@ -160,7 +149,7 @@ class MixGRPO(Algorithm):
         if not step_log_probs:
             raise RuntimeError("SDE-ODE rollout produced no trainable transition log-probs.")
         actions = self._policy._action_transform(latent)
-        stacked_log_probs = torch.stack(step_log_probs, dim=1)  # (B, num_sde_steps)
+        stacked_log_probs = torch.stack(step_log_probs, dim=1)
         return actions, torch.stack(all_latents, dim=1), stacked_log_probs
 
     def _sample_policy_with_logprobs(self, obs, noise, sde_noise=None):
@@ -221,18 +210,13 @@ class MixGRPO(Algorithm):
             log_probs.append(log_prob)
         return torch.stack(log_probs, dim=1)
 
-    # ------------------------------------------------------------------ GRPO group resets
+
     def _training_anchor_phases(self) -> torch.Tensor:
-        sample_phase_indices = getattr(self.env, "sample_phase_indices", None)
-        if callable(sample_phase_indices):
-            anchors = sample_phase_indices(self.num_grpo_groups, self._training_rollout_horizon())
-            return anchors.to(device=self.env.device, dtype=torch.long)
-        min_phase = int(getattr(self.env, "motion_start_phase", 0))
-        return torch.full((self.num_grpo_groups,), min_phase, dtype=torch.long, device=self.env.device)
+        anchors = self.env.sample_phase_indices(self.num_grpo_groups, self._training_rollout_horizon())
+        return anchors.to(device=self.env.device, dtype=torch.long)
 
     def initial_reset(self) -> torch.Tensor:
-        """Plain reset for trainer construction: reset all envs + replicate group state, with
-        NO bank refresh and NO on-policy starts (matches the original _reset_training_envs)."""
+
         generation_count = int(self.cfg.num_generations)
         phase_indices = self._training_anchor_phases()
         reset_phases = phase_indices.repeat_interleave(generation_count)
@@ -241,19 +225,14 @@ class MixGRPO(Algorithm):
         return self.env.get_observation()
 
     def reset_for_update(self, update_idx: int) -> torch.Tensor:
-        # Build/refresh the on-policy state bank on the periodic schedule (rolls the
-        # deterministic policy from phase 0 under snapshot/restore so training is untouched).
-        if self.onpolicy_bank_enabled and (update_idx % self.onpolicy_refresh_every == 0):
-            self._refresh_onpolicy_state_bank(update_idx)
         generation_count = int(self.cfg.num_generations)
         phase_indices = self._training_anchor_phases()
         reset_phases = phase_indices.repeat_interleave(generation_count)
         env_ids = torch.arange(self.env.num_envs, device=self.env.device, dtype=torch.long)
         self.env.reset_envs(env_ids, phase_indices=reset_phases)
-        # Clear per-env episode accumulators so train/mean_episode_length reflects within-update.
+
         self._train_reward_sum.zero_()
         self._train_episode_length.zero_()
-        self._apply_onpolicy_group_starts(generation_count)
         self._replicate_group_reset_state(self.num_grpo_groups, generation_count)
         return self.env.get_observation()
 
@@ -353,192 +332,7 @@ class MixGRPO(Algorithm):
         advantages = (rewards_float - means) / stds
         return torch.where(valid_mask, advantages.to(dtype=rewards.dtype), torch.zeros_like(rewards))
 
-    # ------------------------------------------------------------------ on-policy state bank
-    def _init_onpolicy_state_bank(self) -> None:
-        cfg = self.cfg
-        self.onpolicy_bank_enabled = bool(cfg.onpolicy_state_bank)
-        self.onpolicy_state_ratio = float(cfg.onpolicy_state_ratio)
-        self.onpolicy_refresh_every = max(1, int(cfg.onpolicy_refresh_every))
-        requested_rollout_steps = int(cfg.onpolicy_bank_rollout_steps)
-        motion = getattr(self.env, "motion", None)
-        motion_frames = int(getattr(motion, "num_frames", 0) or 0)
-        full_motion_steps = max(1, motion_frames - 1) if motion_frames > 0 else 0
-        if full_motion_steps > 0:
-            self.onpolicy_bank_rollout_steps = full_motion_steps
-            if self.onpolicy_bank_enabled and 0 < requested_rollout_steps < full_motion_steps:
-                print(
-                    f"[STATE_BANK] requested_rollout_steps={requested_rollout_steps} shorter than "
-                    f"full_motion_steps={full_motion_steps}; using the full clip.",
-                    flush=True,
-                )
-        else:
-            self.onpolicy_bank_rollout_steps = max(1, requested_rollout_steps)
-        self.onpolicy_bank_min_phase = int(cfg.onpolicy_bank_min_phase)
-        self.onpolicy_bank_capacity = int(cfg.onpolicy_bank_capacity)
-        self.onpolicy_bank_min_size = int(cfg.onpolicy_bank_min_size)
-        self.onpolicy_bank_hard_ratio = max(0.0, min(1.0, float(cfg.onpolicy_bank_hard_ratio)))
-        self.onpolicy_bank_hard_window = max(0, int(cfg.onpolicy_bank_hard_window))
-        self._onpolicy_bank: dict[str, torch.Tensor] | None = None
-        self._onpolicy_bank_size = 0
 
-    def _onpolicy_capture_fields(self, env_ids):
-        robot = self.env.robot
-        root_state = robot.data.root_state_w.index_select(0, env_ids).clone()
-        root_state[:, :3] = root_state[:, :3] - self.env.scene.env_origins.index_select(0, env_ids)
-        fields = {
-            "root_state_local": root_state,
-            "joint_pos": robot.data.joint_pos.index_select(0, env_ids).clone(),
-            "joint_vel": robot.data.joint_vel.index_select(0, env_ids).clone(),
-            "phase_steps": self.env.phase_steps.index_select(0, env_ids).clone(),
-            "last_action": self.env.last_action.index_select(0, env_ids).clone(),
-        }
-        contact = getattr(self.env, "contact_sensor", None)
-        if contact is not None:
-            data = contact.data
-            for attr in ("net_forces_w", "net_forces_w_history"):
-                buf = getattr(data, attr, None)
-                if buf is not None:
-                    fields[f"contact_{attr}"] = buf.index_select(0, env_ids).clone()
-        return fields
-
-    @torch.no_grad()
-    def _refresh_onpolicy_state_bank(self, update_idx: int) -> None:
-        if not self.onpolicy_bank_enabled:
-            return
-        snapshot = snapshot_env_state(self.env)
-        try:
-            self._build_onpolicy_state_bank()
-        finally:
-            restore_env_state(self.env, snapshot)
-        if self._onpolicy_bank_size > 0:
-            phases = self._onpolicy_bank["phase_steps"]
-            phases_f = phases.float()
-            phase_max = int(phases.max().item())
-            hard_cutoff = max(0, phase_max - self.onpolicy_bank_hard_window)
-            hard_count = int((phases >= hard_cutoff).sum().item()) if self.onpolicy_bank_hard_window > 0 else 0
-            print(
-                f"[STATE_BANK] update={update_idx} refreshed size={self._onpolicy_bank_size} "
-                f"rollout_steps={self.onpolicy_bank_rollout_steps} "
-                f"phase_min={int(phases.min())} phase_mean={float(phases_f.mean()):.1f} "
-                f"phase_p50={float(torch.quantile(phases_f, 0.50).item()):.1f} "
-                f"phase_p90={float(torch.quantile(phases_f, 0.90).item()):.1f} "
-                f"phase_p99={float(torch.quantile(phases_f, 0.99).item()):.1f} "
-                f"phase_max={phase_max} hard_cutoff={hard_cutoff} hard_count={hard_count} "
-                f"hard_ratio={self.onpolicy_bank_hard_ratio:.2f}",
-                flush=True,
-            )
-        else:
-            print(f"[STATE_BANK] update={update_idx} refreshed but captured 0 states", flush=True)
-
-    @torch.no_grad()
-    def _build_onpolicy_state_bank(self) -> None:
-        num_envs = self.env.num_envs
-        device = self.env.device
-        phase0 = torch.zeros(num_envs, dtype=torch.long, device=device)
-        obs = self.env.reset(phase_indices=phase0)
-        captured: list[dict[str, torch.Tensor]] = []
-        captured_count = 0
-        alive = torch.ones(num_envs, dtype=torch.bool, device=device)
-        capture_phase = self.onpolicy_bank_min_phase + torch.randint(
-            0, max(1, self.onpolicy_bank_rollout_steps - self.onpolicy_bank_min_phase),
-            (num_envs,), device=device,
-        )
-        captured_mask = torch.zeros(num_envs, dtype=torch.bool, device=device)
-        cached_chunk = None
-        chunk_index = int(self.cfg.horizon)
-        for _ in range(self.onpolicy_bank_rollout_steps):
-            if not self.simulation_app.is_running():
-                break
-            if cached_chunk is None or chunk_index >= int(self.cfg.horizon):
-                cached_chunk = self.deterministic_actions(obs)
-                chunk_index = 0
-            action = cached_chunk[:, chunk_index, :]
-            chunk_index += 1
-            if bool(alive.logical_not().any()):
-                action = torch.where(alive.unsqueeze(-1), action, torch.zeros_like(action))
-            ready = alive & (~captured_mask) & (self.env.phase_steps >= capture_phase)
-            ready_ids = ready.nonzero(as_tuple=False).squeeze(-1)
-            if ready_ids.numel() > 0 and captured_count < self.onpolicy_bank_capacity:
-                take = min(int(ready_ids.numel()), self.onpolicy_bank_capacity - captured_count)
-                ready_ids = ready_ids[:take]
-                captured.append(self._onpolicy_capture_fields(ready_ids))
-                captured_count += int(ready_ids.numel())
-                captured_mask[ready_ids] = True
-            obs, _, done, _ = self.env.step(action, auto_reset=False)
-            alive = alive & ~done
-            if not bool(alive.any()) or captured_count >= self.onpolicy_bank_capacity:
-                break
-        if captured:
-            self._onpolicy_bank = {
-                key: torch.cat([chunk[key] for chunk in captured], dim=0) for key in captured[0]
-            }
-            self._onpolicy_bank_size = int(self._onpolicy_bank["phase_steps"].numel())
-        else:
-            self._onpolicy_bank = None
-            self._onpolicy_bank_size = 0
-
-    @torch.no_grad()
-    def _apply_onpolicy_group_starts(self, generation_count: int):
-        if not self.onpolicy_bank_enabled or self._onpolicy_bank_size == 0:
-            return None
-        if self._onpolicy_bank_size < self.onpolicy_bank_min_size or self.onpolicy_state_ratio <= 0.0:
-            return None
-        device = self.env.device
-        num_groups = self.num_grpo_groups
-        num_onpolicy = int(round(num_groups * min(1.0, self.onpolicy_state_ratio)))
-        if num_onpolicy <= 0:
-            return None
-        group_ids = torch.randperm(num_groups, device=device)[:num_onpolicy]
-        anchor_env_ids = group_ids * generation_count
-        bank = self._onpolicy_bank
-        bank_idx = torch.randint(0, self._onpolicy_bank_size, (num_onpolicy,), device=device)
-        hard_count = int(round(num_onpolicy * self.onpolicy_bank_hard_ratio))
-        if hard_count > 0 and self.onpolicy_bank_hard_window > 0:
-            phases_all = bank["phase_steps"]
-            phase_max = int(phases_all.max().item())
-            hard_cutoff = max(0, phase_max - self.onpolicy_bank_hard_window)
-            hard_indices = (phases_all >= hard_cutoff).nonzero(as_tuple=False).squeeze(-1)
-            if hard_indices.numel() > 0:
-                hard_count = min(hard_count, num_onpolicy)
-                hard_pick = torch.randint(0, int(hard_indices.numel()), (hard_count,), device=device)
-                hard_bank_idx = hard_indices.index_select(0, hard_pick)
-                if hard_count == num_onpolicy:
-                    bank_idx = hard_bank_idx
-                else:
-                    uniform_count = num_onpolicy - hard_count
-                    uniform_bank_idx = torch.randint(0, self._onpolicy_bank_size, (uniform_count,), device=device)
-                    bank_idx = torch.cat([hard_bank_idx, uniform_bank_idx], dim=0)
-                    bank_idx = bank_idx[torch.randperm(num_onpolicy, device=device)]
-        root_state_local = bank["root_state_local"].index_select(0, bank_idx)
-        joint_pos_full = bank["joint_pos"].index_select(0, bank_idx)
-        joint_vel_full = bank["joint_vel"].index_select(0, bank_idx)
-        phase_steps = bank["phase_steps"].index_select(0, bank_idx)
-        last_action = bank["last_action"].index_select(0, bank_idx)
-        self.env.scene.reset(env_ids=anchor_env_ids)
-        self.env._write_robot_state(
-            root_pos=root_state_local[:, :3],
-            root_quat=root_state_local[:, 3:7],
-            root_lin_vel=root_state_local[:, 7:10],
-            root_ang_vel=root_state_local[:, 10:13],
-            joint_pos=joint_pos_full[:, self.env.action_joint_ids],
-            joint_vel=joint_vel_full[:, self.env.action_joint_ids],
-            env_ids=anchor_env_ids,
-        )
-        self.env.phase_steps[anchor_env_ids] = phase_steps
-        self.env.episode_steps[anchor_env_ids] = 0
-        self.env.last_action[anchor_env_ids] = last_action
-        contact = getattr(self.env, "contact_sensor", None)
-        if contact is not None:
-            data = contact.data
-            for attr in ("net_forces_w", "net_forces_w_history"):
-                key = f"contact_{attr}"
-                buf = getattr(data, attr, None)
-                if buf is not None and key in bank:
-                    buf[anchor_env_ids] = bank[key].index_select(0, bank_idx)
-        self.env.scene.update(self.env.physics_dt)
-        return group_ids
-
-    # ------------------------------------------------------------------ rollout collection
     def _record_first_done(
         self, *, done_mask, terminations, truncations, infos_list, chunk_index,
         first_done_chunk, first_done_phase, first_done_anchor_pos, first_done_anchor_ori,
@@ -628,7 +422,7 @@ class MixGRPO(Algorithm):
                 sample = self._sample_policy_with_logprobs(obs_t, noise, sde_noise=sde_noise)
             rollout_train_step_indices = sample["train_step_indices"]
             action_chunk = sample["actions"]
-            expected = (total_envs, horizon, self.cfg.action_dim)
+            expected = (total_envs, horizon, self.num_act)
             if action_chunk.shape != expected:
                 raise RuntimeError(f"policy produced action_chunk {tuple(action_chunk.shape)}, expected {expected}")
             metric_action_abs_max_all = max(metric_action_abs_max_all, float(action_chunk.abs().max().item()))
@@ -749,7 +543,7 @@ class MixGRPO(Algorithm):
             rollout_train_step_indices = self._train_step_indices(env.device)
         valid_mask = valid_steps.view(group_count, generation_count, chunks_per_rollout)
         metric_chunk_return = metric_chunk_return_first if metric_chunk_return_first is not None else torch.zeros(total_envs, device=env.device)
-        metric_actions = metric_actions_first if metric_actions_first is not None else torch.zeros(total_envs, horizon, self.cfg.action_dim, device=env.device)
+        metric_actions = metric_actions_first if metric_actions_first is not None else torch.zeros(total_envs, horizon, self.num_act, device=env.device)
         return {
             "obs": torch.stack(rollout_obs, dim=1).view(group_count, generation_count, chunks_per_rollout, -1),
             "rewards": objective_chunk_rewards.sum(dim=1).view(group_count, generation_count),
@@ -768,7 +562,7 @@ class MixGRPO(Algorithm):
             "latents": latents.view(group_count, generation_count, chunks_per_rollout, self.cfg.flow_steps + 1, self.chunk_dim),
             "old_log_probs": old_log_probs.view(group_count, generation_count, *old_log_probs.shape[1:]),
             "train_step_indices": rollout_train_step_indices,
-            "actions": actions.view(group_count, generation_count, chunks_per_rollout, horizon, self.cfg.action_dim),
+            "actions": actions.view(group_count, generation_count, chunks_per_rollout, horizon, self.num_act),
             "valid_mask": valid_mask,
             "first_done_chunk": first_done_chunk.view(group_count, generation_count),
             "first_done_phase": first_done_phase.view(group_count, generation_count),
@@ -797,8 +591,8 @@ class MixGRPO(Algorithm):
             return torch.zeros(obs_start.shape[0], device=obs_start.device, dtype=obs_start.dtype)
         was_training = self._policy.training
         self._policy.eval()
-        # Tail-bootstrap steps roll the env PAST the rollout purely to estimate the bootstrap
-        # value; their deaths must NOT be folded into the adaptive failure sampler.
+
+
         prev_record = self.env.record_motion_failures
         self.env.record_motion_failures = False
         try:
@@ -839,12 +633,11 @@ class MixGRPO(Algorithm):
                 self._policy.train()
         return (tail_return * alive_mask.to(dtype=tail_return.dtype)).detach()
 
-    # ------------------------------------------------------------------ update
+
     def update(self, group_data: dict, collect_time: float) -> dict:
         import time as _time
         env = self.env
-        # The adaptive phase sampler is owned and updated by env.step() (death-frame binning);
-        # MixGRPO only consumes the env and never writes the sampler.
+
 
         env_count = self.num_grpo_groups
         rollout_branch_count = int(self.cfg.num_generations)
@@ -943,7 +736,7 @@ class MixGRPO(Algorithm):
             self.learning_rate = min(float(self.cfg.policy_lr), self.learning_rate * 1.5)
         self._optimizer.param_groups[0]["lr"] = self.learning_rate
 
-    # ------------------------------------------------------------------ chunk-level PPO
+
     def _policy_update(self, obs, actions, latent_path, old_log_probs, train_step_indices, advantages):
         sample_count = obs.shape[0]
         if actions.ndim != 2:
@@ -1156,7 +949,7 @@ class MixGRPO(Algorithm):
         out["policy/critic_lr"] = 0.0
         return out
 
-    # ------------------------------------------------------------------ metrics
+
     def _build_metrics(self, group_data, advantages, update_metrics, collect_time, update_time) -> dict:
         env = self.env
         group_rewards = group_data["rewards"]
@@ -1246,8 +1039,7 @@ class MixGRPO(Algorithm):
         chunk_raw_means = group_data.get("raw_chunk_rewards", chunk_rewards_for_metrics).mean(dim=(0, 1))
         chunk_count_for_metrics = int(chunk_objective_means.shape[0])
         mid_chunk_index = min(max(chunk_count_for_metrics // 2, 0), chunk_count_for_metrics - 1)
-        sampler_stats_fn = getattr(env, "adaptive_sampling_stats", None)
-        sampler_stats = sampler_stats_fn() if callable(sampler_stats_fn) else {}
+        sampler_stats = env.adaptive_sampling_stats()
         legs_idx = list(range(0, 12)); waist_idx = [12, 13, 14]; arms_idx = list(range(15, 29))
 
         metrics = {
@@ -1307,7 +1099,7 @@ class MixGRPO(Algorithm):
             "phase/start_mean": float(collection_start_phases.float().mean().item()) if collection_start_phases is not None else float("nan"),
             "phase/start_min": float(collection_start_phases.min().item()) if collection_start_phases is not None else float("nan"),
             "phase/start_max": float(collection_start_phases.max().item()) if collection_start_phases is not None else float("nan"),
-            "phase/start_at_min_frac": float((collection_start_phases == int(getattr(env, "motion_start_phase", 0))).float().mean().item()) if collection_start_phases is not None else float("nan"),
+            "phase/start_at_min_frac": float((collection_start_phases == env.motion_start_phase).float().mean().item()) if collection_start_phases is not None else float("nan"),
             "sampler/top_bin": sampler_stats.get("top_bin", float("nan")),
             "sampler/top_prob": sampler_stats.get("top_prob", float("nan")),
             "sampler/peak_bin": sampler_stats.get("peak_bin", float("nan")),
@@ -1351,10 +1143,8 @@ class MixGRPO(Algorithm):
         rollout_info_items = group_data.get("metric_rollout_info_items", [])
         rollout_reward_sums: dict[str, float] = {}
         rollout_weight_sum = 0.0
-        # [DONE_ROLLOUT] = per-transition average termination rate per cause (mean over all
-        # rollout transitions of the done-cause fraction). NOT masked by ~done (which would be
-        # identically zero, since a done-cause implies done) and NOT a per-env union (that is
-        # what [DONE] reports). Counts every transition, not just alive-weighted ones.
+
+
         done_rollout_sums: dict[str, float] = {}
         done_rollout_steps = 0
         for step_info, valid_mask_for_step in rollout_info_items:
@@ -1385,7 +1175,7 @@ class MixGRPO(Algorithm):
         metrics["train/recent_episode_count"] = float(len(train_reward_buffer))
         metrics["train/completed_episodes"] = float(self._train_completed_episodes)
         reward_weights = {
-            "action_rate": -float(self.env.task_cfg.action_rate_weight),
+            "action_rate": -self.env.config.action_rate_weight,
             "joint_limit": -10.0, "anchor_pos_reward": 0.5, "anchor_ori_reward": 0.5,
             "body_pos_reward": 1.0, "body_ori_reward": 1.0, "body_lin_vel_reward": 1.0,
             "body_ang_vel_reward": 1.0,
@@ -1412,7 +1202,7 @@ class MixGRPO(Algorithm):
             metrics["group/tail_return_alive_frac"] = float((last_values != 0.0).to(dtype=torch.float32).mean().item())
         return metrics
 
-    # ------------------------------------------------------------------ logging
+
     def log(self, update_idx: int, max_updates: int, metrics: dict) -> None:
         print(
             f"[UPDATE] {update_idx}/{max_updates} "
@@ -1523,7 +1313,7 @@ class MixGRPO(Algorithm):
             f"valid={metrics.get('rollout/valid_frac', float('nan')):.5f}",
             flush=True,
         )
-        # --- independent per-algorithm diagnostics (no shared logger) -------------------------
+
         print(
             f"[TRAIN] mean_reward={metrics.get('train/mean_reward', float('nan')):.5f} "
             f"mean_len={metrics.get('train/mean_episode_length', float('nan')):.2f} "
@@ -1666,17 +1456,20 @@ class MixGRPO(Algorithm):
         cfg = self.cfg
         env = self.env
         print("[INFO] Starting MixGRPO training", flush=True)
-        print(f"[INFO] motion_file={env.task_cfg.motion_file}", flush=True)
+        print(
+            f"[INFO] task={env.task.name} terrain={env.task.terrain} motion_file={env.task.motion_file}",
+            flush=True,
+        )
         print(
             f"[INFO] obs_dim={env.observation_dim} actor_type=mix_sde_ode "
-            f"policy_horizon={cfg.horizon} action_dim={cfg.action_dim} single_action_mode=True "
+            f"policy_horizon={cfg.horizon} action_dim={self.num_act} single_action_mode=True "
             f"rollout_chunks={self._chunks_per_grpo_update()} "
             f"rollout_env_steps={self._training_rollout_horizon()} "
-            f"reset_noise={env.task_cfg.reset_noise} interval_pushes={env.task_cfg.interval_pushes} "
-            f"observation_noise={getattr(env.task_cfg, 'observation_noise', True)} "
+            f"reset_noise={env.config.reset_noise} interval_pushes={env.config.interval_pushes} "
+            f"observation_noise={env.config.observation_noise} "
             f"future_ref_steps=0 "
-            f"phase_sampler={'adaptive' if env.task_cfg.adaptive_motion_sampling else 'uniform'} "
-            f"adaptive_predecessor_ratio={env.task_cfg.adaptive_predecessor_ratio} "
+            f"phase_sampler={'adaptive' if env.config.adaptive_motion_sampling else 'uniform'} "
+            f"adaptive_predecessor_ratio={env.config.adaptive_predecessor_ratio} "
             f"num_envs={env.num_envs} rollout_env_steps_target={int(cfg.rollout_env_steps)} "
             f"tail_bootstrap_steps={int(cfg.tail_bootstrap_steps)} "
             f"terminal_penalty={cfg.terminal_penalty} num_generations={cfg.num_generations} "
@@ -1689,16 +1482,7 @@ class MixGRPO(Algorithm):
             flush=True,
         )
         print(
-            f"[INFO] onpolicy_state_bank={cfg.onpolicy_state_bank} "
-            f"state_ratio={cfg.onpolicy_state_ratio} refresh_every={cfg.onpolicy_refresh_every} "
-            f"bank_rollout_steps={cfg.onpolicy_bank_rollout_steps} "
-            f"bank_min_phase={cfg.onpolicy_bank_min_phase} "
-            f"bank_hard_ratio={cfg.onpolicy_bank_hard_ratio} "
-            f"bank_hard_window={cfg.onpolicy_bank_hard_window}",
-            flush=True,
-        )
-        print(
-            f"[INFO] reward=official_holosoma_9term action_rate={env.task_cfg.action_rate_weight}",
+            f"[INFO] reward=official_holosoma_9term action_rate={env.config.action_rate_weight}",
             flush=True,
         )
         _chunks = self._chunks_per_grpo_update()

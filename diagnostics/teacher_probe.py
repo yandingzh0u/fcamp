@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -9,6 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from isaaclab.app import AppLauncher
+from core.config import load_config
 
 parser = argparse.ArgumentParser(
     description="PD teacher feasibility probe. Default: zero action (official semantics -> PD "
@@ -16,10 +18,9 @@ parser = argparse.ArgumentParser(
     "PD target tracks q_ref(t). Reports survival; if even the reference action cannot finish the "
     "clip, the scene/termination contract is infeasible (asset/terrain/physics, not RL)."
 )
+parser.add_argument("--config", type=str, required=True)
 parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--start_phase", type=int, default=0)
-parser.add_argument("--motion_file", type=str, default="")
-parser.add_argument("--terrain_type", choices=("plane", "slope"), default="slope")
 parser.add_argument(
     "--reference_lead",
     type=int,
@@ -36,11 +37,8 @@ parser.add_argument(
     "the PD target equal the reference pose q_ref(t). If even this cannot pass the 760-850 stand-up "
     "segment, the remaining problem is asset/terrain/physics, not RL.",
 )
-# Nominal teacher probe: reset noise, pushes, observation noise AND startup randomization are
-# all OFF by default so friction / COM / default-joint bias are deterministic. Pass
-# --startup_randomization to re-enable domain randomization for the follow-up robustness test.
-parser.add_argument("--no_reset_noise", action="store_true", default=True)
-parser.add_argument("--no_obs_noise", action="store_true", default=True)
+
+
 parser.add_argument("--startup_randomization", action="store_true", default=False)
 parser.add_argument(
     "--feet_only_termination",
@@ -52,32 +50,30 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
+experiment = load_config(args_cli.config)
+args_cli.device = experiment.environment.device
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import torch
 
-from env.config import DEFAULT_MOTION_FILE, MimicEnvConfig
 from env.mimic import G1MimicEnv
 
 
 def main() -> None:
-    cfg = MimicEnvConfig(
-        device=args_cli.device,
+    cfg = replace(
+        experiment.environment,
         num_envs=args_cli.num_envs,
-        render=False,
         startup_randomization=args_cli.startup_randomization,
-        terrain_type=args_cli.terrain_type,
-        motion_file=args_cli.motion_file or str(DEFAULT_MOTION_FILE),
-        reset_noise=not args_cli.no_reset_noise,
+        reset_noise=False,
         interval_pushes=False,
-        observation_noise=not args_cli.no_obs_noise,
+        observation_noise=False,
         adaptive_motion_sampling=False,
         max_episode_steps=-1,
         motion_start_phase=args_cli.start_phase,
     )
-    env = G1MimicEnv(cfg)
-    # Motion end is a clean stop (success), not a teleport roll-in, for the probe.
+    env = G1MimicEnv(cfg, 1)
+
     env.terminate_on_motion_end = True
     num_frames = int(env.motion.num_frames)
     device = env.device
@@ -111,11 +107,11 @@ def main() -> None:
     survived_steps = torch.zeros(env.num_envs, dtype=torch.long, device=device)
     death_cause = {"anchor_pos_bad": 0, "anchor_ori_bad": 0, "ee_body_bad": 0, "time_out": 0, "motion_complete": 0}
 
-    from env.config import EE_Z_TERMINATION_THRESHOLD
-    # Roll every reference frame from start_phase through the final frame inclusive (diagnostic
-    # only; does not affect training).
+    from env.spec import EE_Z_TERMINATION_THRESHOLD
+
+
     max_steps = num_frames - int(args_cli.start_phase)
-    term_names = list(env.ee_body_names)  # ee_z_error_by_body is indexed over ee_body_indices
+    term_names = list(env.ee_body_names)
     print(f"[PROBE] num_frames={num_frames} start_phase={args_cli.start_phase} max_steps={max_steps} num_envs={env.num_envs}", flush=True)
     print(f"[PROBE] ee_body_order={term_names} term_threshold={EE_Z_TERMINATION_THRESHOLD}", flush=True)
     mode = (
@@ -128,7 +124,7 @@ def main() -> None:
         action = reference_action() if args_cli.reference_action else zero_action
         _, _, done, info = env.step(action, auto_reset=False)
         dbg = info["debug_terms"]
-        ee_by_body = dbg["ee_z_error_by_body"]  # (num_envs, num_ee_bodies)
+        ee_by_body = dbg["ee_z_error_by_body"]
         if step % 5 == 0 or bool((alive & done).any()):
             per_body = ee_by_body[alive].mean(dim=0) if bool(alive.any()) else ee_by_body.mean(dim=0)
             body_str = " ".join(f"{n}={float(v):.3f}" for n, v in zip(term_names, per_body.tolist()))

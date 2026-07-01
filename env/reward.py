@@ -4,7 +4,7 @@ import torch
 
 from isaaclab.utils.math import quat_error_magnitude
 
-from .config import UNDESIRED_CONTACT_THRESHOLD
+from .spec import UNDESIRED_CONTACT_THRESHOLD
 
 
 class MimicRewardMixin:
@@ -13,22 +13,7 @@ class MimicRewardMixin:
         actions: torch.Tensor,
         previous_action: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Official Holosoma WBT tracking reward -- exactly nine terms, all scaled by dt.
 
-        Positive tracking terms (exp(-error / sigma^2)):
-            anchor position      (w=0.5,  sigma=0.3)
-            anchor orientation   (w=0.5,  sigma=0.4)
-            relative body pos    (w=1.0,  sigma=0.3)
-            relative body ori    (w=1.0,  sigma=0.4)
-            body linear velocity (w=1.0,  sigma=1.0)
-            body angular velocity(w=1.0,  sigma=3.14)
-        Penalties:
-            action rate          (w=-action_rate_weight, default -0.1)
-            joint limit          (w=-10.0, soft limit 0.9 baked into soft_joint_pos_limits)
-            undesired contacts   (w=-0.1, force threshold 1.0)
-
-        The healthy-state upper bound is (0.5+0.5+1+1+1+1) * dt = 0.1.
-        """
         context = self.get_tracking_context()
         reference = context["reference"]
 
@@ -80,7 +65,7 @@ class MimicRewardMixin:
         )
         undesired_contacts = torch.sum(undesired_contact_mask.to(dtype=torch.float32), dim=-1)
 
-        action_rate_weight = float(getattr(self.task_cfg, "action_rate_weight", 1.0e-1))
+        action_rate_weight = self.config.action_rate_weight
 
         reward = (
             0.5 * anchor_pos_reward

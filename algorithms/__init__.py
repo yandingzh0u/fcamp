@@ -1,14 +1,13 @@
-"""Algorithm registry. Maps algo_name -> Algorithm subclass."""
 from __future__ import annotations
 
-from .fpo_pp import FPOPP
+from .fpo import FPO
 from .mixgrpo import MixGRPO
 from .ppo import PPO
 
 _REGISTRY = {
     "mixgrpo": MixGRPO,
     "ppo": PPO,
-    "fpo_pp": FPOPP,
+    "fpo": FPO,
 }
 
 

@@ -1,8 +1,3 @@
-"""Environment snapshot / restore. Algorithm-agnostic.
-
-Used by validation (preserve training state across an eval rollout) and by the MixGRPO
-on-policy state bank. Operates only through the env's public state tensors + _write_robot_state.
-"""
 from __future__ import annotations
 
 import torch
