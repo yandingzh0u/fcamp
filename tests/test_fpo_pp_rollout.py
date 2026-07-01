@@ -119,7 +119,7 @@ class FakeEnv:
 def _cfg(num_micro_batches=1):
     # Single-step FPO++ (official-aligned): horizon=1, flow acts directly in action space.
     return types.SimpleNamespace(
-        action_dim=3, horizon=1, actor_hidden_dims=(32, 32), activation="elu",
+        action_dim=3, horizon=1, actor_hidden_dims=(32, 32), critic_hidden_dims=(32, 32), activation="elu",
         actor_scale=1.0, mlp_output_scale=1.0, timestep_embed_dim=8,
         cfm_loss_reduction="mean", action_perturb_std=0.1, cfm_loss_t_inverse_cdf_beta=1.0,
         empirical_normalization=True, policy_lr=1e-4, weight_decay=1e-4,
@@ -129,8 +129,9 @@ def _cfg(num_micro_batches=1):
         num_micro_batches=num_micro_batches,
         init_at_random_ep_len=True,
         num_steps_per_env=6, discount_gamma=0.99,
-        num_mini_batches=2, num_learning_epochs=2, clip_range=0.01,
+        num_mini_batches=2, num_learning_epochs=2, clip_range=0.01, value_clip_range=0.2,
         value_loss_coef=1.0, max_grad_norm=1.0, gae_lambda=0.95, value_lr=1.0e-3,
+        critic_weight_decay=0.0,
     )
 
 
@@ -191,14 +192,15 @@ def test_end_to_end():
     check("value_loss finite & >=0", metrics["fpo/value_loss"] >= 0)
     check("ratio reported", "fpo/ratio" in metrics and metrics["fpo/ratio"] > 0)
     check("kl reported & finite", "fpo/kl" in metrics and torch.isfinite(torch.tensor(metrics["fpo/kl"])))
-    # Gradient decoupling: actor and critic clipped separately; critic LR is fixed (value_lr),
-    # actor LR is the adaptive one (independent param groups).
+    # Gradient decoupling: actor and critic are separate AdamW optimizers (PPO-aligned), clipped
+    # separately; the same adaptive multiplier is applied to both initial learning rates.
     check("separate critic grad reported", "fpo/grad_norm_critic" in metrics)
-    check("critic_lr == value_lr (decoupled, fixed)", abs(metrics["fpo/critic_lr"] - 1.0e-3) < 1e-12)
-    group_names = {g.get("name") for g in algo.optimizer.param_groups}
-    check("optimizer has separate actor/critic groups", {"actor", "critic"} <= group_names)
-    critic_group = next(g for g in algo.optimizer.param_groups if g.get("name") == "critic")
-    check("critic group LR stayed at value_lr", abs(critic_group["lr"] - 1.0e-3) < 1e-12)
+    check("actor optimizer is the primary (checkpointed) optimizer", algo.optimizer is algo.actor_optimizer)
+    check("actor and critic optimizers are independent objects", algo.actor_optimizer is not algo.critic_optimizer)
+    critic_lr = algo.critic_optimizer.param_groups[0]["lr"]
+    actor_lr = algo.actor_optimizer.param_groups[0]["lr"]
+    check("reported critic LR matches optimizer", abs(metrics["fpo/critic_lr"] - critic_lr) < 1e-12)
+    check("actor/critic receive the same adaptive multiplier", abs(critic_lr / actor_lr - 10.0) < 1e-6)
     check("metrics has reward terms", any(k.startswith("reward/") for k in metrics))
     check("metrics has done fracs", any(k.startswith("done/") for k in metrics))
     check("first_failure metrics populated (ee_body_frac > 0)",

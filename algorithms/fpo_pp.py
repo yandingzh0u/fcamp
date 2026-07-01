@@ -113,7 +113,9 @@ class FPOPP(Algorithm):
             cfm_loss_t_inverse_cdf_beta=float(cfg.cfm_loss_t_inverse_cdf_beta),
         ).to(device)
         self.actor.train()
-        self.critic = Critic(self.critic_obs_dim, tuple(cfg.actor_hidden_dims), cfg.activation).to(device)
+        # Critic architecture is SHARED with PPO ([512,256,128]) and decoupled from the wide flow
+        # actor ([1024,512,256]): both algorithms face the identical value-estimation problem.
+        self.critic = Critic(self.critic_obs_dim, tuple(cfg.critic_hidden_dims), cfg.activation).to(device)
         # chunk_dim == action_dim; kept for log/metric parity with the harness.
         self.chunk_dim = self.num_act
 
@@ -125,23 +127,23 @@ class FPOPP(Algorithm):
             self.actor_obs_normalizer = nn.Identity()
             self.critic_obs_normalizer = nn.Identity()
 
-        # ONE AdamW object (so the harness checkpoints a single optimizer) but TWO param groups:
-        #   group "actor"  -> adaptive-KL learning rate (moves at runtime)
-        #   group "critic" -> fixed value_lr
-        # Crucially the actor and critic gradients are CLIPPED SEPARATELY in update() (see below),
-        # so the value head's large early gradient can no longer dominate a shared global
-        # grad-norm and squash the actor's tiny gradient.
+        # TWO INDEPENDENT AdamW optimizers, mirroring PPO's actor-critic split:
+        #   actor  -> policy_lr, adaptive-KL schedule, actor weight_decay (flow-specific)
+        #   critic -> value_lr, critic_weight_decay (shared value-head config; 0 for PPO parity)
+        # Independent optimizers also clip the two grad norms SEPARATELY in update(), so the value
+        # head's large early gradient can never dominate a shared global norm and squash the actor's
+        # tiny gradient. The critic optimizer/loss/clip are now identical to PPO's.
         self.learning_rate = float(cfg.policy_lr)
         if float(cfg.value_lr) <= 0.0:
             raise ValueError(f"value_lr must be > 0, got {cfg.value_lr}")
         self.critic_learning_rate = float(cfg.value_lr)
-        self._optimizer = torch.optim.AdamW(
-            [
-                {"params": list(self.actor.parameters()), "lr": self.learning_rate, "name": "actor"},
-                {"params": list(self.critic.parameters()), "lr": self.critic_learning_rate, "name": "critic"},
-            ],
-            betas=(0.9, 0.999),
-            weight_decay=float(cfg.weight_decay),
+        self.actor_optimizer = torch.optim.AdamW(
+            self.actor.parameters(), lr=self.learning_rate,
+            betas=(0.9, 0.999), weight_decay=float(cfg.weight_decay),
+        )
+        self.critic_optimizer = torch.optim.AdamW(
+            self.critic.parameters(), lr=self.critic_learning_rate,
+            betas=(0.9, 0.999), weight_decay=float(cfg.critic_weight_decay),
         )
 
         self.num_mc = max(1, int(cfg.fpo_num_mc))
@@ -167,11 +169,15 @@ class FPOPP(Algorithm):
 
     @property
     def optimizer(self) -> torch.optim.Optimizer:
-        return self._optimizer
+        # The harness checkpoints this as payload["optimizer"] -> the actor optimizer. The critic
+        # optimizer is checkpointed separately via extra_checkpoint_state (like PPO).
+        return self.actor_optimizer
 
     def extra_checkpoint_state(self) -> dict:
         return {
+            "critic_optimizer": self.critic_optimizer.state_dict(),
             "learning_rate": self.learning_rate,
+            "critic_learning_rate": self.critic_learning_rate,
             "actor_obs_normalizer": self.actor_obs_normalizer.state_dict() if self.empirical_normalization else None,
             "critic_obs_normalizer": self.critic_obs_normalizer.state_dict() if self.empirical_normalization else None,
         }
@@ -179,14 +185,26 @@ class FPOPP(Algorithm):
     def load_extra_checkpoint_state(self, payload: dict, reset_optimizer: bool = False) -> None:
         if not payload:
             return
-        # On a fresh-optimizer resume keep the config learning_rate (honour a fine-tune override)
-        # instead of restoring the checkpoint's adapted LR; otherwise restore it.
-        if not reset_optimizer:
+        if reset_optimizer:
+            # Fresh optimizers requested: keep BOTH optimizers fresh and re-apply the config LRs to
+            # every param group so a fine-tune override is honoured (not overwritten by the resumed
+            # run's adapted LR).
+            for pg in self.actor_optimizer.param_groups:
+                pg["lr"] = self.learning_rate
+            for pg in self.critic_optimizer.param_groups:
+                pg["lr"] = self.critic_learning_rate
+        else:
+            # Restore both adapted LRs and the critic optimizer state.
             self.learning_rate = float(payload.get("learning_rate", self.learning_rate))
-        for group in self._optimizer.param_groups:
-            if group.get("name") == "critic":
-                continue  # critic LR is fixed (value_lr), only the actor group is adaptive
-            group["lr"] = self.learning_rate
+            self.critic_learning_rate = float(
+                payload.get("critic_learning_rate", self.critic_learning_rate)
+            )
+            for pg in self.actor_optimizer.param_groups:
+                pg["lr"] = self.learning_rate
+            if "critic_optimizer" in payload:
+                self.critic_optimizer.load_state_dict(payload["critic_optimizer"])
+            for pg in self.critic_optimizer.param_groups:
+                pg["lr"] = self.critic_learning_rate
         if self.empirical_normalization:
             if payload.get("actor_obs_normalizer") is not None:
                 self.actor_obs_normalizer.load_state_dict(payload["actor_obs_normalizer"])
@@ -406,11 +424,13 @@ class FPOPP(Algorithm):
         old_x1_pred = rollout["x1_pred"].reshape(B, M, A)
         returns = rollout["returns"].reshape(B, 1)
         advantages = rollout["advantages"].reshape(B, 1)
+        old_values = rollout["values"].reshape(B, 1)
 
         num_mini_batches = max(1, int(self.cfg.num_mini_batches))
         mini_batch_size = max(1, B // num_mini_batches)
         epochs = int(self.cfg.num_learning_epochs)
         clip = float(self.cfg.clip_range)
+        value_clip = float(self.cfg.value_clip_range)
         value_coef = float(self.cfg.value_loss_coef)
 
         totals = {
@@ -438,7 +458,8 @@ class FPOPP(Algorithm):
                 # Symmetric advantage clamp (official advantage_clamp), per logical minibatch.
                 mb_adv_full = advantages[idx].clamp(-self.adv_clamp, self.adv_clamp)
 
-                self._optimizer.zero_grad(set_to_none=True)
+                self.actor_optimizer.zero_grad(set_to_none=True)
+                self.critic_optimizer.zero_grad(set_to_none=True)
                 micro_chunks = torch.chunk(torch.arange(mb_size, device=device), self.num_micro_batches)
                 agg = {k: 0.0 for k in ("actor_loss", "value_loss", "ratio", "clip_frac", "cfm_new", "cfm_old", "kl")}
                 agg_ratio_min = float("inf")
@@ -470,8 +491,14 @@ class FPOPP(Algorithm):
                     surrogate = aspo_objective(ratio, mb_adv, clip)                     # (mb, M)
                     actor_loss = -surrogate.mean()
 
-                    # Unclipped value loss (official use_clipped_value_loss=False).
-                    value_loss = (value - returns[li]).pow(2).mean()
+                    # Clipped value loss (PPO-style), using the INDEPENDENT value_clip_range so the
+                    # tiny FPO policy clip (0.01) never clips the critic. Identical to PPO's value
+                    # update: max(mse, mse(clipped)).
+                    mb_old_values = old_values[li]
+                    value_clipped = mb_old_values + (value - mb_old_values).clamp(-value_clip, value_clip)
+                    value_losses = (value - returns[li]).pow(2)
+                    value_losses_clipped = (value_clipped - returns[li]).pow(2)
+                    value_loss = torch.max(value_losses, value_losses_clipped).mean()
 
                     loss = actor_loss + value_coef * value_loss
                     (loss * weight).backward()
@@ -489,23 +516,32 @@ class FPOPP(Algorithm):
                         kl_micro = ((x1_pred.detach() - old_x1_pred[li]) ** 2).mean()
                         agg["kl"] += float(kl_micro.item()) * weight
 
-                # Adaptive learning-rate schedule from the aggregated KL (official rule). Only the
-                # ACTOR group's LR is adapted; the critic keeps its fixed value_lr.
+                # PPO-aligned adaptive schedule: the policy-drift signal applies the same
+                # multiplicative change to both independent optimizers. FPO necessarily uses its
+                # endpoint-drift proxy and desired_kl rather than PPO's analytic Gaussian KL.
                 if self.schedule == "adaptive":
                     kl_mean = agg["kl"]
                     if kl_mean > self.desired_kl * 2.0:
                         self.learning_rate = max(self.lr_min, self.learning_rate / 1.5)
+                        self.critic_learning_rate = max(
+                            self.lr_min, self.critic_learning_rate / 1.5
+                        )
                     elif 0.0 < kl_mean < self.desired_kl / 2.0:
                         self.learning_rate = min(self.lr_max, self.learning_rate * 1.5)
-                    for group in self._optimizer.param_groups:
-                        if group.get("name") != "critic":
-                            group["lr"] = self.learning_rate
+                        self.critic_learning_rate = min(
+                            self.lr_max, self.critic_learning_rate * 1.5
+                        )
+                    for group in self.actor_optimizer.param_groups:
+                        group["lr"] = self.learning_rate
+                    for group in self.critic_optimizer.param_groups:
+                        group["lr"] = self.critic_learning_rate
 
                 # Clip actor and critic gradients SEPARATELY so the value head's large gradient
                 # cannot rescale (squash) the actor's gradient through a shared global norm.
                 grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm)
                 grad_norm_critic = nn.utils.clip_grad_norm_(self.critic.parameters(), self.cfg.max_grad_norm)
-                self._optimizer.step()
+                self.actor_optimizer.step()
+                self.critic_optimizer.step()
 
                 totals["actor_loss"] += agg["actor_loss"]
                 totals["value_loss"] += agg["value_loss"]
@@ -685,8 +721,8 @@ class FPOPP(Algorithm):
         return metrics
 
     def _add_sampler_metrics(self, metrics: dict) -> None:
-        """Adaptive-sampler diagnostics ([SAMPLER]): the official failure-bin distribution
-        (top_bin/top_prob/entropy/failed_sum) and the dominant failure bin. Owned by env.step();
+        """Adaptive-sampler diagnostics ([SAMPLER]): the failure-predecessor distribution
+        (top_bin/top_prob/entropy/failed_sum) and the dominant death bin. Owned by env.step();
         the algorithm only reads it. Absent when the env exposes no sampler (e.g. test fakes)."""
         stats_fn = getattr(self.env, "adaptive_sampling_stats", None)
         stats = stats_fn() if callable(stats_fn) else {}

@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation
+from isaaclab.assets import Articulation, AssetBaseCfg
 from isaaclab.scene import InteractiveScene
 from isaaclab.sim import SimulationContext
 
@@ -51,6 +51,21 @@ class G1Env:
         self.sim = SimulationContext(sim_cfg)
 
         scene_cfg = G1SceneCfg(num_envs=cfg.num_envs, env_spacing=cfg.env_spacing)
+        terrain_type = str(cfg.terrain_type).strip().lower()
+        if terrain_type == "plane":
+            scene_cfg.slope = AssetBaseCfg(
+                prim_path="/World/ground",
+                spawn=sim_utils.GroundPlaneCfg(
+                    size=(100.0, 100.0),
+                    physics_material=sim_utils.RigidBodyMaterialCfg(
+                        static_friction=1.0,
+                        dynamic_friction=1.0,
+                        restitution=0.0,
+                    ),
+                ),
+            )
+        elif terrain_type != "slope":
+            raise ValueError(f"terrain_type must be 'plane' or 'slope', got {cfg.terrain_type!r}")
         scene_cfg.robot = make_g1_cfg("{ENV_REGEX_NS}/Robot", fix_root_link=cfg.fix_root_link)
         scene_cfg.contact_forces.debug_vis = bool(getattr(cfg, "contact_debug_vis", False))
         self.scene = InteractiveScene(scene_cfg)

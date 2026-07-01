@@ -132,8 +132,7 @@ class G1MimicEnv(
         if not self.adaptive_motion_sampling:
             return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
 
-        # Holosoma failure-bin sampler. Start frames are drawn from the official death-frame bin
-        # distribution. The sampler is fed only by env.step().
+        # Failure-predecessor sampler. The sampler is fed only by env.step().
         return self.adaptive_sampler.sample_frames(num_samples, min_phase, max_phase)
 
     def reset(self, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
@@ -241,10 +240,9 @@ class G1MimicEnv(
             device=self.device,
             num_bins=int(self.task_cfg.adaptive_num_bins),
             env_fps=int(round(1.0 / float(self.task_cfg.sim_dt))) if float(self.task_cfg.sim_dt) > 0 else 50,
-            adaptive_kernel_size=int(self.task_cfg.adaptive_kernel_size),
-            adaptive_lambda=float(self.task_cfg.adaptive_lambda),
-            adaptive_uniform_ratio=float(self.task_cfg.adaptive_uniform_ratio),
             adaptive_alpha=float(self.task_cfg.adaptive_alpha),
+            adaptive_predecessor_ratio=float(self.task_cfg.adaptive_predecessor_ratio),
+            adaptive_predecessor_lookback_bins=int(self.task_cfg.adaptive_predecessor_lookback_bins),
         )
         # Per-env guard so the same termination is recorded by the sampler exactly once even
         # when the env is not auto-reset (validation / GRPO branch rollouts replay dead envs).

@@ -12,6 +12,7 @@ env:
   sim_dt: 0.02
   fix_root_link: false
   startup_randomization: true
+  terrain_type: slope
   motion_file: ""
   max_episode_steps: 500        # official 10s @ 50Hz
   motion_start_phase: 0
@@ -19,14 +20,12 @@ env:
   reset_noise: true
   interval_pushes: true
   observation_noise: true
-  # adaptive phase sampling (Holosoma official failure-bin, owned by env.step):
-  # p_b ∝ bin_failed_ema + uniform_ratio/num_bins (additive uniform floor).
+  # adaptive phase sampling: 80% previous failure bin + 20% full-clip uniform.
   adaptive_motion_sampling: true
   adaptive_num_bins: 0            # 0 -> auto floor(num_frames/fps)+1 (~1s bins; 959->20)
-  adaptive_uniform_ratio: 0.1    # additive floor (official), not a fixed mixture weight
-  adaptive_kernel_size: 1
-  adaptive_lambda: 0.8
   adaptive_alpha: 0.001
+  adaptive_predecessor_ratio: 0.8
+  adaptive_predecessor_lookback_bins: 1
   # reward: official Holosoma WBT 9-term reward. action_rate is the only tunable weight.
   action_rate_weight: 0.1
 
@@ -34,6 +33,7 @@ algo:
   action_dim: 29
   horizon: 1                 # PPO single-step actions
   actor_hidden_dims: [512, 256, 128]
+  critic_hidden_dims: [512, 256, 128]   # SHARED value head (same leaf FPO uses); identical to actor here
   activation: elu
   num_generations: 1         # PPO has no GRPO groups
   discount_gamma: 0.99
@@ -43,12 +43,14 @@ algo:
   num_mini_batches: 4
   gae_lambda: 0.95
   clip_range: 0.2
+  value_clip_range: 0.2        # INDEPENDENT critic value-loss clip (shared with FPO). == clip_range here
   entropy_coef: 0.005
   value_loss_coef: 1.0
   desired_kl: 0.01
   actor_learning_rate: 1.0e-3
   critic_learning_rate: 1.0e-3
   weight_decay: 0.0
+  critic_weight_decay: 0.0     # CRITIC weight decay (shared leaf with FPO)
   init_noise_std: 1.0
   empirical_normalization: true
   init_at_random_ep_len: true

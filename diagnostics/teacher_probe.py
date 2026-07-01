@@ -18,6 +18,15 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--start_phase", type=int, default=0)
+parser.add_argument("--motion_file", type=str, default="")
+parser.add_argument("--terrain_type", choices=("plane", "slope"), default="slope")
+parser.add_argument(
+    "--reference_lead",
+    type=int,
+    default=0,
+    help="Diagnostic only: drive q_ref(t + lead) while termination is still scored at t. "
+    "This measures PD/contact phase lag; it is not a proposed policy observation.",
+)
 parser.add_argument(
     "--reference_action",
     action="store_true",
@@ -48,7 +57,7 @@ simulation_app = app_launcher.app
 
 import torch
 
-from env.config import MimicEnvConfig
+from env.config import DEFAULT_MOTION_FILE, MimicEnvConfig
 from env.mimic import G1MimicEnv
 
 
@@ -58,6 +67,8 @@ def main() -> None:
         num_envs=args_cli.num_envs,
         render=False,
         startup_randomization=args_cli.startup_randomization,
+        terrain_type=args_cli.terrain_type,
+        motion_file=args_cli.motion_file or str(DEFAULT_MOTION_FILE),
         reset_noise=not args_cli.no_reset_noise,
         interval_pushes=False,
         observation_noise=not args_cli.no_obs_noise,
@@ -68,23 +79,32 @@ def main() -> None:
     env = G1MimicEnv(cfg)
     # Motion end is a clean stop (success), not a teleport roll-in, for the probe.
     env.terminate_on_motion_end = True
-    if args_cli.feet_only_termination:
-        feet = ["left_ankle_roll_link", "right_ankle_roll_link"]
-        env.termination_body_indices = [env.track_body_names.index(n) for n in feet]
-        print(f"[PROBE] OVERRIDE termination_body_indices -> feet only {feet}", flush=True)
     num_frames = int(env.motion.num_frames)
     device = env.device
 
     start = torch.full((env.num_envs,), int(args_cli.start_phase), dtype=torch.long, device=device)
     env.reset(phase_indices=start)
+    if args_cli.feet_only_termination:
+        feet = ["left_ankle_roll_link", "right_ankle_roll_link"]
+        feet_indices = [env.track_body_names.index(n) for n in feet]
+        original_compute_termination = env.compute_termination
+
+        def compute_feet_only_termination():
+            original_indices = env.termination_body_indices
+            env.termination_body_indices = feet_indices
+            try:
+                return original_compute_termination()
+            finally:
+                env.termination_body_indices = original_indices
+
+        env.compute_termination = compute_feet_only_termination
+        print(f"[PROBE] OVERRIDE termination -> feet only {feet}", flush=True)
 
     zero_action = torch.zeros(env.num_envs, env.action_dim, device=device)
 
     def reference_action() -> torch.Tensor:
-        # a_ref(t) = S^-1 * (q_ref(t) - q_default), evaluated at the CURRENT (pre-advance) phase
-        # so the resulting PD target q_default + S*a_ref equals the reference pose q_ref(t) that
-        # this step's reward is scored against. Motion frames are in the action-joint order.
-        q_ref = env.motion.get_frame(env.phase_steps)["joint_pos"]
+        target_phase = torch.clamp(env.phase_steps + int(args_cli.reference_lead), max=num_frames - 1)
+        q_ref = env.motion.get_frame(target_phase)["joint_pos"]
         return (q_ref - env.default_action_joint_pos) / env.action_scale
 
     alive = torch.ones(env.num_envs, dtype=torch.bool, device=device)
@@ -98,7 +118,11 @@ def main() -> None:
     term_names = list(env.ee_body_names)  # ee_z_error_by_body is indexed over ee_body_indices
     print(f"[PROBE] num_frames={num_frames} start_phase={args_cli.start_phase} max_steps={max_steps} num_envs={env.num_envs}", flush=True)
     print(f"[PROBE] ee_body_order={term_names} term_threshold={EE_Z_TERMINATION_THRESHOLD}", flush=True)
-    mode = "reference_action a_ref(t)=S^-1*(q_ref(t)-q_default)" if args_cli.reference_action else "zero_action (PD target=q_default)"
+    mode = (
+        f"reference_action a_ref(t)=S^-1*(q_ref(t+{args_cli.reference_lead})-q_default)"
+        if args_cli.reference_action
+        else "zero_action (PD target=q_default)"
+    )
     print(f"[PROBE] action_mode={mode}", flush=True)
     for step in range(max_steps):
         action = reference_action() if args_cli.reference_action else zero_action

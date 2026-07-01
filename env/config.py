@@ -190,6 +190,7 @@ class EnvConfig:
     env_spacing: float = 2.5
     fix_root_link: bool = False
     startup_randomization: bool = True
+    terrain_type: str = "slope"
     camera_eye: tuple[float, float, float] = (2.5, 2.5, 1.6)
     camera_target: tuple[float, float, float] = (0.0, 0.0, 0.8)
 
@@ -201,12 +202,13 @@ class MimicEnvConfig(EnvConfig):
     motion_start_phase: int = 0
     motion_end_phase: int = -1
     adaptive_motion_sampling: bool = True
-    # Holosoma official failure-bin sampler (see core/config.py for the math).
+    # Failure-predecessor sampler (see core/config.py for the math).
     adaptive_num_bins: int = 0          # 0 -> auto ⌊num_frames/fps⌋+1 (~1s bins)
-    adaptive_uniform_ratio: float = 0.1  # additive floor (official), NOT a fixed mixture weight
-    adaptive_kernel_size: int = 1
-    adaptive_lambda: float = 0.8
     adaptive_alpha: float = 0.001
+    # Mix this exact fraction of failure mass shifted backwards by the configured lookback
+    # with global-uniform starts. With no failure history, sampling is fully uniform.
+    adaptive_predecessor_ratio: float = 0.8
+    adaptive_predecessor_lookback_bins: int = 1
     reset_noise: bool = True
     interval_pushes: bool = True
     observation_noise: bool = True

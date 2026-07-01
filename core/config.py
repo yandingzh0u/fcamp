@@ -27,6 +27,7 @@ class EnvCfg:
     sim_dt: float = 0.02
     fix_root_link: bool = False
     startup_randomization: bool = True
+    terrain_type: str = "slope"
     motion_file: str = ""
     max_episode_steps: int = -1
     motion_start_phase: int = 0
@@ -35,13 +36,12 @@ class EnvCfg:
     interval_pushes: bool = True
     observation_noise: bool = True
     adaptive_motion_sampling: bool = True
-    # Holosoma official failure-bin sampler: p_b ∝ bin_failed_ema + uniform_ratio/num_bins
-    # (an ADDITIVE uniform floor, NOT a fixed mixture weight).
+    # Failure-predecessor sampler: death mass in bin b is shifted to b-lookback before reset,
+    # then mixed with exact global-uniform exploration.
     adaptive_num_bins: int = 0          # 0 -> auto ⌊num_frames/fps⌋+1 (~1s bins)
-    adaptive_uniform_ratio: float = 0.1  # additive floor (official), NOT a fixed mixture weight
-    adaptive_kernel_size: int = 1
-    adaptive_lambda: float = 0.8
     adaptive_alpha: float = 0.001
+    adaptive_predecessor_ratio: float = 0.8
+    adaptive_predecessor_lookback_bins: int = 1
     action_rate_weight: float = 0.1
     # GRPO observation-noise sharing: set by the algorithm (num_generations) at build time.
     num_generations: int = 1
@@ -55,6 +55,10 @@ class AlgoCfg:
     action_dim: int = 29
     horizon: int = 12
     actor_hidden_dims: tuple[int, ...] = (512, 256, 128)
+    # Critic network. Decoupled from the actor so PPO and FPO can share an IDENTICAL value head
+    # ([512,256,128]) while FPO keeps a wider flow actor ([1024,512,256]). The value estimation
+    # problem is the same for both algorithms, so the critic architecture is shared.
+    critic_hidden_dims: tuple[int, ...] = (512, 256, 128)
     activation: str = "elu"
     action_squash_scale: float = 5.0
     # flow / SDE exploration
@@ -82,6 +86,9 @@ class AlgoCfg:
     onpolicy_bank_hard_window: int = 96
     # optimization
     clip_range: float = 0.3
+    # Independent value-function clip range for the clipped value loss (PPO-style). Kept separate
+    # from the policy clip_range so FPO's tiny policy clip (0.01) never clips the critic.
+    value_clip_range: float = 0.2
     adv_clip_max: float = 5.0
     desired_kl: float = 0.06
     entropy_coef: float = 0.005
@@ -90,9 +97,8 @@ class AlgoCfg:
     micro_batch_size: int = 8192
     max_grad_norm: float = 1.0
     policy_lr: float = 1.0e-3
-    value_lr: float = 1.0e-3   # critic LR. Decoupled from actor (adaptive) LR so the value head's
-                               # large early gradient (esp. with terminal_penalty) cannot drag the
-                               # actor's adaptive schedule. Must be > 0.
+    value_lr: float = 1.0e-3   # FPO/MixGRPO critic LR. For FPO it follows the same adaptive
+                               # multiplier as the actor, matching PPO's scheduler semantics.
 
     # --- PPO (actor-critic) specific. Unused by MixGRPO. ---
     num_steps_per_env: int = 24
@@ -102,6 +108,9 @@ class AlgoCfg:
     actor_learning_rate: float = 1.0e-3
     critic_learning_rate: float = 1.0e-3
     weight_decay: float = 0.0
+    # Critic-only weight decay. Decoupled from the actor's weight_decay so the shared value head
+    # can use 0 (PPO/FPO parity) while the actor keeps its own regularization.
+    critic_weight_decay: float = 0.0
     empirical_normalization: bool = True
     init_at_random_ep_len: bool = True
 

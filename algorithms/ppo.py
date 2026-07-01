@@ -35,7 +35,9 @@ class PPO(Algorithm):
         self.actor = GaussianActor(
             self.actor_obs_dim, self.num_act, tuple(cfg.actor_hidden_dims), cfg.activation, cfg.init_noise_std
         ).to(device)
-        self.critic = Critic(self.critic_obs_dim, tuple(cfg.actor_hidden_dims), cfg.activation).to(device)
+        # Critic architecture is a SHARED config leaf (critic_hidden_dims), identical for PPO and
+        # FPO. Defaults to [512,256,128] == PPO's actor dims, so PPO behaviour is unchanged.
+        self.critic = Critic(self.critic_obs_dim, tuple(cfg.critic_hidden_dims), cfg.activation).to(device)
 
         self.empirical_normalization = bool(cfg.empirical_normalization)
         if self.empirical_normalization:
@@ -53,7 +55,7 @@ class PPO(Algorithm):
             self.actor.parameters(), lr=self.actor_learning_rate, weight_decay=cfg.weight_decay
         )
         self.critic_optimizer = torch.optim.AdamW(
-            self.critic.parameters(), lr=self.critic_learning_rate, weight_decay=cfg.weight_decay
+            self.critic.parameters(), lr=self.critic_learning_rate, weight_decay=cfg.critic_weight_decay
         )
 
         self.num_steps_per_env = int(cfg.num_steps_per_env)
@@ -297,6 +299,7 @@ class PPO(Algorithm):
         mini_batch_size = batch_size // num_mini_batches
         epochs = int(self.cfg.num_learning_epochs)
         clip = float(self.cfg.clip_range)
+        value_clip = float(self.cfg.value_clip_range)
 
         totals = {"value": 0.0, "surrogate": 0.0, "entropy": 0.0, "kl": 0.0}
         num_updates = epochs * num_mini_batches
@@ -346,7 +349,7 @@ class PPO(Algorithm):
                 surrogate_clipped = -torch.squeeze(mb_adv) * torch.clamp(ratio, 1.0 - clip, 1.0 + clip)
                 surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
-                value_clipped = mb_old_values + (value_batch - mb_old_values).clamp(-clip, clip)
+                value_clipped = mb_old_values + (value_batch - mb_old_values).clamp(-value_clip, value_clip)
                 value_losses = (value_batch - mb_returns).pow(2)
                 value_losses_clipped = (value_clipped - mb_returns).pow(2)
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
@@ -495,8 +498,8 @@ class PPO(Algorithm):
         return metrics
 
     def _add_sampler_metrics(self, metrics: dict) -> None:
-        """Adaptive-sampler diagnostics ([SAMPLER]): the official failure-bin distribution
-        (top_bin/top_prob/entropy/failed_sum) and the dominant failure bin. Owned by env.step();
+        """Adaptive-sampler diagnostics ([SAMPLER]): the failure-predecessor distribution
+        (top_bin/top_prob/entropy/failed_sum) and the dominant death bin. Owned by env.step();
         the algorithm only reads it. Absent when the env exposes no sampler (test fakes)."""
         stats_fn = getattr(self.env, "adaptive_sampling_stats", None)
         stats = stats_fn() if callable(stats_fn) else {}

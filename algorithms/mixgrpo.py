@@ -1676,7 +1676,7 @@ class MixGRPO(Algorithm):
             f"observation_noise={getattr(env.task_cfg, 'observation_noise', True)} "
             f"future_ref_steps=0 "
             f"phase_sampler={'adaptive' if env.task_cfg.adaptive_motion_sampling else 'uniform'} "
-            f"adaptive_uniform_ratio={env.task_cfg.adaptive_uniform_ratio} "
+            f"adaptive_predecessor_ratio={env.task_cfg.adaptive_predecessor_ratio} "
             f"num_envs={env.num_envs} rollout_env_steps_target={int(cfg.rollout_env_steps)} "
             f"tail_bootstrap_steps={int(cfg.tail_bootstrap_steps)} "
             f"terminal_penalty={cfg.terminal_penalty} num_generations={cfg.num_generations} "

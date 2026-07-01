@@ -5,21 +5,17 @@ import torch
 # Bumped whenever the on-disk sampler state layout changes. Old checkpoints that carry an
 # incompatible sampler state (version mismatch / absent) are NOT restored -- resuming an older
 # checkpoint therefore starts the sampler fresh.
-#   v2: per-bin death-frame EMA (~1s bins), additive uniform floor (the official design).
-#   v5: official per-bin death-frame EMA only (the v3/v4 per-frame causal extensions removed).
+#   v5: per-bin death-frame EMA. The persisted statistic remains compatible with old v5
+#       checkpoints; only reset sampling uses the causal predecessor distribution.
 ADAPTIVE_SAMPLER_VERSION = 5
 
 
 class AdaptiveTimestepsSampler:
-    """Holosoma adaptive motion start sampler (official failure-bin design).
+    """Failure-predecessor motion start sampler.
 
-    A single failure statistic is maintained, fed only by ``env.step()``:
-
-    * ``bin_failed_count`` -- the OFFICIAL ~1s-bin death-frame EMA. A death at frame ``f`` maps to
-      ``bin = clamp(f * num_bins // num_frames)``. The sampler draws starts from
-      ``p_bin proportional to bin_failed_count + uniform_ratio / num_bins`` (an ADDITIVE uniform
-      floor, NOT a fixed mixture weight), then samples a frame uniformly inside the chosen bin's
-      intersection with the valid range. This is verbatim the v2 official sampler.
+    Death frames are accumulated in ~1-second bins. Before reset, failure mass in bin ``b`` is
+    shifted to ``b - lookback_bins`` and mixed with global-uniform exploration. Reset never
+    samples the death bin merely because the robot died there.
     """
 
     def __init__(
@@ -29,33 +25,23 @@ class AdaptiveTimestepsSampler:
         *,
         num_bins: int = 0,
         env_fps: int = 50,
-        adaptive_kernel_size: int = 1,
-        adaptive_lambda: float = 0.8,
-        adaptive_uniform_ratio: float = 0.1,
         adaptive_alpha: float = 0.001,
+        adaptive_predecessor_ratio: float = 0.8,
+        adaptive_predecessor_lookback_bins: int = 1,
     ):
         self.device = device
         self.motion_time_step_total = int(max(1, motion_time_step_total))
         self.num_frames = self.motion_time_step_total
         if int(num_bins) <= 0:
-            # ~1 bin per second of motion (Holosoma default); auto-derived so it never needs
-            # retuning when the motion clip changes.
+            # ~1 bin per second of motion; auto-derived for different clips.
             num_bins = self.num_frames // int(max(1, env_fps)) + 1
         self.num_bins = int(max(1, num_bins))
-        self.adaptive_kernel_size = int(max(1, adaptive_kernel_size))
-        self.adaptive_lambda = float(adaptive_lambda)
-        self.adaptive_uniform_ratio = min(1.0, max(0.0, float(adaptive_uniform_ratio)))
         self.adaptive_alpha = min(1.0, max(0.0, float(adaptive_alpha)))
-        kernel = torch.tensor(
-            [self.adaptive_lambda**i for i in range(self.adaptive_kernel_size)],
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.kernel = kernel / kernel.sum()
+        self.adaptive_predecessor_ratio = min(1.0, max(0.0, float(adaptive_predecessor_ratio)))
+        self.adaptive_predecessor_lookback_bins = max(1, int(adaptive_predecessor_lookback_bins))
         self.init_buffers()
 
     def init_buffers(self) -> None:
-        # Official per-bin EMA (direct sampler + readiness).
         self.current_bin_failed_count = torch.zeros(self.num_bins, dtype=torch.float32, device=self.device)
         self.bin_failed_count = torch.zeros(self.num_bins, dtype=torch.float32, device=self.device)
 
@@ -83,21 +69,26 @@ class AdaptiveTimestepsSampler:
         self.bin_failed_count = a * self.current_bin_failed_count + (1.0 - a) * self.bin_failed_count
         self.current_bin_failed_count.zero_()
 
-    # --------------------------------------------------------------------- official direct sampler
+    # --------------------------------------------------------------------- predecessor sampler
     @property
     def sampling_probabilities(self) -> torch.Tensor:
-        # p_b proportional to (failure EMA + ADDITIVE uniform floor), smoothed by the kernel.
-        probabilities = self.bin_failed_count + self.adaptive_uniform_ratio / float(self.num_bins)
-        probabilities = torch.nn.functional.pad(
-            probabilities.view(1, 1, -1),
-            (0, self.adaptive_kernel_size - 1),
-            mode="replicate",
+        uniform = torch.full(
+            (self.num_bins,), 1.0 / float(self.num_bins), dtype=torch.float32, device=self.device
         )
-        probabilities = torch.nn.functional.conv1d(probabilities, self.kernel.view(1, 1, -1)).view(-1)
-        total = probabilities.sum()
-        if not bool(torch.isfinite(total)) or float(total.item()) <= 0.0:
-            return torch.full((self.num_bins,), 1.0 / float(self.num_bins), device=self.device)
-        return probabilities / total
+
+        failure = self.bin_failed_count.clamp_min(0.0)
+        failure_total = failure.sum()
+        if not bool(torch.isfinite(failure_total)) or float(failure_total.item()) <= 0.0:
+            return uniform
+        death_bins = torch.arange(self.num_bins, device=self.device)
+        predecessor_bins = torch.clamp(
+            death_bins - self.adaptive_predecessor_lookback_bins, min=0
+        )
+        predecessor = torch.zeros_like(failure)
+        predecessor.scatter_add_(0, predecessor_bins, failure)
+        predecessor /= predecessor.sum()
+        r = self.adaptive_predecessor_ratio
+        return r * predecessor + (1.0 - r) * uniform
 
     def bin_frame_bounds(self, bins: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         lo = (bins * self.motion_time_step_total) // self.num_bins
@@ -105,8 +96,8 @@ class AdaptiveTimestepsSampler:
         hi = torch.maximum(hi, lo + 1)
         return lo, hi
 
-    def _sample_official(self, num_samples: int, min_phase: int, max_phase: int) -> torch.Tensor:
-        """Official failure-bin conditional sampling inside [min_phase, max_phase].
+    def _sample_predecessor(self, num_samples: int, min_phase: int, max_phase: int) -> torch.Tensor:
+        """Failure-predecessor sampling conditioned inside [min_phase, max_phase].
 
         True conditional sampling (NOT a post-hoc clamp): each bin is intersected with the range,
         empty-intersection bins are masked, the remaining bin probabilities are renormalized by the
@@ -138,7 +129,7 @@ class AdaptiveTimestepsSampler:
         return torch.clamp(frames, min=min_phase, max=max_phase)
 
     def sample_frames(self, num_samples: int, min_phase: int, max_phase: int) -> torch.Tensor:
-        """Draw ``num_samples`` start frames from the official failure-bin distribution,
+        """Draw ``num_samples`` start frames from the predecessor distribution,
         conditioned on the valid range [min_phase, max_phase]."""
         if num_samples <= 0:
             return torch.empty(0, dtype=torch.long, device=self.device)
@@ -146,7 +137,7 @@ class AdaptiveTimestepsSampler:
         max_phase = min(self.num_frames - 1, int(max_phase))
         if max_phase < min_phase:
             return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
-        return self._sample_official(num_samples, min_phase, max_phase)
+        return self._sample_predecessor(num_samples, min_phase, max_phase)
 
     # --------------------------------------------------------------------- persistence
     def state_dict(self) -> dict:
@@ -176,7 +167,7 @@ class AdaptiveTimestepsSampler:
 
     # --------------------------------------------------------------------- diagnostics
     def stats(self, min_phase: int = 0, max_phase: int | None = None) -> dict[str, float]:
-        """Diagnostics for the [SAMPLER] log line: official bin distribution."""
+        """Diagnostics for the predecessor reset distribution."""
         probabilities = self.sampling_probabilities
         top_prob, top_bin = probabilities.max(dim=0)
         entropy = -(probabilities * probabilities.clamp_min(1.0e-12).log()).sum()
@@ -192,4 +183,6 @@ class AdaptiveTimestepsSampler:
             "failed_sum": failed_sum,
             "entropy": float(entropy.item()),
             "peak_bin": float(peak_bin),
+            "predecessor_ratio": float(self.adaptive_predecessor_ratio),
+            "predecessor_lookback_bins": float(self.adaptive_predecessor_lookback_bins),
         }

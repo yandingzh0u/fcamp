@@ -1,4 +1,4 @@
-"""Unit tests for the Holosoma adaptive motion sampler (v5: official per-bin failure EMA only).
+"""Unit tests for the failure-predecessor adaptive motion sampler.
 
 Run:  python tests/test_adaptive_sampling.py   (from the repo root)
 """
@@ -17,10 +17,9 @@ def _sampler(**kw) -> AdaptiveTimestepsSampler:
     params = dict(
         num_bins=0,          # auto -> floor(959/50)+1 = 20
         env_fps=ENV_FPS,
-        adaptive_kernel_size=1,
-        adaptive_lambda=0.8,
-        adaptive_uniform_ratio=0.1,
         adaptive_alpha=0.001,
+        adaptive_predecessor_ratio=0.8,
+        adaptive_predecessor_lookback_bins=1,
     )
     params.update(kw)
     return AdaptiveTimestepsSampler(
@@ -63,8 +62,8 @@ def test_empty_failures_is_noop() -> None:
     check("empty death tensor adds nothing (bin)", float(sampler.current_bin_failed_count.sum()) == 0.0)
 
 
-def test_official_bin_maps_death_to_bin17() -> None:
-    # Official bin map: death 834 -> bin floor(834*20/959) = 17 (range [815,862]).
+def test_bin_maps_death_to_bin17() -> None:
+    # Death 834 -> bin floor(834*20/959) = 17 (range [815,862]).
     sampler = _sampler()
     b = int(sampler.frames_to_bins(torch.tensor([834]))[0].item())
     check("death 834 maps to bin 17", b == 17)
@@ -73,19 +72,28 @@ def test_official_bin_maps_death_to_bin17() -> None:
     check("bin 17 upper bound (exclusive) is 863", int(hi[0]) == 863)
 
 
-def test_official_sampler_concentrates_in_death_bin() -> None:
-    # The official sampler draws from the failure bin (plus the additive uniform floor across all
-    # bins); the dominant mode sits inside the death bin [815,862], i.e. on/after the death frame.
+def test_predecessor_sampler_shifts_death_bin_back_one() -> None:
     torch.manual_seed(0)
-    sampler = _sampler()
+    sampler = _sampler(
+        adaptive_predecessor_ratio=0.8,
+        adaptive_predecessor_lookback_bins=1,
+    )
     sampler.update_current_failure_count(torch.full((4096,), 834, dtype=torch.long))
     sampler.update_failure_ema()
+    probs = sampler.sampling_probabilities
+    check("failure peak remains death bin 17", int(sampler.bin_failed_count.argmax()) == 17)
+    check("reset peak shifts to predecessor bin 16", int(probs.argmax()) == 16)
+    check("predecessor bin gets exact 81% mixture mass", abs(float(probs[16]) - 0.81) < 1e-6)
+    check("death bin receives only 1% uniform mass", abs(float(probs[17]) - 0.01) < 1e-6)
+
     frames = sampler.sample_frames(60000, min_phase=0, max_phase=MOTION_FRAMES - 1)
-    in_death_bin = ((frames >= 815) & (frames <= 862)).float().mean().item()
-    check("official sampler concentrates in the death bin", in_death_bin > 0.5)
+    in_predecessor = ((frames >= 767) & (frames <= 814)).float().mean().item()
+    after_failure = (frames >= 834).float().mean().item()
+    check("samples concentrate in predecessor bin", in_predecessor > 0.79)
+    check("post-failure samples are only uniform exploration", after_failure < 0.04)
 
 
-def test_official_conditional_no_boundary_spikes() -> None:
+def test_conditional_no_boundary_spikes() -> None:
     # Deaths far below the range must not leak in nor pile on a boundary (conditional, not clamp).
     torch.manual_seed(0)
     sampler = _sampler()
@@ -122,7 +130,7 @@ def test_state_dict_roundtrip_and_version_guard() -> None:
     sampler.update_failure_ema()
     state = sampler.state_dict()
     check("state carries the sampler version", state["version"] == ADAPTIVE_SAMPLER_VERSION)
-    check("version is 5 (official bin-only design)", ADAPTIVE_SAMPLER_VERSION == 5)
+    check("version is 5 (failure EMA layout)", ADAPTIVE_SAMPLER_VERSION == 5)
 
     restored = _sampler()
     check("matching version restores", restored.load_state_dict(state) is True)
@@ -141,9 +149,9 @@ if __name__ == "__main__":
         test_auto_num_bins,
         test_bin_ema_fold_and_zero,
         test_empty_failures_is_noop,
-        test_official_bin_maps_death_to_bin17,
-        test_official_sampler_concentrates_in_death_bin,
-        test_official_conditional_no_boundary_spikes,
+        test_bin_maps_death_to_bin17,
+        test_predecessor_sampler_shifts_death_bin_back_one,
+        test_conditional_no_boundary_spikes,
         test_zero_history_is_uniform_over_bins,
         test_stats_fields,
         test_state_dict_roundtrip_and_version_guard,

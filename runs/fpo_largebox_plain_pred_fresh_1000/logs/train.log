@@ -1,0 +1,8 @@
+[INFO] run_dir=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fpo_largebox_plain_pred_fresh_1000
+[INFO] log_file=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fpo_largebox_plain_pred_fresh_1000/logs/train.log
+[INFO] algo=fpo_pp
+[INFO] IsaacLab logging to file: /tmp/isaaclab_2026-07-01_09-57-32.log
+[INFO] Starting FPO++ training
+[INFO] motion_file=../holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj.npz
+[INFO] algo=fpo_pp actor_obs_dim=171 critic_obs_dim=286 action_dim=29 horizon=1 chunk_dim=29 num_envs=8192 num_steps_per_env=24 flow_steps=16 num_mc=16 actor_scale=1.0 action_perturb_std=0.1 timestep_embed_dim=8 cfm_reduction=mean clip=0.01 cfm_diff_clamp_max=3.0 cfm_loss_clamp=3.0 adv_clamp=5.0 schedule=adaptive desired_kl=0.0001 num_micro_batches=8 num_learning_epochs=5 num_mini_batches=4 gamma=0.99 lam=0.95 value_loss_coef=1.0 lr=0.0001 critic_lr=0.001 weight_decay=0.0001 empirical_normalization=True actor_hidden_dims=[1024, 512, 256] activation=elu
+[INFO] checkpoint_dir=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fpo_largebox_plain_pred_fresh_1000/checkpoints
