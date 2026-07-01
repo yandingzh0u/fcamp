@@ -119,6 +119,7 @@ def _cfg(num_micro_batches=1):
         init_at_random_ep_len=True,
         num_steps_per_env=6, discount_gamma=0.99,
         num_mini_batches=2, num_learning_epochs=2, clip_range=0.01, value_clip_range=0.2,
+        use_clipped_value_loss=False,
         value_loss_coef=1.0, max_grad_norm=1.0, gae_lambda=0.95, value_lr=1.0e-3,
         critic_weight_decay=0.0,
     )

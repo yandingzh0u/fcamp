@@ -1,9 +1,9 @@
-from dataclasses import fields
+from dataclasses import asdict, fields
 from pathlib import Path
 
 import pytest
 
-from core.config import FPOConfig, MixGRPOConfig, PPOConfig, load_config
+from core.config import FPOConfig, MixGRPOConfig, PPOConfig, config_from_dict, load_config
 from env.tasks import TASKS
 
 
@@ -32,3 +32,12 @@ def test_task_binds_motion_and_terrain() -> None:
 def test_override_cannot_create_a_second_config_entry() -> None:
     with pytest.raises(KeyError):
         load_config(ROOT / "configs" / "ppo.yaml", ["environment.terrain=plane"])
+
+
+def test_fpo_legacy_config_defaults_unclipped_value_loss() -> None:
+    fpo = load_config(ROOT / "configs" / "fpo.yaml")
+    tree = asdict(fpo)
+    del tree["parameters"]["use_clipped_value_loss"]
+    rebuilt = config_from_dict(tree)
+    assert isinstance(rebuilt.parameters, FPOConfig)
+    assert rebuilt.parameters.use_clipped_value_loss is False

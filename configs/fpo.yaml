@@ -40,6 +40,7 @@ parameters:
   fpo_adv_clamp: 5.0
   clip_range: 0.01
   value_clip_range: 0.2
+  use_clipped_value_loss: false
   schedule: adaptive
   desired_kl: 0.0001
   num_learning_epochs: 5
@@ -62,7 +63,7 @@ training:
   resume: ""
   reset_optimizer_on_resume: false
   reset_sampler_on_resume: false
-  validation_every: 0
+  validation_every: 100
   validation_max_steps: 500
   validation_start_phase: 0
   validation_directional_start_phase: -1

@@ -368,6 +368,7 @@ class FPO(Algorithm):
         clip = float(self.cfg.clip_range)
         value_clip = float(self.cfg.value_clip_range)
         value_coef = float(self.cfg.value_loss_coef)
+        use_clipped_value_loss = bool(self.cfg.use_clipped_value_loss)
 
         totals = {
             "actor_loss": 0.0, "value_loss": 0.0, "ratio": 0.0, "ratio_min": float("inf"),
@@ -428,11 +429,14 @@ class FPO(Algorithm):
                     actor_loss = -surrogate.mean()
 
 
-                    mb_old_values = old_values[li]
-                    value_clipped = mb_old_values + (value - mb_old_values).clamp(-value_clip, value_clip)
-                    value_losses = (value - returns[li]).pow(2)
-                    value_losses_clipped = (value_clipped - returns[li]).pow(2)
-                    value_loss = torch.max(value_losses, value_losses_clipped).mean()
+                    if use_clipped_value_loss:
+                        mb_old_values = old_values[li]
+                        value_clipped = mb_old_values + (value - mb_old_values).clamp(-value_clip, value_clip)
+                        value_losses = (value - returns[li]).pow(2)
+                        value_losses_clipped = (value_clipped - returns[li]).pow(2)
+                        value_loss = torch.max(value_losses, value_losses_clipped).mean()
+                    else:
+                        value_loss = (returns[li] - value).pow(2).mean()
 
                     loss = actor_loss + value_coef * value_loss
                     (loss * weight).backward()
@@ -880,6 +884,7 @@ class FPO(Algorithm):
             f"num_micro_batches={self.num_micro_batches} "
             f"num_learning_epochs={cfg.num_learning_epochs} num_mini_batches={cfg.num_mini_batches} "
             f"gamma={cfg.discount_gamma} lam={cfg.gae_lambda} value_loss_coef={cfg.value_loss_coef} "
+            f"use_clipped_value_loss={cfg.use_clipped_value_loss} "
             f"lr={cfg.policy_lr} critic_lr={self.critic_learning_rate} weight_decay={cfg.weight_decay} "
             f"empirical_normalization={cfg.empirical_normalization} "
             f"actor_hidden_dims={list(cfg.actor_hidden_dims)} activation={cfg.activation}",

@@ -84,6 +84,7 @@ class FPOConfig:
     fpo_adv_clamp: float
     clip_range: float
     value_clip_range: float
+    use_clipped_value_loss: bool
     schedule: str
     desired_kl: float
     num_learning_epochs: int
@@ -228,10 +229,13 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
     source_path = Path(source).expanduser().resolve()
     training_values = dict(tree["training"])
     training_values["resume"] = _resolve_path(str(training_values["resume"]), source_path)
+    parameter_values = dict(tree["parameters"])
+    if algorithm == "fpo":
+        parameter_values.setdefault("use_clipped_value_loss", False)
     config = ExperimentConfig(
         algorithm=algorithm,
         environment=_construct(EnvironmentConfig, dict(tree["environment"])),
-        parameters=_construct(ALGORITHM_CONFIGS[algorithm], dict(tree["parameters"])),
+        parameters=_construct(ALGORITHM_CONFIGS[algorithm], parameter_values),
         training=_construct(TrainingConfig, training_values),
     )
     _validate(config)
