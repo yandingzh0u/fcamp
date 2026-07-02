@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from core.config import FPOConfig, MixGRPOConfig, PPOConfig, config_from_dict, load_config
+from core.config import FPOConfig, MixGRPOConfig, PPOConfig, SFPOConfig, config_from_dict, load_config
 from env.tasks import TASKS
 
 
@@ -14,12 +14,26 @@ def test_algorithm_configs_are_disjoint() -> None:
     ppo = load_config(ROOT / "configs" / "ppo.yaml")
     fpo = load_config(ROOT / "configs" / "fpo.yaml")
     mixgrpo = load_config(ROOT / "configs" / "mixgrpo.yaml")
+    sfpo = load_config(ROOT / "configs" / "sfpo.yaml")
     assert isinstance(ppo.parameters, PPOConfig)
     assert isinstance(fpo.parameters, FPOConfig)
     assert isinstance(mixgrpo.parameters, MixGRPOConfig)
+    assert isinstance(sfpo.parameters, SFPOConfig)
     assert "flow_steps" not in {field.name for field in fields(PPOConfig)}
     assert "entropy_coef" not in {field.name for field in fields(FPOConfig)}
     assert "critic_hidden_dims" not in {field.name for field in fields(MixGRPOConfig)}
+    sfpo_fields = {field.name for field in fields(SFPOConfig)}
+    assert "num_generations" not in sfpo_fields
+    assert "tail_bootstrap_steps" not in sfpo_fields
+
+
+def test_sfpo_config_uses_single_trajectory_h8() -> None:
+    sfpo = load_config(ROOT / "configs" / "sfpo.yaml")
+    assert sfpo.algorithm == "sfpo"
+    assert isinstance(sfpo.parameters, SFPOConfig)
+    assert sfpo.observation_group_size == 1
+    assert sfpo.parameters.horizon == 8
+    assert sfpo.parameters.rollout_env_steps % sfpo.parameters.horizon == 0
 
 
 def test_task_binds_motion_and_terrain() -> None:

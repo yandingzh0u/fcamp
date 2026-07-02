@@ -7,7 +7,7 @@ from typing import Any, Literal, TypeAlias
 import yaml
 
 
-AlgorithmName: TypeAlias = Literal["ppo", "fpo", "mixgrpo"]
+AlgorithmName: TypeAlias = Literal["ppo", "fpo", "mixgrpo", "sfpo"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +133,40 @@ class MixGRPOConfig:
     policy_lr: float
 
 
-AlgorithmConfig: TypeAlias = PPOConfig | FPOConfig | MixGRPOConfig
+@dataclass(frozen=True, slots=True)
+class SFPOConfig:
+    horizon: int
+    actor_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
+    activation: str
+    action_squash_scale: float
+    flow_steps: int
+    sde_eta: float
+    init_noise_std: float
+    eval_initial_noise: str
+    rollout_env_steps: int
+    terminal_penalty: float
+    discount_gamma: float
+    gae_lambda: float
+    clip_range: float
+    adv_clip_max: float
+    desired_kl: float
+    policy_epochs: int
+    num_mini_batches: int
+    micro_batch_size: int
+    value_loss_coef: float
+    value_clip_range: float
+    use_clipped_value_loss: bool
+    policy_lr: float
+    value_lr: float
+    weight_decay: float
+    critic_weight_decay: float
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+    max_grad_norm: float
+
+
+AlgorithmConfig: TypeAlias = PPOConfig | FPOConfig | MixGRPOConfig | SFPOConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +205,7 @@ ALGORITHM_CONFIGS = {
     "ppo": PPOConfig,
     "fpo": FPOConfig,
     "mixgrpo": MixGRPOConfig,
+    "sfpo": SFPOConfig,
 }
 
 
@@ -272,3 +306,12 @@ def _validate(config: ExperimentConfig) -> None:
             raise ValueError("MixGRPO requires parameters.num_generations >= 2")
         if env.num_envs % config.parameters.num_generations:
             raise ValueError("environment.num_envs must be divisible by parameters.num_generations")
+    if isinstance(config.parameters, SFPOConfig):
+        if config.parameters.horizon < 1:
+            raise ValueError("SFPO requires parameters.horizon >= 1")
+        if config.parameters.flow_steps < 1:
+            raise ValueError("SFPO requires parameters.flow_steps >= 1")
+        if config.parameters.rollout_env_steps <= 0:
+            raise ValueError("SFPO requires parameters.rollout_env_steps > 0")
+        if config.parameters.rollout_env_steps % config.parameters.horizon:
+            raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
