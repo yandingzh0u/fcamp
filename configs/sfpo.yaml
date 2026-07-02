@@ -20,7 +20,7 @@ environment:
   adaptive_predecessor_lookback_bins: 1
   action_rate_weight: 0.1
 parameters:
-  horizon: 1
+  horizon: 4
   actor_hidden_dims: [512, 256, 128]
   critic_hidden_dims: [512, 256, 128]
   activation: elu

@@ -7,6 +7,7 @@ from torch import nn
 from torch.distributions import Normal, kl_divergence
 
 from algorithms.base import Algorithm
+from algorithms.kl_scheduler import adaptive_lr_from_kl
 from networks.mlp_actor_critic import Critic, EmpiricalNormalization, GaussianActor
 
 
@@ -63,6 +64,11 @@ class PPO(Algorithm):
 
     @property
     def horizon(self) -> int:
+        return 1
+
+    @property
+    def kl_units(self) -> int:
+        # PPO is a single-step policy: raw KL is already per-control-step.
         return 1
 
     def extra_checkpoint_state(self) -> dict:
@@ -381,12 +387,28 @@ class PPO(Algorithm):
 
     def _update_lr(self, kl_mean: torch.Tensor) -> None:
         desired_kl = float(self.cfg.desired_kl)
-        if kl_mean > desired_kl * 2.0:
-            self.actor_learning_rate = max(self.min_lr, self.actor_learning_rate / 1.5)
-            self.critic_learning_rate = max(self.min_lr, self.critic_learning_rate / 1.5)
-        elif 0.0 < kl_mean < desired_kl / 2.0:
-            self.actor_learning_rate = min(self.max_lr, self.actor_learning_rate * 1.5)
-            self.critic_learning_rate = min(self.max_lr, self.critic_learning_rate * 1.5)
+        if desired_kl <= 0.0:
+            return
+        # kl_units=1 for PPO, so this is behavior-preserving while sharing the
+        # same per-step KL contract as SFPO/MixGRPO.
+        new_actor_lr, _ = adaptive_lr_from_kl(
+            raw_kl=kl_mean,
+            kl_units=self.kl_units,
+            target_per_step=desired_kl,
+            lr=self.actor_learning_rate,
+            min_lr=self.min_lr,
+            max_lr=self.max_lr,
+        )
+        new_critic_lr, _ = adaptive_lr_from_kl(
+            raw_kl=kl_mean,
+            kl_units=self.kl_units,
+            target_per_step=desired_kl,
+            lr=self.critic_learning_rate,
+            min_lr=self.min_lr,
+            max_lr=self.max_lr,
+        )
+        self.actor_learning_rate = new_actor_lr
+        self.critic_learning_rate = new_critic_lr
         for pg in self.actor_optimizer.param_groups:
             pg["lr"] = self.actor_learning_rate
         for pg in self.critic_optimizer.param_groups:
@@ -402,11 +424,20 @@ class PPO(Algorithm):
                        action_delta, param_rms_delta) -> dict:
         rewards = rollout["rewards"]
         dones = rollout["dones"]
+        desired_kl = float(self.cfg.desired_kl)
+        kl_units = self.kl_units
+        kl_raw = totals["kl"]
+        kl_per_step = kl_raw / max(1, kl_units)
         metrics = {
             "ppo/value_loss": totals["value"],
             "ppo/surrogate_loss": totals["surrogate"],
             "ppo/entropy": totals["entropy"],
-            "ppo/kl": totals["kl"],
+            "ppo/kl": kl_raw,
+            "ppo/kl_raw": kl_raw,
+            "ppo/kl_per_step": kl_per_step,
+            "ppo/kl_target_per_step": desired_kl,
+            "ppo/kl_target_raw": desired_kl * kl_units,
+            "ppo/kl_units": float(kl_units),
             "ppo/actor_lr": self.actor_learning_rate,
             "ppo/critic_lr": self.critic_learning_rate,
             "ppo/grad_norm": grad_norm,
@@ -576,7 +607,10 @@ class PPO(Algorithm):
         print(
             f"[PPO] value_loss={metrics['ppo/value_loss']:.5f} "
             f"surrogate={metrics['ppo/surrogate_loss']:.5f} "
-            f"entropy={metrics['ppo/entropy']:.5f} kl={metrics['ppo/kl']:.5f} "
+            f"entropy={metrics['ppo/entropy']:.5f} kl_raw={metrics['ppo/kl_raw']:.5f} "
+            f"kl/step={metrics['ppo/kl_per_step']:.5f} "
+            f"target_raw={metrics['ppo/kl_target_raw']:.4f} "
+            f"target/step={metrics['ppo/kl_target_per_step']:.4f} "
             f"actor_lr={metrics['ppo/actor_lr']:.6f} critic_lr={metrics['ppo/critic_lr']:.6f} "
             f"grad={metrics['ppo/grad_norm']:.5f} action_std={metrics['ppo/action_std_mean']:.4f}",
             flush=True,

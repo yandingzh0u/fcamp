@@ -37,7 +37,7 @@ parameters:
   discount_gamma: 0.99
   clip_range: 0.3
   adv_clip_max: 5.0
-  desired_kl: 0.06
+  desired_kl: 0.01
   entropy_coef: 0.005
   policy_epochs: 5
   num_mini_batches: 4

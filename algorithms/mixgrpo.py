@@ -6,6 +6,7 @@ from collections import deque
 import torch
 
 from algorithms.base import Algorithm
+from algorithms.kl_scheduler import adaptive_lr_from_kl
 from networks.flow_inference import deterministic_sde_ode_actions
 from networks.flow_sampling import flow_grpo_step
 from networks.flow_policy import FlowMatchingPolicy
@@ -58,6 +59,12 @@ class MixGRPO(Algorithm):
     @property
     def horizon(self) -> int:
         return self.cfg.horizon
+
+    @property
+    def kl_units(self) -> int:
+        # Raw joint KL scales with horizon; normalize so desired_kl is a
+        # per-control-step budget (shared semantics with PPO/SFPO).
+        return max(1, int(self.cfg.horizon))
 
     def extra_checkpoint_state(self) -> dict:
         return {"learning_rate": float(self.learning_rate)}
@@ -727,13 +734,16 @@ class MixGRPO(Algorithm):
         desired_kl = float(self.cfg.desired_kl)
         if desired_kl <= 0.0:
             return
-        kl_value = float(observed_kl.item() if torch.is_tensor(observed_kl) else observed_kl)
-        if not math.isfinite(kl_value) or kl_value <= 0.0:
-            return
-        if kl_value > 2.0 * desired_kl:
-            self.learning_rate = max(1.0e-5, self.learning_rate / 1.5)
-        elif kl_value < 0.5 * desired_kl:
-            self.learning_rate = min(float(self.cfg.policy_lr), self.learning_rate * 1.5)
+        # Normalize raw joint KL by horizon before comparing to desired_kl.
+        new_lr, _ = adaptive_lr_from_kl(
+            raw_kl=observed_kl,
+            kl_units=self.kl_units,
+            target_per_step=desired_kl,
+            lr=self.learning_rate,
+            min_lr=1.0e-5,
+            max_lr=float(self.cfg.policy_lr),
+        )
+        self.learning_rate = new_lr
         self._optimizer.param_groups[0]["lr"] = self.learning_rate
 
 
@@ -886,12 +896,20 @@ class MixGRPO(Algorithm):
         kl_loss = totals["kl_loss"] / update_denom
         total_loss = policy_loss - float(self.cfg.entropy_coef) * entropy
         current_policy_lr = float(self._optimizer.param_groups[0]["lr"])
+        kl_units = self.kl_units
+        desired_kl = float(self.cfg.desired_kl)
+        kl_per_step = kl_loss / max(1, kl_units)
         return {
             "policy/loss": total_loss,
             "policy/policy_loss": policy_loss,
             "policy/value_loss": 0.0,
             "policy/entropy": entropy,
             "policy/kl_loss": kl_loss,
+            "policy/kl_raw": kl_loss,
+            "policy/kl_per_step": kl_per_step,
+            "policy/kl_target_per_step": desired_kl,
+            "policy/kl_target_raw": desired_kl * kl_units,
+            "policy/kl_units": float(kl_units),
             "policy/joint_kl": kl_loss,
             "policy/joint_ratio": totals["pre_ratio"] / update_denom,
             "policy/joint_clip_frac": totals["pre_clip_frac"] / update_denom,
@@ -933,6 +951,8 @@ class MixGRPO(Algorithm):
             "policy/loss", "policy/policy_loss", "policy/value_loss", "policy/entropy",
             "policy/clip_frac", "policy/ratio", "policy/ratio_min", "policy/ratio_max",
             "policy/logprob_delta_abs", "policy/old_log_prob", "policy/new_log_prob", "policy/kl_loss",
+            "policy/kl_raw", "policy/kl_per_step", "policy/kl_target_per_step",
+            "policy/kl_target_raw", "policy/kl_units",
             "policy/joint_kl", "policy/joint_ratio", "policy/joint_clip_frac",
             "policy/step_ratio", "policy/step_ratio_min", "policy/step_ratio_max", "policy/step_clip_frac",
             "policy/step_logprob_delta_abs", "policy/step_kl_loss",
@@ -1272,7 +1292,11 @@ class MixGRPO(Algorithm):
             f"policy_loss={metrics['policy/policy_loss']:.5f} "
             f"value_loss={metrics.get('policy/value_loss', float('nan')):.5f} "
             f"entropy={metrics.get('policy/entropy', float('nan')):.5f} "
-            f"kl={metrics.get('policy/kl_loss', float('nan')):.5f} "
+            f"kl_raw={metrics.get('policy/kl_raw', metrics.get('policy/kl_loss', float('nan'))):.5f} "
+            f"kl/step={metrics.get('policy/kl_per_step', float('nan')):.5f} "
+            f"target_raw={metrics.get('policy/kl_target_raw', float('nan')):.4f} "
+            f"target/step={metrics.get('policy/kl_target_per_step', float('nan')):.4f} "
+            f"kl_units={metrics.get('policy/kl_units', float('nan')):.0f} "
             f"step_ratio={metrics.get('policy/step_ratio', float('nan')):.4f} "
             f"step_clip={metrics.get('policy/step_clip_frac', float('nan')):.4f} "
             f"post_ratio={metrics.get('policy/post_ratio', metrics['policy/ratio']):.4f} "
