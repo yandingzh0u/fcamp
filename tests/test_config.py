@@ -27,13 +27,25 @@ def test_algorithm_configs_are_disjoint() -> None:
     assert "tail_bootstrap_steps" not in sfpo_fields
 
 
-def test_sfpo_config_uses_single_trajectory_h8() -> None:
+def test_sfpo_config_is_ppo_aligned_h1() -> None:
     sfpo = load_config(ROOT / "configs" / "sfpo.yaml")
     assert sfpo.algorithm == "sfpo"
     assert isinstance(sfpo.parameters, SFPOConfig)
     assert sfpo.observation_group_size == 1
-    assert sfpo.parameters.horizon == 8
+    # PPO-aligned shell: h=1, continuous auto-reset rollout, no entropy bonus.
+    assert sfpo.parameters.horizon == 1
+    assert sfpo.parameters.rollout_env_steps == 24
     assert sfpo.parameters.rollout_env_steps % sfpo.parameters.horizon == 0
+    assert sfpo.parameters.desired_kl == 0.01
+    assert sfpo.parameters.policy_lr == 0.001
+    assert sfpo.parameters.value_lr == 0.001
+    assert sfpo.parameters.use_clipped_value_loss is True
+    assert sfpo.parameters.init_at_random_ep_len is True
+    assert sfpo.parameters.terminal_penalty == 0.0
+    assert sfpo.training.max_updates == 1000
+    # SFPO-only flow/SDE head is preserved.
+    assert sfpo.parameters.flow_steps >= 1
+    assert sfpo.parameters.sde_eta > 0.0
 
 
 def test_task_binds_motion_and_terrain() -> None:

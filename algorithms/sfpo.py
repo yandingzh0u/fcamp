@@ -54,6 +54,8 @@ class SFPO(Algorithm):
 
         self.learning_rate = float(cfg.policy_lr)
         self.critic_learning_rate = float(cfg.value_lr)
+        self.max_lr = 1e-2
+        self.min_lr = 1e-5
         if self.learning_rate <= 0.0:
             raise ValueError(f"policy_lr must be > 0, got {cfg.policy_lr}")
         if self.critic_learning_rate <= 0.0:
@@ -281,7 +283,7 @@ class SFPO(Algorithm):
         )
 
     def initial_reset(self) -> torch.Tensor:
-        obs = self.env.reset(phase_indices=self._training_anchor_phases())
+        obs = self.env.reset()
         if bool(self.cfg.init_at_random_ep_len) and self.max_episode_steps > 0:
             self.env.episode_steps = torch.randint_like(self.env.episode_steps, high=int(self.max_episode_steps))
         self._obs = obs
@@ -289,13 +291,12 @@ class SFPO(Algorithm):
         return obs
 
     def reset_for_update(self, update_idx: int) -> torch.Tensor:
-        env_ids = torch.arange(self.env.num_envs, device=self.env.device, dtype=torch.long)
-        obs = self.env.reset_envs(env_ids, phase_indices=self._training_anchor_phases())
-        self._train_reward_sum.zero_()
-        self._train_episode_length.zero_()
-        self._obs = obs
-        self._critic_obs = self.env.get_critic_observation()
-        return obs
+        # PPO-aligned: keep the running environment across updates. Episode
+        # boundaries are handled by auto_reset inside collect(); we do NOT
+        # force-reset here, so samples form one continuous PPO-style stream
+        # instead of the old first-life per-update rollout. Episode-stat
+        # accumulators persist (they are zeroed on done within collect).
+        return self._obs
 
     def _record_first_done(
         self,
@@ -345,13 +346,13 @@ class SFPO(Algorithm):
         raw_rewards_buf = torch.zeros(chunks, n_envs, 1, device=device)
         dones_buf = torch.zeros(chunks, n_envs, 1, dtype=torch.bool, device=device)
         timeouts_buf = torch.zeros(chunks, n_envs, 1, dtype=torch.bool, device=device)
-        valid_mask_buf = torch.zeros(chunks, n_envs, 1, dtype=torch.bool, device=device)
+        valid_mask_buf = torch.ones(chunks, n_envs, 1, dtype=torch.bool, device=device)
         live_frames_buf = torch.zeros(chunks, n_envs, 1, device=device)
         actions_buf = torch.zeros(chunks, n_envs, horizon, self.num_act, device=device)
         latents_buf = torch.zeros(chunks, n_envs, int(self.cfg.flow_steps) + 1, self.chunk_dim, device=device)
         old_log_probs_buf = torch.zeros(chunks, n_envs, int(self.cfg.flow_steps), device=device)
         reward_frame_buf = torch.zeros(chunks, n_envs, horizon, device=device)
-        alive_frame_buf = torch.zeros(chunks, n_envs, horizon, dtype=torch.bool, device=device)
+        alive_frame_buf = torch.ones(chunks, n_envs, horizon, dtype=torch.bool, device=device)
 
         obs = current_obs
         critic_obs = self._critic_obs
@@ -380,9 +381,8 @@ class SFPO(Algorithm):
 
         with torch.no_grad():
             for chunk_idx in range(chunks):
-                active_before_chunk = ~ever_done
-                actor_obs_n = self._norm_actor_with_mask(obs, active_before_chunk)
-                critic_obs_n = self._norm_critic_with_mask(critic_obs, active_before_chunk)
+                actor_obs_n = self._norm_actor(obs)
+                critic_obs_n = self._norm_critic(critic_obs)
                 value = self.critic.evaluate(critic_obs_n).detach()
 
                 noise = torch.randn(n_envs, self.chunk_dim, device=device, dtype=obs.dtype)
@@ -397,36 +397,24 @@ class SFPO(Algorithm):
                 chunk_done = torch.zeros(n_envs, dtype=torch.bool, device=device)
                 chunk_timeout = torch.zeros(n_envs, dtype=torch.bool, device=device)
                 chunk_live_frames = torch.zeros(n_envs, device=device, dtype=obs.dtype)
-                alive_in_chunk = active_before_chunk.clone()
 
                 for frame_idx in range(horizon):
-                    alive_before_frame = alive_in_chunk.clone()
                     action_t = action_chunk[:, frame_idx, :]
-                    if bool((~alive_before_frame).any()):
-                        action_t = torch.where(alive_before_frame.unsqueeze(-1), action_t, torch.zeros_like(action_t))
-                    next_obs, reward, done, info = env.step(action_t, auto_reset=False)
+                    next_obs, reward, done, info = env.step(action_t, auto_reset=True)
                     next_critic_obs = env.get_critic_observation()
                     if chunk_idx == 0 and frame_idx == 0:
                         first_chunk_infos.append(info)
 
-                    active_f = alive_before_frame.to(dtype=chunk_reward.dtype)
                     discount = gamma ** frame_idx
-                    reward_live = reward.to(dtype=chunk_reward.dtype) * active_f
-                    chunk_raw_reward = chunk_raw_reward + discount * reward_live
-                    chunk_reward = chunk_reward + discount * reward_live
-                    chunk_live_frames = chunk_live_frames + active_f
+                    reward_step = reward.to(dtype=chunk_reward.dtype)
+                    chunk_raw_reward = chunk_raw_reward + discount * reward_step
+                    chunk_reward = chunk_reward + discount * reward_step
+                    chunk_live_frames = chunk_live_frames + 1.0
                     reward_frame_buf[chunk_idx, :, frame_idx] = reward.detach().to(dtype=reward_frame_buf.dtype)
-                    alive_frame_buf[chunk_idx, :, frame_idx] = alive_before_frame.detach()
 
                     timeouts = info["done_terms"]["time_out"].bool()
-                    new_done = alive_before_frame & done.bool()
-                    new_timeout = new_done & timeouts
-                    motion_complete = info["done_terms"].get("motion_complete")
-                    if motion_complete is None:
-                        motion_complete = torch.zeros_like(timeouts)
-                    else:
-                        motion_complete = motion_complete.bool()
-                    failure_done = new_done & (~timeouts) & (~motion_complete)
+                    done_b = done.bool()
+                    new_timeout = done_b & timeouts
                     if bool(new_timeout.any()):
                         terminal_critic_obs = info.get("final_critic_observation")
                         if terminal_critic_obs is None:
@@ -435,35 +423,33 @@ class SFPO(Algorithm):
                             self._norm_critic(terminal_critic_obs, update=False)
                         ).detach().squeeze(1)
                         chunk_reward = chunk_reward + (gamma ** (frame_idx + 1)) * terminal_value * new_timeout.float()
-                    if bool(failure_done.any()):
-                        chunk_reward = chunk_reward - discount * float(self.cfg.terminal_penalty) * failure_done.float()
 
-                    chunk_done = chunk_done | new_done
+                    chunk_done = chunk_done | done_b
                     chunk_timeout = chunk_timeout | new_timeout
-                    self._record_first_done(
-                        new_done=new_done,
-                        timeouts=timeouts,
-                        info=info,
-                        global_step=chunk_idx * horizon + frame_idx,
-                        ever_done=ever_done,
-                        first_done_step=first_done_step,
-                        first_done_phase=first_done_phase,
-                        first_done_anchor_pos=first_done_anchor_pos,
-                        first_done_anchor_ori=first_done_anchor_ori,
-                        first_done_ee_body=first_done_ee_body,
-                        first_done_timeout=first_done_timeout,
-                    )
-                    self._record_train_episode_stats(
-                        reward_live.detach(),
-                        new_done.detach(),
-                        step_counts=active_f.detach(),
-                    )
-                    rollout_info_items.append((info, alive_before_frame.detach()))
+                    # First-done is a diagnostic only (PPO-style): it does NOT
+                    # invalidate samples, because auto_reset keeps the rollout a
+                    # continuous stream. Every step stays a valid transition.
+                    newly_done = (~ever_done) & done_b
+                    if bool(newly_done.any()):
+                        self._record_first_done(
+                            new_done=newly_done,
+                            timeouts=timeouts,
+                            info=info,
+                            global_step=chunk_idx * horizon + frame_idx,
+                            ever_done=ever_done,
+                            first_done_step=first_done_step,
+                            first_done_phase=first_done_phase,
+                            first_done_anchor_pos=first_done_anchor_pos,
+                            first_done_anchor_ori=first_done_anchor_ori,
+                            first_done_ee_body=first_done_ee_body,
+                            first_done_timeout=first_done_timeout,
+                        )
+                    self._record_train_episode_stats(reward_step.detach(), done_b.detach())
+                    rollout_info_items.append((info, torch.ones_like(done_b, dtype=torch.bool)))
                     for key, val in info["done_terms"].items():
                         b = val.bool()
                         done_terms_union[key] = b.clone() if key not in done_terms_union else (done_terms_union[key] | b)
 
-                    alive_in_chunk = alive_before_frame & ~done.bool()
                     obs = next_obs
                     critic_obs = next_critic_obs
 
@@ -484,7 +470,7 @@ class SFPO(Algorithm):
                 raw_rewards_buf[chunk_idx, :, 0] = chunk_raw_reward.detach()
                 dones_buf[chunk_idx, :, 0] = chunk_done.detach()
                 timeouts_buf[chunk_idx, :, 0] = chunk_timeout.detach()
-                valid_mask_buf[chunk_idx, :, 0] = active_before_chunk.detach()
+                valid_mask_buf[chunk_idx, :, 0] = True
                 live_frames_buf[chunk_idx, :, 0] = chunk_live_frames.detach()
                 actions_buf[chunk_idx] = action_chunk.detach()
                 latents_buf[chunk_idx] = sample["all_latents"].detach()
@@ -492,7 +478,11 @@ class SFPO(Algorithm):
 
             last_critic_obs = self._norm_critic(critic_obs, update=False)
             last_values = self.critic.evaluate(last_critic_obs).detach()
-            alive_at_end = (~ever_done).view(n_envs, 1)
+            # PPO-aligned: the bootstrap value at the end of the rollout is
+            # always valid (auto_reset keeps every env alive across updates),
+            # and valid_mask is all-True. With h=1 this makes _compute_chunk_gae
+            # reduce exactly to PPO's GAE (chunk_gamma=gamma, chunk_lambda=lam).
+            alive_at_end = torch.ones(n_envs, 1, dtype=torch.bool, device=device)
             returns, advantages = self._compute_chunk_gae(
                 last_values,
                 values_buf,
@@ -570,7 +560,7 @@ class SFPO(Algorithm):
         if valid_advantages.numel() > 0:
             normalized[valid_mask] = (
                 (valid_advantages - valid_advantages.mean())
-                / (valid_advantages.std(unbiased=False) + 1.0e-8)
+                / (valid_advantages.std() + 1.0e-8)
             )
         return returns, normalized
 
@@ -591,11 +581,11 @@ class SFPO(Algorithm):
         if not math.isfinite(kl_value) or kl_value <= 0.0:
             return
         if kl_value > 2.0 * desired_kl:
-            self.learning_rate = max(1.0e-5, self.learning_rate / 1.5)
-            self.critic_learning_rate = max(1.0e-5, self.critic_learning_rate / 1.5)
+            self.learning_rate = max(self.min_lr, self.learning_rate / 1.5)
+            self.critic_learning_rate = max(self.min_lr, self.critic_learning_rate / 1.5)
         elif kl_value < 0.5 * desired_kl:
-            self.learning_rate = min(float(self.cfg.policy_lr), self.learning_rate * 1.5)
-            self.critic_learning_rate = min(float(self.cfg.value_lr), self.critic_learning_rate * 1.5)
+            self.learning_rate = min(self.max_lr, self.learning_rate * 1.5)
+            self.critic_learning_rate = min(self.max_lr, self.critic_learning_rate * 1.5)
         for group in self.actor_optimizer.param_groups:
             group["lr"] = self.learning_rate
         for group in self.critic_optimizer.param_groups:
@@ -671,7 +661,7 @@ class SFPO(Algorithm):
                     old_log_probs_sub = old_log_probs[sub]
                     log_ratio = new_log_probs - old_log_probs_sub
                     ratio = torch.exp(log_ratio)
-                    adv = advantages[sub].clamp(-float(self.cfg.adv_clip_max), float(self.cfg.adv_clip_max))
+                    adv = advantages[sub]
                     adv_steps = adv
                     unclipped = -adv_steps * ratio
                     clipped = -adv_steps * torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
@@ -1077,7 +1067,9 @@ class SFPO(Algorithm):
         )
         print(
             f"[INFO] stochastic_flow=True grouped_rollout=False critic_advantage=True "
-            f"first_life_trajectory=True terminal_penalty={cfg.terminal_penalty} "
+            f"ppo_aligned_rollout=True auto_reset=True first_life_trajectory=False "
+            f"terminal_penalty_disabled=True entropy_bonus=False "
+            f"gamma={cfg.discount_gamma} lambda={cfg.gae_lambda} "
             f"chunk_gamma={float(cfg.discount_gamma) ** int(cfg.horizon):.6f} "
             f"chunk_lambda={float(cfg.gae_lambda) ** int(cfg.horizon):.6f}",
             flush=True,
@@ -1090,7 +1082,7 @@ class SFPO(Algorithm):
         )
         print(
             f"[INFO] policy_epochs={cfg.policy_epochs} clip_range={cfg.clip_range} "
-            f"adv_clip_max={cfg.adv_clip_max} desired_kl={cfg.desired_kl} "
+            f"desired_kl={cfg.desired_kl} "
             f"value_loss_coef={cfg.value_loss_coef} use_clipped_value_loss={cfg.use_clipped_value_loss} "
             f"num_mini_batches={cfg.num_mini_batches} micro_batch={cfg.micro_batch_size} "
             f"policy_lr={cfg.policy_lr} critic_lr={cfg.value_lr}",

@@ -20,7 +20,7 @@ environment:
   adaptive_predecessor_lookback_bins: 1
   action_rate_weight: 0.1
 parameters:
-  horizon: 8
+  horizon: 1
   actor_hidden_dims: [512, 256, 128]
   critic_hidden_dims: [512, 256, 128]
   activation: elu
@@ -29,29 +29,29 @@ parameters:
   sde_eta: 0.7
   init_noise_std: 0.8
   eval_initial_noise: zero
-  rollout_env_steps: 48
-  terminal_penalty: 50.0
+  rollout_env_steps: 24
+  terminal_penalty: 0.0
   discount_gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
   adv_clip_max: 5.0
-  desired_kl: 0.06
+  desired_kl: 0.01
   policy_epochs: 5
   num_mini_batches: 4
   micro_batch_size: 8192
   value_loss_coef: 1.0
   value_clip_range: 0.2
-  use_clipped_value_loss: false
-  policy_lr: 0.0001
+  use_clipped_value_loss: true
+  policy_lr: 0.001
   value_lr: 0.001
   weight_decay: 0.0
   critic_weight_decay: 0.0
   empirical_normalization: true
-  init_at_random_ep_len: false
+  init_at_random_ep_len: true
   max_grad_norm: 1.0
 training:
   seed: 0
-  max_updates: 500
+  max_updates: 1000
   log_every: 1
   save_every: 100
   resume: ""
