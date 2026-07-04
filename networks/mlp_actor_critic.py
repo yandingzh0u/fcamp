@@ -66,6 +66,85 @@ class Critic(nn.Module):
         return self.net(obs)
 
 
+class ActionConditionedChunkCritic(nn.Module):
+    """Action-conditioned multi-horizon critic for SFPO.
+
+    Produces two outputs from a chunk-start state ``s`` and an action chunk
+    ``[a_0, ..., a_{h-1}]``:
+
+    * ``V(s)``: a state-only baseline (no action dependence).
+    * ``Q_prefix(s, action_chunk) -> [Q_1, ..., Q_h]``: ``Q_k`` is the value of
+      executing the prefix ``[a_0, ..., a_{k-1}]`` from ``s``. Prefixes are
+      causal by construction (prefix ``k`` only consumes frames ``0..k-1``).
+
+    Architecture (MLP-based, no transformer):
+
+        obs_encoder(s)             -> h_obs          (shared)
+        frame_encoder(a_i)         -> h_frame_i      (shared across frames)
+        h_prefix_k = cumsum(h_frame_0..k-1) + prefix_pos_embed[k]
+        Q_k = q_head([h_obs, h_prefix_k])
+        V(s) = v_head(h_obs)
+
+    The cumulative sum over per-frame encodings is the simplest causal prefix
+    aggregation for small horizons (h=4); ``prefix_pos_embed`` lets the head
+    distinguish prefix lengths.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        horizon: int,
+        hidden_dims: tuple[int, ...],
+        activation: str,
+    ):
+        super().__init__()
+        if horizon < 1:
+            raise ValueError(f"horizon must be >= 1, got {horizon}")
+        if not hidden_dims:
+            raise ValueError("hidden_dims must contain at least one layer")
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        self.horizon = horizon
+        hidden = int(hidden_dims[-1])
+
+        self.obs_encoder = _build_mlp(obs_dim, tuple(hidden_dims), hidden, activation)
+        self.frame_encoder = _build_mlp(action_dim, tuple(hidden_dims), hidden, activation)
+        self.prefix_pos_embed = nn.Parameter(torch.zeros(horizon, hidden))
+        nn.init.normal_(self.prefix_pos_embed, std=0.02)
+        self.q_head = _build_mlp(hidden * 2, tuple(hidden_dims), 1, activation)
+        self.v_head = _build_mlp(hidden, tuple(hidden_dims), 1, activation)
+
+    def evaluate_v(self, obs: torch.Tensor) -> torch.Tensor:
+        """State-only value ``V(s)`` -> ``[batch, 1]``."""
+        h_obs = self.obs_encoder(obs)
+        return self.v_head(h_obs)
+
+    def evaluate_q_prefix(self, obs: torch.Tensor, action_chunk: torch.Tensor) -> torch.Tensor:
+        """Per-prefix action-conditioned values ``[Q_1, ..., Q_h]`` -> ``[batch, horizon]``.
+
+        ``action_chunk`` has shape ``[batch, horizon, action_dim]``.
+        """
+        if action_chunk.ndim != 3:
+            raise ValueError(
+                f"action_chunk must be [batch, horizon, action_dim], got {tuple(action_chunk.shape)}"
+            )
+        if action_chunk.shape[1] != self.horizon or action_chunk.shape[2] != self.action_dim:
+            raise ValueError(
+                f"action_chunk expected [..., {self.horizon}, {self.action_dim}], "
+                f"got {tuple(action_chunk.shape)}"
+            )
+        h_obs = self.obs_encoder(obs)  # [B, H]
+        h_frame = self.frame_encoder(action_chunk)  # [B, h, H]
+        # causal prefix aggregation: prefix k aggregates frames 0..k-1
+        h_prefix = torch.cumsum(h_frame, dim=1)  # [B, h, H]
+        h_prefix = h_prefix + self.prefix_pos_embed.unsqueeze(0)  # [B, h, H]
+        h_obs_exp = h_obs.unsqueeze(1).expand(-1, self.horizon, -1)  # [B, h, H]
+        h_cat = torch.cat([h_obs_exp, h_prefix], dim=-1)  # [B, h, 2H]
+        q = self.q_head(h_cat).squeeze(-1)  # [B, h]
+        return q
+
+
 class EmpiricalNormalization(nn.Module):
 
 

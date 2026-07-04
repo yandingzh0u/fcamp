@@ -6,22 +6,28 @@ The contract across PPO / SFPO / MixGRPO:
   per-sample / per-chunk budget. This makes ``desired_kl: 0.01`` mean the same
   thing regardless of the action-chunk horizon ``h``.
 
-* The raw KL observed during the update is a *chunk*-level (joint) quantity:
-  for a horizon-``h`` policy the joint log-prob ratio is roughly ``h`` times a
-  single-step ratio, so the raw KL scales with ``h``. To compare apples to
-  apples we normalize by ``kl_units`` (= ``h`` for chunk policies, ``1`` for
-  PPO) before comparing against ``desired_kl``.
+* The raw KL observed during the update is algorithm-specific:
+
+  - **PPO / MixGRPO** use a *chunk*-level (joint) KL: for a horizon-``h``
+    policy the joint log-prob ratio is roughly ``h`` times a single-step
+    ratio, so the raw KL scales with ``h``. To compare apples to apples we
+    normalize by ``kl_units`` (= ``h``) before comparing against
+    ``desired_kl``.
+
+  - **SFPO** uses per-frame / per-prefix ratios and the adaptive-LR KL is the
+    masked MEAN per-frame KL (a per-control-step quantity), so ``kl_units=1``
+    and ``desired_kl`` is compared directly.
 
   Examples (``desired_kl = 0.01``)::
 
       PPO        h=1  -> kl_units=1  -> raw_target = 0.01 * 1   = 0.01
-      SFPO       h=4  -> kl_units=4  -> raw_target = 0.01 * 4   = 0.04
       MixGRPO    h=4  -> kl_units=4  -> raw_target = 0.01 * 4   = 0.04
+      SFPO       h=4  -> kl_units=1  -> raw_target = 0.01 * 1   = 0.01
 
-Only ``horizon`` is used as the normalizer. ``flow_steps`` is NOT used because
-the per-SDE-step log-prob is already averaged inside ``kl_loss``. Group counts
-are NOT used because they are a sampling/sorting structure, not a control-step
-length.
+Only ``horizon`` is used as the normalizer for the chunk-level algorithms.
+``flow_steps`` is NOT used because the per-SDE-step log-prob is already
+averaged inside ``kl_loss``. Group counts are NOT used because they are a
+sampling/sorting structure, not a control-step length.
 
 FPO is intentionally NOT routed through here: its ``kl`` is a prediction MSE,
 not a log-prob KL, so it cannot share the ``desired_kl`` semantics.

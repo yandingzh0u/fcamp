@@ -64,25 +64,27 @@ def test_adaptive_lr_target_zero_or_nonpositive_kl_holds() -> None:
     assert adaptive_lr_from_kl(0.05, 4, 0.0, lr, 1e-5, 1e-2)[0] == lr
 
 
-def test_sfpo_kl_units_equals_horizon() -> None:
+def test_sfpo_kl_units_is_per_frame() -> None:
+    # SFPO actor loss uses per-frame / per-prefix ratios and the adaptive-LR
+    # KL is the masked MEAN per-frame KL, so kl_units=1 (horizon-independent).
+    # desired_kl is a per-frame budget compared directly against the per-frame KL.
     for h in (1, 2, 4, 8):
         cfg = SimpleNamespace(horizon=h)
         algo = SFPO(cfg=cfg, env=None, simulation_app=None)
-        assert algo.kl_units == h
+        assert algo.kl_units == 1
 
 
-def test_sfpo_h4_raw_target_is_desired_kl_times_horizon() -> None:
-    # desired_kl is a per-step budget; raw target for the scheduler must be
-    # desired_kl * horizon so the comparison is horizon-invariant.
+def test_sfpo_per_frame_kl_aligned_with_desired_kl() -> None:
+    # desired_kl is a per-frame budget; with kl_units=1, raw KL is per-frame
+    # and is compared directly against desired_kl.
     cfg = SimpleNamespace(horizon=4, desired_kl=0.01)
     algo = SFPO(cfg=cfg, env=None, simulation_app=None)
-    assert algo.kl_units == 4
-    # raw KL just below raw target (0.04) but per-step below 0.5*target -> raise
+    assert algo.kl_units == 1
+    # per-frame KL 0.004 < 0.5*0.01 -> raise
     lr = 1e-3
     new_lr, kl_per_step = adaptive_lr_from_kl(
-        raw_kl=0.019, kl_units=algo.kl_units, target_per_step=cfg.desired_kl,
+        raw_kl=0.004, kl_units=algo.kl_units, target_per_step=cfg.desired_kl,
         lr=lr, min_lr=1e-5, max_lr=1e-2,
     )
-    # per-step = 0.019/4 = 0.00475 < 0.005 -> raise
     assert kl_per_step < 0.5 * cfg.desired_kl
     assert new_lr > lr

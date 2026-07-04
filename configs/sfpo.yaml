@@ -30,11 +30,8 @@ parameters:
   init_noise_std: 0.8
   eval_initial_noise: zero
   rollout_env_steps: 24
-  terminal_penalty: 0.0
   discount_gamma: 0.99
-  gae_lambda: 0.95
   clip_range: 0.2
-  adv_clip_max: 5.0
   desired_kl: 0.01
   policy_epochs: 5
   num_mini_batches: 4
@@ -42,13 +39,25 @@ parameters:
   value_loss_coef: 1.0
   value_clip_range: 0.2
   use_clipped_value_loss: true
-  policy_lr: 0.001
-  value_lr: 0.001
+  policy_lr: 0.0003
+  value_lr: 0.0003
   weight_decay: 0.0
   critic_weight_decay: 0.0
   empirical_normalization: true
   init_at_random_ep_len: true
   max_grad_norm: 1.0
+  # action-conditioned multi-horizon actor-critic
+  # failure_value = -failure_penalty; injected as the absorbing-state bootstrap
+  # at the failure frame so early death can never outrank survival by skipping
+  # negative future reward. Tune up if death chunks still rank too high.
+  failure_penalty: 10.0
+  # weight of the per-prefix Q critic loss
+  q_loss_coef: 1.0
+  # clip Q_k around its collect-time value (PPO-style value clipping for Q)
+  q_value_clip_range: 0.2
+  use_clipped_q_loss: true
+  # advantage normalization mode: per_prefix | global | none
+  advantage_normalization: per_prefix
 training:
   seed: 0
   max_updates: 1000

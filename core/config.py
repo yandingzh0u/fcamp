@@ -135,6 +135,18 @@ class MixGRPOConfig:
 
 @dataclass(frozen=True, slots=True)
 class SFPOConfig:
+    """Action-conditioned multi-horizon SFPO.
+
+    Root-cause design for chunked-action policies:
+
+      * action-conditioned prefix-Q critic (``Q_1..Q_h``) on top of ``V(s)``;
+      * per-frame rollout storage (reward / done / failure / next critic obs);
+      * multi-horizon prefix targets ``T_k`` with an **absorbing failure
+        target** (``failure_value = -failure_penalty``) so early death can
+        never rank above survival by "saving" negative future reward;
+      * per-frame flow log-prob ratio + per-prefix PPO clip / KL.
+    """
+
     horizon: int
     actor_hidden_dims: tuple[int, ...]
     critic_hidden_dims: tuple[int, ...]
@@ -145,11 +157,8 @@ class SFPOConfig:
     init_noise_std: float
     eval_initial_noise: str
     rollout_env_steps: int
-    terminal_penalty: float
     discount_gamma: float
-    gae_lambda: float
     clip_range: float
-    adv_clip_max: float
     desired_kl: float
     policy_epochs: int
     num_mini_batches: int
@@ -164,6 +173,12 @@ class SFPOConfig:
     empirical_normalization: bool
     init_at_random_ep_len: bool
     max_grad_norm: float
+    # action-conditioned multi-horizon
+    failure_penalty: float
+    q_loss_coef: float
+    q_value_clip_range: float
+    use_clipped_q_loss: bool
+    advantage_normalization: str
 
 
 AlgorithmConfig: TypeAlias = PPOConfig | FPOConfig | MixGRPOConfig | SFPOConfig
@@ -315,3 +330,11 @@ def _validate(config: ExperimentConfig) -> None:
             raise ValueError("SFPO requires parameters.rollout_env_steps > 0")
         if config.parameters.rollout_env_steps % config.parameters.horizon:
             raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
+        if config.parameters.failure_penalty < 0.0:
+            raise ValueError("SFPO requires parameters.failure_penalty >= 0")
+        norm = str(config.parameters.advantage_normalization).lower()
+        if norm not in {"per_prefix", "global", "none"}:
+            raise ValueError(
+                "SFPO parameters.advantage_normalization must be one of "
+                f"'per_prefix', 'global', 'none'; got {config.parameters.advantage_normalization!r}"
+            )

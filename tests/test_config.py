@@ -38,11 +38,15 @@ def test_sfpo_config_is_ppo_aligned_h4() -> None:
     assert sfpo.parameters.rollout_env_steps == 24
     assert sfpo.parameters.rollout_env_steps % sfpo.parameters.horizon == 0
     assert sfpo.parameters.desired_kl == 0.01
-    assert sfpo.parameters.policy_lr == 0.001
-    assert sfpo.parameters.value_lr == 0.001
+    assert sfpo.parameters.policy_lr == 0.0003
+    assert sfpo.parameters.value_lr == 0.0003
     assert sfpo.parameters.use_clipped_value_loss is True
     assert sfpo.parameters.init_at_random_ep_len is True
-    assert sfpo.parameters.terminal_penalty == 0.0
+    # action-conditioned multi-horizon critic + absorbing failure target.
+    assert sfpo.parameters.failure_penalty == 10.0
+    assert sfpo.parameters.q_loss_coef == 1.0
+    assert sfpo.parameters.use_clipped_q_loss is True
+    assert sfpo.parameters.advantage_normalization == "per_prefix"
     assert sfpo.training.max_updates == 1000
     # SFPO-only flow/SDE head is preserved.
     assert sfpo.parameters.flow_steps >= 1
@@ -51,18 +55,22 @@ def test_sfpo_config_is_ppo_aligned_h4() -> None:
 
 def test_desired_kl_is_unified_per_step_budget() -> None:
     # desired_kl is a per-env-control-step KL budget, shared across PPO/SFPO/
-    # MixGRPO so it never needs per-horizon hand-tuning. Raw targets are
-    # derived internally as desired_kl * kl_units (kl_units == horizon for
-    # chunk policies, 1 for PPO).
+    # MixGRPO so it never needs per-horizon hand-tuning.
+    #
+    #   PPO / MixGRPO: joint-chunk KL → kl_units = horizon
+    #   SFPO: per-frame KL → kl_units = 1
+    #
+    # The raw target internally is desired_kl * kl_units; for SFPO kl_units=1
+    # so the raw target equals desired_kl directly.
     ppo = load_config(ROOT / "configs" / "ppo.yaml")
     sfpo = load_config(ROOT / "configs" / "sfpo.yaml")
     mixgrpo = load_config(ROOT / "configs" / "mixgrpo.yaml")
     assert ppo.parameters.desired_kl == 0.01
     assert sfpo.parameters.desired_kl == 0.01
     assert mixgrpo.parameters.desired_kl == 0.01
-    # Derived raw targets scale with horizon (sanity, not equality of value):
-    assert ppo.parameters.desired_kl * 1 == 0.01
-    assert sfpo.parameters.desired_kl * sfpo.parameters.horizon == 0.01 * 4
+    # SFPO kl_units=1 (per-frame), not horizon-scaled.
+    assert sfpo.parameters.desired_kl * 1 == 0.01
+    # MixGRPO still uses horizon-scaled raw target.
     assert mixgrpo.parameters.desired_kl * mixgrpo.parameters.horizon == 0.01 * 12
 
 
