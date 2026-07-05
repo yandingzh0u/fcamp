@@ -61,7 +61,7 @@ parameters:
 training:
   seed: 0
   max_updates: 1000
-  log_every: 1
+  log_every: 10
   save_every: 100
   resume: ""
   reset_optimizer_on_resume: false
