@@ -1,13 +1,19 @@
-"""SFPO: causal flow policy + per-frame GAE + smooth direct-delta chunks.
+"""SFPO: causal flow policy + per-frame GAE + absolute-action chunks (v5).
 
 Root-cause redesign of the chunked-action flow-matching policy. The design
 fixes three PPO/GRPO-to-chunk-flow unit mismatches that plagued earlier
 versions:
 
-1. **Action semantics**: the flow latent is a bounded *delta* from the last
-   executed action (``a_i = prev + max_delta * tanh(raw_i)``), not an absolute
-   action. Open-loop chunk execution stays continuous, matching the env's
-   action-rate penalty ``reward -= w * (a_i - a_{i-1})^2``.
+1. **Action semantics** (v5): the flow latent is an *absolute* joint target
+   squashed by ``a_k = scale * tanh(raw_k / scale)`` (``action_transform=
+   "absolute"``), giving the actor PPO-like full action support. The env's
+   action-rate penalty ``reward -= w * (a_i - a_{i-1})^2`` handles smoothness
+   -- SFPO does NOT reinvent a hard smoothness constraint. The legacy v4
+   "delta" transform (``a_i = prev + max_delta * tanh(raw_i)``) is retained
+   for ablation only: it was a hard-bounded delta integrator that starved the
+   actor of action freedom (in_chunk_delta ~0.24 vs PPO ~0.76, env_raw
+   plateaued at ~0.157 while V_tgt kept climbing -> tail improved, median
+   did not).
 
 2. **Causal flow density**: the velocity field is causal over the horizon
    (``v_k`` sees only ``z_0..z_k``), so the per-frame SDE log-prob is a real
@@ -81,11 +87,32 @@ class SFPO(Algorithm):
             causal_velocity=bool(getattr(cfg, "causal_velocity", False)),
             causal_arch=str(getattr(cfg, "causal_arch", "prefix_cumsum")),
         ).to(env.device)
-        # Previous-action-conditioned smooth transform: the executed chunk is a
-        # causal smooth trajectory anchored on the last executed action, matching
-        # the environment's action-rate penalty. max_delta bounds the per-frame
-        # step so open-loop chunk execution stays continuous.
-        self._policy.set_action_max_delta(float(getattr(cfg, "action_max_delta", 0.5)))
+        # Action transform: v5 default "absolute" -- the flow latent is an
+        # absolute joint target squashed by scale*tanh(raw/scale), giving the
+        # actor PPO-like full action support (the env's action-rate penalty
+        # handles smoothness). "delta" is the legacy v4 hard-bounded delta
+        # integrator (a_i = prev + max_delta*tanh(raw_i)); retained for
+        # ablation only -- it starved the actor of action freedom.
+        action_transform = str(getattr(cfg, "action_transform", "absolute")).lower()
+        if action_transform == "absolute":
+            self._policy.set_action_max_delta(None)
+        elif action_transform == "delta":
+            if getattr(cfg, "action_max_delta", None) is None:
+                raise ValueError(
+                    "action_transform='delta' requires a positive action_max_delta"
+                )
+            self._policy.set_action_max_delta(float(cfg.action_max_delta))
+        elif action_transform == "residual_absolute":
+            # v6: prev-action-anchored full-support residual. action_max_delta is
+            # unused (residuals are unbounded); keep it None for clarity.
+            self._policy.set_action_max_delta(None)
+        else:
+            raise ValueError(
+                f"action_transform must be 'absolute', 'delta', or "
+                f"'residual_absolute', got {action_transform!r}"
+            )
+        self.action_transform = action_transform
+        self._policy.action_transform = action_transform
         self.critic = Critic(self.critic_obs_dim, tuple(cfg.critic_hidden_dims), cfg.activation).to(env.device)
         self.chunk_dim = self._policy.chunk_dim
 
@@ -1084,11 +1111,16 @@ class SFPO(Algorithm):
             "sfpo/valid_prefix_frac": totals["valid_prefix_frac"] / denom,
             "sfpo/failure_penalty": float(self.failure_penalty),
             "sfpo/gae_lambda": float(getattr(self.cfg, "gae_lambda", 0.95)),
-            "sfpo/action_max_delta": float(
-                self._policy.action_max_delta.mean().item()
+            "sfpo/action_max_delta": (
+                float(self._policy.action_max_delta.mean().item())
                 if torch.is_tensor(self._policy.action_max_delta)
-                else self._policy.action_max_delta
+                else (
+                    float(self._policy.action_max_delta)
+                    if self._policy.action_max_delta is not None
+                    else float("nan")
+                )
             ),
+            "sfpo/action_transform": {"absolute": 0.0, "delta": 1.0, "residual_absolute": 2.0}[self.action_transform],
             "sfpo/kl_early_stop_factor": float(self.kl_early_stop_factor),
             "sfpo/early_stop_epoch": float(early_stopped_epoch),
             "sfpo/advantage_normalization": float({"per_prefix": 0.0, "global": 1.0, "none": 2.0}[self.advantage_normalization]),
@@ -1516,10 +1548,16 @@ class SFPO(Algorithm):
             f"sde_eta={cfg.sde_eta} init_noise_std={cfg.init_noise_std} eval_initial_noise={cfg.eval_initial_noise}",
             flush=True,
         )
+        _amd = self._policy.action_max_delta
+        _amd_str = (
+            f"{float(_amd.mean().item()):.3f}"
+            if torch.is_tensor(_amd)
+            else (f"{float(_amd):.3f}" if _amd is not None else "none")
+        )
         print(
             f"[INFO] state_only_critic=True prefix_q=False "
             f"causal_velocity={self._policy.causal_velocity} causal_arch={self._policy.causal_arch} "
-            f"smooth_action_chunk=True action_max_delta={float(self._policy.action_max_delta.mean().item() if torch.is_tensor(self._policy.action_max_delta) else self._policy.action_max_delta)} "
+            f"action_transform={self.action_transform} action_max_delta={_amd_str} "
             f"terminal_failure_cost=True failure_penalty={cfg.failure_penalty} "
             f"per_frame_flow_logprob=True per_frame_ratio_ppo=True flat_clip=True "
             f"actor_advantage=gae_per_frame "

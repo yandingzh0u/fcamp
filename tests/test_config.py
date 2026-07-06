@@ -43,11 +43,12 @@ def test_sfpo_config_is_ppo_aligned_h4() -> None:
     assert sfpo.parameters.use_clipped_value_loss is True
     assert sfpo.parameters.init_at_random_ep_len is True
     # action-conditioned multi-horizon critic + absorbing failure target.
-    assert sfpo.parameters.failure_penalty == 1.0
+    assert sfpo.parameters.failure_penalty == 10.0
     assert sfpo.parameters.gae_lambda == 0.95
     assert sfpo.parameters.causal_velocity is True
     assert sfpo.parameters.causal_arch == "prefix_cumsum"
-    assert sfpo.parameters.action_max_delta == 0.5
+    assert sfpo.parameters.action_transform == "residual_absolute"
+    assert sfpo.parameters.action_max_delta is None
     assert sfpo.parameters.kl_early_stop_factor == 4.0
     assert sfpo.parameters.advantage_normalization == "global"
     assert sfpo.training.max_updates == 1000

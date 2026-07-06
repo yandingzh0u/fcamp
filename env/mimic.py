@@ -182,6 +182,7 @@ class G1MimicEnv(
             dtype=torch.long,
             device=self.device,
         )
+        self.first_push_step[env_ids] = -1
 
         self.scene.reset(env_ids=env_ids)
         reference = self.motion.get_frame(phase_indices)

@@ -97,6 +97,12 @@ class G1Env:
             dtype=torch.long,
             device=self.device,
         )
+        # per-env episode-step of the FIRST interval push (-1 = not yet pushed).
+        # Used by validation to decompose the 50-100 cliff into "died before
+        # push" (early collapse) vs "pushed then died" (push-recovery failure).
+        self.first_push_step = torch.full(
+            (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
 
         self._reset_default_pose()
 

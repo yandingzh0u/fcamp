@@ -93,6 +93,13 @@ class FlowMatchingPolicy(nn.Module):
         # per-frame step is bounded by max_delta, matching the environment's
         # action-rate penalty contract.
         self.action_max_delta: torch.Tensor | None = None
+        # Action transform selector. Authoritative for "residual_absolute"
+        # (v6). "absolute"/"delta" still fall through to the action_max_delta-
+        # driven branches below for backward compatibility with non-SFPO callers
+        # (e.g. MixGRPO, which never sets action_max_delta and relies on the
+        # absolute squash). SFPO.build() keeps this consistent with
+        # action_max_delta for absolute/delta.
+        self.action_transform: str = "absolute"
 
     def set_action_max_delta(self, max_delta) -> None:
         if max_delta is None:
@@ -175,6 +182,24 @@ class FlowMatchingPolicy(nn.Module):
         scale = self.action_squash_scale
         leading_shape = action_value.shape[:-1]
         chunk = action_value.view(*leading_shape, self.horizon, self.action_dim)
+        if self.action_transform == "residual_absolute" and prev_action is not None:
+            # v6 residual-absolute: anchor on prev_action in latent space, add
+            # UNBOUNDED per-frame residuals, squash back. Zero residual = hold
+            # the current action; a large residual can swing a frame to +/-scale
+            # in one step (PPO-like recovery authority, what v4's hard delta cap
+            # starved during push recovery). Causal: a_k depends on z_0..z_k
+            # only, so the per-frame PPO ratio stays legal.
+            prev = prev_action.reshape(*leading_shape, self.action_dim)  # [..., A]
+            eps = 1.0e-6
+            prev_normalized = torch.clamp(prev / scale, -1.0 + eps, 1.0 - eps)
+            u = scale * torch.atanh(prev_normalized)  # latent anchor [..., A]
+            actions = []
+            for i in range(self.horizon):
+                u = u + chunk[..., i, :]  # raw residual (unbounded), [..., A]
+                a_i = scale * torch.tanh(u / scale)  # [..., A]
+                actions.append(a_i)
+            out = torch.stack(actions, dim=-2)  # [..., h, A]
+            return out.reshape(*leading_shape, self.action_chunk_dim)
         if prev_action is None or self.action_max_delta is None:
             squashed = scale * torch.tanh(chunk / scale)
             return squashed.reshape(*leading_shape, self.action_chunk_dim)

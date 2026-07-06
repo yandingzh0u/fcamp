@@ -134,8 +134,8 @@ def _build_algo(env, **overrides):
         policy_lr=1e-3, value_lr=1e-3, weight_decay=0.0, critic_weight_decay=0.0,
         empirical_normalization=False, init_at_random_ep_len=False, max_grad_norm=1.0,
         causal_velocity=True, causal_arch="prefix_cumsum",
-        action_max_delta=0.5, failure_penalty=1.0, kl_early_stop_factor=4.0,
-        advantage_normalization="global",
+        action_transform="delta", action_max_delta=0.5, failure_penalty=1.0,
+        kl_early_stop_factor=4.0, advantage_normalization="global",
     )
     base.update(overrides)
     cfg = SimpleNamespace(**base)
@@ -414,6 +414,56 @@ def test_causal_action_no_future_gradient_leak() -> None:
     for k in range(3):
         leak = _causal_grad_leak(pol, "action", k)
         assert leak <= 1e-6, f"causal action frame {k} leaks future grad: {leak}"
+
+
+def test_causal_action_no_future_gradient_leak_absolute() -> None:
+    """v5 absolute transform: a_k = scale*tanh(raw_k/scale) depends only on
+    z_k, so per-frame causality (and thus per-frame PPO ratio legality) is
+    preserved WITHOUT the hard delta cap. This is the v5 guarantee -- the
+    chunk policy keeps a legal per-frame ratio after removing direct-delta."""
+    from networks.flow_policy import FlowMatchingPolicy
+    pol = FlowMatchingPolicy(obs_dim=5, action_dim=3, horizon=4, hidden_dims=(16, 16),
+                             activation="elu", action_squash_scale=5.0, causal_velocity=True)
+    pol.set_action_max_delta(None)  # v5 absolute mode
+    assert pol.action_max_delta is None
+    for k in range(3):
+        leak = _causal_grad_leak(pol, "action", k)
+        assert leak <= 1e-6, f"absolute action frame {k} leaks future grad: {leak}"
+
+
+def test_causal_action_no_future_gradient_leak_residual() -> None:
+    """v6 residual_absolute transform: a_k = scale*tanh((u_prev + sum_{i<=k}
+    raw_i)/scale) depends only on z_0..z_k, so per-frame causality (and thus
+    per-frame PPO ratio legality) is preserved. This is the v6 guarantee --
+    prev-action-anchored full-support residuals keep a legal per-frame ratio
+    while granting PPO-like recovery authority (unlike v4's hard delta cap)."""
+    from networks.flow_policy import FlowMatchingPolicy
+    pol = FlowMatchingPolicy(obs_dim=5, action_dim=3, horizon=4, hidden_dims=(16, 16),
+                             activation="elu", action_squash_scale=5.0, causal_velocity=True)
+    pol.action_transform = "residual_absolute"
+    pol.set_action_max_delta(None)  # residual mode does not use a delta cap
+    assert pol.action_transform == "residual_absolute"
+    for k in range(3):
+        leak = _causal_grad_leak(pol, "action", k)
+        assert leak <= 1e-6, f"residual action frame {k} leaks future grad: {leak}"
+
+
+def test_residual_absolute_anchors_on_prev_action() -> None:
+    """v6 residual_absolute: zero residual chunk => executed chunk holds the
+    previous action exactly (a_k = prev for all k). This is the 'zero output =
+    hold current action' property that pure absolute lacks (and which v5
+    collapsed without)."""
+    from networks.flow_policy import FlowMatchingPolicy
+    torch.manual_seed(0)
+    pol = FlowMatchingPolicy(obs_dim=5, action_dim=3, horizon=4, hidden_dims=(16, 16),
+                             activation="elu", action_squash_scale=5.0, causal_velocity=True)
+    pol.action_transform = "residual_absolute"
+    prev = torch.tensor([[0.3, -0.7, 1.2]])
+    zero_chunk = torch.zeros(1, pol.chunk_dim)
+    actions = pol._action_transform(zero_chunk, prev_action=prev).view(pol.horizon, pol.action_dim)
+    assert torch.allclose(actions, prev.expand(pol.horizon, -1), atol=1e-5), (
+        f"zero residual must hold prev_action, got {actions}"
+    )
 
 
 def test_full_mlp_logp_DOES_leak_future_gradient() -> None:

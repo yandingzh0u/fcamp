@@ -49,8 +49,9 @@ parameters:
   max_grad_norm: 1.0
   causal_velocity: true
   causal_arch: prefix_cumsum
-  action_max_delta: 0.5
-  failure_penalty: 1.0
+  action_transform: residual_absolute
+  action_max_delta: null
+  failure_penalty: 10.0
   kl_early_stop_factor: 4.0
   advantage_normalization: global
 training:

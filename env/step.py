@@ -77,6 +77,10 @@ class MimicStepMixin:
         due_env_ids = torch.where(self.episode_steps >= self.next_push_step)[0]
         if due_env_ids.numel() == 0:
             return
+        # record each env's first-push episode-step for validation diagnostics.
+        first_timers = due_env_ids[self.first_push_step[due_env_ids] < 0]
+        if first_timers.numel() > 0:
+            self.first_push_step[first_timers] = self.episode_steps[first_timers]
 
         velocity_range = torch.tensor(VELOCITY_RANGE, dtype=torch.float32, device=self.device)
         low = velocity_range[:, 0].unsqueeze(0)

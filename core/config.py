@@ -189,8 +189,16 @@ class SFPOConfig:
     # logp_k is a genuine conditional density and per-frame PPO ratio is valid.
     causal_velocity: bool
     causal_arch: str
-    # smooth action chunk
-    action_max_delta: float
+    # action transform: "absolute" (v5 default) = flow latent is an absolute
+    # joint target squashed by a_k = scale*tanh(raw_k/scale) -- PPO-like full
+    # action support, the env's action-rate penalty handles smoothness.
+    # "delta" (legacy v4) = bounded per-frame delta integrator
+    # a_i = prev + max_delta*tanh(raw_i); retained for ablation only (it
+    # starved the actor of action freedom).
+    action_transform: str
+    # per-frame max delta for action_transform="delta"; None when
+    # action_transform="absolute".
+    action_max_delta: float | None
     # terminal failure cost
     failure_penalty: float
     # KL controller
@@ -355,3 +363,20 @@ def _validate(config: ExperimentConfig) -> None:
                 "SFPO parameters.advantage_normalization must be one of "
                 f"'per_prefix', 'global', 'none'; got {config.parameters.advantage_normalization!r}"
             )
+        transform = str(config.parameters.action_transform).lower()
+        if transform not in {"absolute", "delta", "residual_absolute"}:
+            raise ValueError(
+                "SFPO parameters.action_transform must be one of "
+                f"'absolute', 'delta', 'residual_absolute'; got {config.parameters.action_transform!r}"
+            )
+        if transform == "delta":
+            if config.parameters.action_max_delta is None:
+                raise ValueError(
+                    "SFPO parameters.action_max_delta must be a positive float "
+                    "when action_transform='delta'"
+                )
+            if config.parameters.action_max_delta <= 0.0:
+                raise ValueError(
+                    "SFPO parameters.action_max_delta must be > 0 when "
+                    "action_transform='delta'"
+                )

@@ -13,6 +13,7 @@ def snapshot_env_state(env) -> dict[str, torch.Tensor]:
         "episode_steps": env.episode_steps.clone(),
         "last_action": env.last_action.clone(),
         "next_push_step": env.next_push_step.clone(),
+        "first_push_step": env.first_push_step.clone(),
         "adaptive_bin_failed_count": env.adaptive_sampler.bin_failed_count.clone(),
         "adaptive_current_bin_failed_count": env.adaptive_sampler.current_bin_failed_count.clone(),
         "failure_recorded": env._failure_recorded.clone(),
@@ -37,6 +38,7 @@ def restore_env_state(env, snapshot: dict[str, torch.Tensor]) -> None:
     env.episode_steps = snapshot["episode_steps"].clone()
     env.last_action = snapshot["last_action"].clone()
     env.next_push_step = snapshot["next_push_step"].clone()
+    env.first_push_step = snapshot["first_push_step"].clone()
     sampler = env.adaptive_sampler
     sampler.bin_failed_count.copy_(snapshot["adaptive_bin_failed_count"].to(sampler.bin_failed_count))
     sampler.current_bin_failed_count.copy_(

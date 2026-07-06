@@ -159,6 +159,7 @@ def run_validation_rollout(
                     break
                 if bool(done.all()):
                     break
+        validation_first_push_step = env.first_push_step.clone()
     finally:
         env.observation_noise = original_obs_noise
         env.record_motion_failures = original_record_failures
@@ -181,6 +182,15 @@ def run_validation_rollout(
         "validation/return_mean": float(cumulative_reward.mean().item()),
         "validation/done_frac": float(done.float().mean().item()),
     }
+    _pushed = validation_first_push_step >= 0
+    _died = done & (~done_term_record["motion_complete"])
+    metrics["validation/push_applied_frac"] = float(_pushed.float().mean().item())
+    metrics["validation/died_before_push_frac"] = float((_died & ~_pushed).float().mean().item())
+    metrics["validation/pushed_then_died_frac"] = float((_died & _pushed).float().mean().item())
+    _pushed_steps = validation_first_push_step[_pushed]
+    metrics["validation/first_push_step_mean"] = (
+        float(_pushed_steps.float().mean().item()) if _pushed_steps.numel() > 0 else float("nan")
+    )
 
 
     alive_phase = 850

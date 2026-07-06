@@ -57,3 +57,11 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
         f"steps_p50={metrics.get(f'{prefix}/steps_p50', float('nan')):.0f}",
         flush=True,
     )
+    print(
+        f"[{label}_PUSH] "
+        f"push_applied={metrics.get(f'{prefix}/push_applied_frac', float('nan')):.4f} "
+        f"died_before_push={metrics.get(f'{prefix}/died_before_push_frac', float('nan')):.4f} "
+        f"pushed_then_died={metrics.get(f'{prefix}/pushed_then_died_frac', float('nan')):.4f} "
+        f"first_push_step={metrics.get(f'{prefix}/first_push_step_mean', float('nan')):.1f}",
+        flush=True,
+    )
