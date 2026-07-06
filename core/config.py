@@ -135,16 +135,27 @@ class MixGRPOConfig:
 
 @dataclass(frozen=True, slots=True)
 class SFPOConfig:
-    """Action-conditioned multi-horizon SFPO.
+    """Causal smooth-chunk SFPO (root-cause redesign).
 
-    Root-cause design for chunked-action policies:
+    Fixes the PPO/GRPO-to-chunk-flow unit mismatches:
 
-      * action-conditioned prefix-Q critic (``Q_1..Q_h``) on top of ``V(s)``;
-      * per-frame rollout storage (reward / done / failure / next critic obs);
-      * multi-horizon prefix targets ``T_k`` with an **absorbing failure
-        target** (``failure_value = -failure_penalty``) so early death can
-        never rank above survival by "saving" negative future reward;
-      * per-frame flow log-prob ratio + per-prefix PPO clip / KL.
+      * action chunk is a previous-action-conditioned smooth trajectory
+        (bounded delta from the last executed action), NOT absolute actions --
+        matches the environment's action-rate penalty contract so open-loop
+        chunk execution stays continuous;
+      * causal flow velocity over horizon: ``v_k`` only sees ``z_0..z_k`` so
+        the per-frame flow log-prob is a valid conditional density for PPO;
+      * state-only V critic (the action-conditioned Q prefix is dropped: it
+        was trained but never wired into the actor advantage);
+      * per-frame GAE advantage (frame-j unit, lambda smoothing, cross-chunk
+        propagation) instead of the multi-prefix objective
+        ``A_k = T_{k+1} - V(s_0)`` which mixed early-reward credit;
+      * per-frame PPO ratio + flat clip over the causal conditional factors;
+      * terminal failure cost: an immediate per-step penalty added to the
+        failure frame's reward with bootstrap=0 (true terminal), NOT an
+        absorbing -10 bootstrap that saturated the value distribution;
+      * KL controller updated before each minibatch optimizer step
+        (PPO-aligned) with actor epoch early-stop on prefix KL.
     """
 
     horizon: int
@@ -158,6 +169,7 @@ class SFPOConfig:
     eval_initial_noise: str
     rollout_env_steps: int
     discount_gamma: float
+    gae_lambda: float
     clip_range: float
     desired_kl: float
     policy_epochs: int
@@ -173,11 +185,16 @@ class SFPOConfig:
     empirical_normalization: bool
     init_at_random_ep_len: bool
     max_grad_norm: float
-    # action-conditioned multi-horizon
+    # causal flow policy: v_k depends only on z_0..z_k (prefix-cumsum), so
+    # logp_k is a genuine conditional density and per-frame PPO ratio is valid.
+    causal_velocity: bool
+    causal_arch: str
+    # smooth action chunk
+    action_max_delta: float
+    # terminal failure cost
     failure_penalty: float
-    q_loss_coef: float
-    q_value_clip_range: float
-    use_clipped_q_loss: bool
+    # KL controller
+    kl_early_stop_factor: float
     advantage_normalization: str
 
 

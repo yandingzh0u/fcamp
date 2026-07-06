@@ -13,6 +13,7 @@ def deterministic_sde_ode_actions(
     steps: int,
     sde_eta: float = 0.7,
     initial_noise: torch.Tensor | None = None,
+    prev_action: torch.Tensor | None = None,
 ) -> torch.Tensor:
 
     if initial_noise is None:
@@ -52,7 +53,7 @@ def deterministic_sde_ode_actions(
             sample_noise=zero_step_noise,
         )
 
-    return policy._action_transform(latent).view(
+    return policy._action_transform(latent, prev_action=prev_action).view(
         initial_noise.shape[0],
         policy.horizon,
         policy.action_dim,

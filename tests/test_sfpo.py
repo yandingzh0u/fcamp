@@ -8,7 +8,6 @@ import torch
 
 from algorithms.sfpo import SFPO
 from networks.flow_policy import FlowMatchingPolicy
-from networks.mlp_actor_critic import ActionConditionedChunkCritic
 
 
 # --------------------------------------------------------------------------- #
@@ -47,45 +46,6 @@ def test_sfpo_per_frame_log_probs_recomputed_on_policy() -> None:
     assert recomputed.shape == old_log_probs.shape
     assert recomputed.shape == (7, cfg.flow_steps, 2)
     assert torch.allclose(recomputed, old_log_probs, atol=1e-5)
-
-
-# --------------------------------------------------------------------------- #
-# Action-conditioned critic: shapes + causal masking
-# --------------------------------------------------------------------------- #
-def test_action_conditioned_critic_shapes_and_causality() -> None:
-    torch.manual_seed(1)
-    critic = ActionConditionedChunkCritic(
-        obs_dim=6, action_dim=4, horizon=4, hidden_dims=(32, 32), activation="elu"
-    )
-    obs = torch.randn(5, 6)
-    actions = torch.randn(5, 4, 4)
-
-    v = critic.evaluate_v(obs)
-    assert v.shape == (5, 1)
-    q = critic.evaluate_q_prefix(obs, actions)
-    assert q.shape == (5, 4)
-
-    # Q_k must not depend on actions a_k..a_{h-1} (causality).
-    actions2 = actions.clone()
-    actions2[:, 2:, :] = actions2[:, 2:, :] + 10.0  # perturb frames 2,3
-    q2 = critic.evaluate_q_prefix(obs, actions2)
-    # Q_1, Q_2 (prefixes 1,2 use frames 0..0 and 0..1) must be unchanged.
-    assert torch.allclose(q[:, 0], q2[:, 0], atol=1e-6)
-    assert torch.allclose(q[:, 1], q2[:, 1], atol=1e-6)
-    # Q_3, Q_4 use frame 2 -> must change.
-    assert not torch.allclose(q[:, 2], q2[:, 2], atol=1e-4)
-    assert not torch.allclose(q[:, 3], q2[:, 3], atol=1e-4)
-
-
-def test_action_conditioned_critic_rejects_bad_shapes() -> None:
-    critic = ActionConditionedChunkCritic(
-        obs_dim=6, action_dim=4, horizon=3, hidden_dims=(16,), activation="elu"
-    )
-    obs = torch.randn(5, 6)
-    with pytest.raises(ValueError):
-        critic.evaluate_q_prefix(obs, torch.randn(5, 3, 3))  # wrong horizon/action_dim
-    with pytest.raises(ValueError):
-        critic.evaluate_q_prefix(obs, torch.randn(5, 12))  # wrong ndim
 
 
 # --------------------------------------------------------------------------- #
@@ -167,14 +127,15 @@ def _build_algo(env, **overrides):
         horizon=4, rollout_env_steps=8, flow_steps=2, sde_eta=0.7, init_noise_std=0.8,
         action_squash_scale=5.0, eval_initial_noise="zero",
         actor_hidden_dims=(16, 16), critic_hidden_dims=(16, 16), activation="elu",
-        discount_gamma=0.99,
+        discount_gamma=0.99, gae_lambda=0.95,
         clip_range=0.2, desired_kl=0.01, policy_epochs=2,
         num_mini_batches=2, micro_batch_size=64, value_loss_coef=1.0,
         value_clip_range=0.2, use_clipped_value_loss=True,
         policy_lr=1e-3, value_lr=1e-3, weight_decay=0.0, critic_weight_decay=0.0,
         empirical_normalization=False, init_at_random_ep_len=False, max_grad_norm=1.0,
-        failure_penalty=10.0, q_loss_coef=1.0, q_value_clip_range=0.2,
-        use_clipped_q_loss=True, advantage_normalization="per_prefix",
+        causal_velocity=True, causal_arch="prefix_cumsum",
+        action_max_delta=0.5, failure_penalty=1.0, kl_early_stop_factor=4.0,
+        advantage_normalization="global",
     )
     base.update(overrides)
     cfg = SimpleNamespace(**base)
@@ -184,12 +145,18 @@ def _build_algo(env, **overrides):
 
 
 # --------------------------------------------------------------------------- #
-# THE core test: absorbing failure target fixes "death ranked backwards"
+# THE core test: terminal failure cost fixes "death ranked backwards"
 # --------------------------------------------------------------------------- #
-def test_absorbing_failure_target_fixes_death_ranking() -> None:
+def test_terminal_failure_cost_fixes_death_ranking() -> None:
+    """With net-negative per-step reward, a dying chunk would accumulate fewer
+    negative terms and rank ABOVE survival (the "death ranked backwards" bug).
+    The terminal failure cost (immediate penalty on the failure frame + bootstrap
+    0) must flip the ranking so the dying chunk's realized return ranks below
+    survival.
+    """
     torch.manual_seed(0)
     env = _NegativeRewardEnv(num_envs=2, reward=-0.04)
-    algo = _build_algo(env, failure_penalty=10.0)
+    algo = _build_algo(env, failure_penalty=1.0)
     obs = algo.initial_reset()
     rollout = algo.collect(obs)
 
@@ -198,44 +165,53 @@ def test_absorbing_failure_target_fixes_death_ranking() -> None:
     assert bool(rollout["failure_frame"][0, 1, 0])
     assert not bool(rollout["done_frame"][0, 0].any())
 
-    raw_env0 = float(rollout["chunk_raw_return"][0, 0].item())
-    raw_env1 = float(rollout["chunk_raw_return"][0, 1].item())
-    # BUG reproduction (raw return, no absorbing penalty): env1 dies early so it
-    # collects fewer negative rewards -> raw return ranks ABOVE env0.
-    assert raw_env1 > raw_env0, (
-        f"expected dying env1 raw return ({raw_env1}) > surviving env0 ({raw_env0})"
+    # BUG reproduction (raw return, no failure cost): env1 dies early so it
+    # collects fewer negative rewards -> masked raw return ranks ABOVE env0.
+    # Use reward_raw * alive (masked, excludes failure penalty) summed over the
+    # chunk to reproduce the original "death saves negative reward" bug.
+    gamma = 0.99
+    alive = rollout["alive_frame"][0].to(dtype=torch.float32)  # [n_envs, h]
+    reward_raw = rollout["reward_raw"][0]  # [n_envs, h]
+    gamma_pow = torch.tensor([gamma ** i for i in range(4)], dtype=torch.float32)
+    masked_raw_env0 = float((reward_raw[0] * alive[0] * gamma_pow).sum().item())
+    masked_raw_env1 = float((reward_raw[1] * alive[1] * gamma_pow).sum().item())
+    assert masked_raw_env1 > masked_raw_env0, (
+        f"expected dying env1 masked raw ({masked_raw_env1}) > surviving env0 ({masked_raw_env0})"
     )
 
     realized_env0 = float(rollout["chunk_return_realized"][0, 0].item())
     realized_env1 = float(rollout["chunk_return_realized"][0, 1].item())
-    # FIX (absorbing failure target): env1 realized return must rank BELOW env0.
+    # FIX (terminal failure cost): env1 realized return must rank BELOW env0.
     assert realized_env1 < realized_env0, (
-        f"absorbing failure failed: dying env1 realized ({realized_env1}) "
+        f"terminal failure cost failed: dying env1 realized ({realized_env1}) "
         f"must be < surviving env0 ({realized_env0})"
     )
-    # env1 realized return should be dominated by the failure penalty.
-    expected_env1 = -0.04 + 0.99 * (-10.0)  # r0 + gamma * failure_value
+    # env1: failure frame reward = r0 - failure_penalty, bootstrap = 0 (terminal).
+    expected_env1 = -0.04 - 1.0  # r0 - failure_penalty, no bootstrap
     assert abs(realized_env1 - expected_env1) < 1e-4, (
         f"env1 realized {realized_env1} ~= expected {expected_env1}"
     )
 
 
 def test_zero_failure_penalty_reproduces_ranking_bug() -> None:
-    """With failure_penalty=0, the absorbing bootstrap is 0, so a dying chunk
-    on net-negative reward still ranks above survival (the original bug). This
-    documents WHY the absorbing failure target is necessary."""
+    """With failure_penalty=0, the terminal cost is 0 and bootstrap is still 0
+    on failure, so a dying chunk on net-negative reward still ranks above
+    survival (the original bug). This documents WHY the failure cost is needed."""
     torch.manual_seed(0)
     env = _NegativeRewardEnv(num_envs=2, reward=-0.04)
     algo = _build_algo(env, failure_penalty=0.0)
     obs = algo.initial_reset()
     rollout = algo.collect(obs)
 
-    # env1 dies (failure) at frame 0 -> bootstrap b_0 = failure_value = 0.
-    # realized_env1 = r_0 + gamma * 0 = -0.04  (V-independent).
+    # env1 dies (failure) at frame 0 -> reward = r0 - 0 = -0.04, bootstrap = 0.
     realized_env1 = float(rollout["chunk_return_realized"][0, 1].item())
     assert abs(realized_env1 - (-0.04)) < 1e-4
-    # env0 survives 4 frames of -0.04 -> raw return (V-independent) = -0.1576.
-    raw_env0 = float(rollout["chunk_raw_return"][0, 0].item())
+    # env0 survives 4 frames of -0.04 -> masked raw return = -0.1576.
+    gamma = 0.99
+    alive = rollout["alive_frame"][0, 0].to(dtype=torch.float32)
+    reward_raw_env0 = rollout["reward_raw"][0, 0]
+    gamma_pow = torch.tensor([gamma ** i for i in range(4)], dtype=torch.float32)
+    raw_env0 = float((reward_raw_env0 * alive * gamma_pow).sum().item())
     assert abs(raw_env0 - (-0.04 * (1 + 0.99 + 0.99**2 + 0.99**3))) < 1e-4
     # BUG: the dying chunk's realized return (-0.04) ranks ABOVE the surviving
     # chunk's raw return (-0.1576) -- death "saves" negative reward.
@@ -281,10 +257,10 @@ def test_sfpo_collect_and_update_end_to_end() -> None:
     for k in range(h):
         assert f"sfpo/kl_frame_{k}" in metrics
         assert f"sfpo/ratio_frame_{k}" in metrics
-        assert f"critic/q_prefix_{k+1}_mean" in metrics
+        assert f"critic/frame_v_{k+1}_mean" in metrics
         assert f"critic/prefix_target_{k+1}_mean" in metrics
     # core losses finite
-    for key in ("sfpo/policy_loss", "sfpo/value_loss", "sfpo/q_loss", "sfpo/loss"):
+    for key in ("sfpo/policy_loss", "sfpo/value_loss", "sfpo/loss"):
         assert math.isfinite(metrics[key]), f"{key}={metrics[key]}"
     # update actually moved the policy
     assert metrics["policy/action_delta"] >= 0.0
@@ -317,87 +293,138 @@ def test_per_prefix_advantage_normalization() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CRITICAL: actor advantage uses the REALIZED prefix target (carrying the
-# absorbing failure bootstrap), NOT the raw Q prediction.
+# CRITICAL: actor advantage is the per-frame GAE advantage
+# (frame_v_targets - frame_values), NOT a multi-prefix objective.
 # --------------------------------------------------------------------------- #
-def test_actor_advantage_uses_realized_target_not_q() -> None:
-    """A_k = T_{k+1} - V(s), NOT Q_k - V(s).
+def test_actor_advantage_is_per_frame_gae() -> None:
+    """A_j = gae_advantages_j = frame_v_targets_j - frame_values_j.
 
-    With an untrained early critic, Q is garbage; the realized target T_k is
-    the ground truth (it carries the absorbing failure bootstrap). The actor
-    must learn from T_k - V(s), not from Q_k - V(s).
+    This is the standard PPO/GAE estimator: frame-j unit, lambda-smoothed,
+    consistent with the critic V target. Replaces d1b506c's
+    A_k = T_{k+1} - V(s_0) which mixed early-reward credit into all later
+    prefixes.
     """
     torch.manual_seed(0)
     env = _NegativeRewardEnv(num_envs=2, reward=-0.04)
-    algo = _build_algo(env, failure_penalty=10.0, advantage_normalization="none")
+    algo = _build_algo(env, failure_penalty=1.0, advantage_normalization="none")
     obs = algo.initial_reset()
     rollout = algo.collect(obs)
 
-    prefix_targets = rollout["prefix_targets"]  # [chunks, n_envs, h]
-    values_v = rollout["values_v"]  # [chunks, n_envs, 1]
-    q_prefix = rollout["q_prefix"]  # [chunks, n_envs, h]
+    frame_v_targets = rollout["frame_v_targets"]  # [chunks, n_envs, h]
+    frame_values = rollout["frame_values"]  # [chunks, n_envs, h]
     adv = rollout["advantages"]  # [chunks, n_envs, h]
     mask = rollout["valid_prefix_mask"]  # [chunks, n_envs, h]
 
-    expected = prefix_targets - values_v.expand(-1, -1, 4)
-    # On valid prefixes, advantage == realized prefix_target - V(s).
+    expected = frame_v_targets - frame_values
+    # On valid (alive) frames, advantage == per-frame GAE advantage.
     assert torch.allclose(adv[mask], expected[mask], atol=1e-5), (
-        "actor advantage must equal realized prefix_target - V(s) on valid prefixes"
+        "actor advantage must equal per-frame GAE (frame_v_targets - frame_values) on valid frames"
     )
-    # Invalid (post-death) prefixes are masked to 0.
+    # Invalid (post-death) frames are masked to 0.
     assert torch.all(adv[~mask] == 0.0)
-    # Sanity: it is NOT the Q-based advantage on valid prefixes.
-    q_based = q_prefix - values_v.expand(-1, -1, 4)
-    assert not torch.allclose(adv[mask], q_based[mask], atol=1e-5), (
-        "actor advantage must NOT be Q_prefix - V(s)"
-    )
 
 
 # --------------------------------------------------------------------------- #
-# CRITICAL: actor ratio is a PREFIX ratio (cumsum of per-frame log-ratios),
-# not a per-frame ratio. This makes the ratio consistent with the prefix
-# advantage A_k.
+# CRITICAL: with causal_velocity=True, per-frame ratio is the LEGAL form
+# because logp_k is a genuine conditional density (v_k depends only on
+# z_0..z_k). This test verifies the per-frame (non-cumsum) ratio is used.
 # --------------------------------------------------------------------------- #
-def test_prefix_ratio_is_cumsum_of_per_frame_log_ratio() -> None:
-    """Recompute the actor ratios by hand from old/new per-frame log-probs and
-    verify the update actually used the cumulative (prefix) ratio."""
+def test_actor_ratio_is_per_frame_under_causal_policy() -> None:
+    """Under causal_velocity, per-frame ratio is legal (logp_k is conditional).
+    Verify the update used per-frame (non-cumulative) ratio."""
     torch.manual_seed(0)
     env = _NegativeRewardEnv(num_envs=2, reward=0.05)
     algo = _build_algo(env, failure_penalty=2.0, advantage_normalization="none")
+    assert algo._policy.causal_velocity is True
     obs = algo.initial_reset()
     rollout = algo.collect(obs)
 
-    # Recompute new per-frame log-probs (same network state as collect).
-    from algorithms.sfpo import SFPO  # noqa: F401  (algo is already SFPO)
     raw_batch = rollout["actions"].shape[0] * rollout["actions"].shape[1]
     actor_obs = rollout["actor_obs"].reshape(raw_batch, -1)
     latent_path = rollout["latents"].reshape(raw_batch, -1, algo.chunk_dim)
     train_step_indices = rollout["train_step_indices"]
     new_log_probs = algo._compute_transition_log_probs_per_frame(
         actor_obs, latent_path, train_step_indices
-    )  # [N, steps, h]
+    )
     old_log_probs = rollout["old_log_probs"].reshape(raw_batch, -1, 4)
-    per_frame_log_ratio = (new_log_probs.sum(dim=1) - old_log_probs.sum(dim=1))  # [N, h]
-    prefix_log_ratio = torch.cumsum(per_frame_log_ratio, dim=-1)  # [N, h]
-    expected_prefix_ratio = torch.exp(prefix_log_ratio)  # [N, h]
+    per_frame_log_ratio = (new_log_probs.sum(dim=1) - old_log_probs.sum(dim=1))
+    expected_per_frame_ratio = torch.exp(per_frame_log_ratio)
 
-    # The diagnostic sfpo/ratio_frame_k records the prefix ratio used in the
-    # loss. Recompute its mean over valid prefixes and compare to the expected.
     mask = rollout["valid_prefix_mask"].reshape(raw_batch, 4).to(dtype=torch.float32)
     for k in range(4):
-        col = expected_prefix_ratio[:, k][mask[:, k] > 0]
+        col = expected_per_frame_ratio[:, k][mask[:, k] > 0]
         if col.numel() == 0:
             continue
-        # ratio == 1.0 exactly because the network is unchanged between collect
-        # and this recompute (same parameters). Verify the cumsum structure:
-        # prefix ratio_k == product of per-frame ratios 0..k.
-        per_frame_ratio = torch.exp(per_frame_log_ratio)
-        product_form = torch.ones_like(col)
-        for j in range(k + 1):
-            product_form = product_form * per_frame_ratio[:, j][mask[:, k] > 0]
-        assert torch.allclose(col, product_form, atol=1e-5), (
-            f"prefix ratio k={k} must equal product of per-frame ratios 0..{k}"
+        assert torch.allclose(col, torch.exp(per_frame_log_ratio[:, k][mask[:, k] > 0]), atol=1e-5), (
+            f"per-frame ratio k={k} must equal exp(per_frame_log_ratio_{k})"
         )
+
+
+# --------------------------------------------------------------------------- #
+# CAUSAL HARD TESTS: v_k / logp_k / a_k must NOT depend on future latents j>k.
+# These fail on full-chunk MLP (causal_velocity=False) and pass on causal.
+# --------------------------------------------------------------------------- #
+def _causal_grad_leak(policy, target: str, frame_k: int, horizon: int = 4, action_dim: int = 3) -> float:
+    """Return max |grad| of (logp_k or a_k) w.r.t. future noise frames j>k."""
+    torch.manual_seed(0)
+    from networks.flow_sampling import flow_grpo_step_per_frame
+    obs = torch.randn(2, policy.obs_dim)
+    noise = torch.randn(2, policy.chunk_dim, requires_grad=True)
+    sde_noise = torch.randn(2, 3, policy.chunk_dim)
+    sigma_schedule = torch.linspace(1.0, 0.0, 4, dtype=noise.dtype)
+    latent = noise * 0.8
+    t_batch = torch.full((2,), 1.0, dtype=noise.dtype)
+    model_out = policy.velocity_field(obs, latent, t_batch)
+    new_latent, logp = flow_grpo_step_per_frame(
+        model_output=model_out, latents=latent, sigmas=sigma_schedule, index=0,
+        eta=0.7, sample_noise=sde_noise[:, 0], horizon=horizon, action_dim=action_dim,
+    )
+    noise.grad = None
+    if target == "logp":
+        logp[0, frame_k].sum().backward(retain_graph=True)
+    elif target == "action":
+        actions = policy._action_transform(new_latent[0], prev_action=torch.zeros(action_dim))
+        actions = actions.view(horizon, action_dim)
+        actions[frame_k].sum().backward(retain_graph=True)
+    else:
+        raise ValueError(f"unknown target: {target}")
+    g = noise.grad[0]
+    # future frames = cols [(k+1)*A : ]
+    future = g[(frame_k + 1) * action_dim:]
+    return float(future.abs().max().item()) if future.numel() > 0 else 0.0
+
+
+def test_causal_logp_no_future_gradient_leak() -> None:
+    """∂logp_k / ∂z_j = 0 for j > k (causal conditional density)."""
+    from networks.flow_policy import FlowMatchingPolicy
+    pol = FlowMatchingPolicy(obs_dim=5, action_dim=3, horizon=4, hidden_dims=(16, 16),
+                             activation="elu", action_squash_scale=5.0, causal_velocity=True)
+    pol.set_action_max_delta(0.5)
+    for k in range(3):  # frame 3 has no future
+        leak = _causal_grad_leak(pol, "logp", k)
+        assert leak <= 1e-6, f"causal logp frame {k} leaks future grad: {leak}"
+
+
+def test_causal_action_no_future_gradient_leak() -> None:
+    """∂a_k / ∂z_j = 0 for j > k (direct-delta is causal by construction)."""
+    from networks.flow_policy import FlowMatchingPolicy
+    pol = FlowMatchingPolicy(obs_dim=5, action_dim=3, horizon=4, hidden_dims=(16, 16),
+                             activation="elu", action_squash_scale=5.0, causal_velocity=True)
+    pol.set_action_max_delta(0.5)
+    for k in range(3):
+        leak = _causal_grad_leak(pol, "action", k)
+        assert leak <= 1e-6, f"causal action frame {k} leaks future grad: {leak}"
+
+
+def test_full_mlp_logp_DOES_leak_future_gradient() -> None:
+    """Sanity: the non-causal full-MLP policy DOES leak future gradient.
+    This documents why causal_velocity is necessary for per-frame PPO."""
+    from networks.flow_policy import FlowMatchingPolicy
+    pol = FlowMatchingPolicy(obs_dim=5, action_dim=3, horizon=4, hidden_dims=(16, 16),
+                             activation="elu", action_squash_scale=5.0, causal_velocity=False)
+    pol.set_action_max_delta(0.5)
+    leak = _causal_grad_leak(pol, "logp", 0)
+    assert leak > 1e-4, f"full MLP should leak future grad, got {leak}"
 
 
 # --------------------------------------------------------------------------- #
