@@ -49,9 +49,10 @@ from torch import nn
 from algorithms.base import Algorithm
 from algorithms.kl_scheduler import adaptive_lr_from_kl
 from networks.flow_inference import deterministic_sde_ode_actions
+from networks.flow_critic import FlowChunkValueCritic
 from networks.flow_policy import FlowMatchingPolicy
 from networks.flow_sampling import flow_grpo_step, flow_grpo_step_per_frame
-from networks.mlp_actor_critic import Critic, EmpiricalNormalization
+from networks.mlp_actor_critic import EmpiricalNormalization
 
 
 class SFPO(Algorithm):
@@ -126,7 +127,16 @@ class SFPO(Algorithm):
                 torch.full((self.horizon_h, self.num_act), init_log_std, device=env.device)
             )
             self._policy.action_log_std.requires_grad_(self.action_std_trainable)
-        self.critic = Critic(self.critic_obs_dim, tuple(cfg.critic_hidden_dims), cfg.activation).to(env.device)
+        self.flow_critic_steps = int(getattr(cfg, "flow_critic_steps", cfg.flow_steps))
+        self.flow_critic_samples = int(getattr(cfg, "flow_critic_samples", 4))
+        self.flow_critic_fm_samples = int(getattr(cfg, "flow_critic_fm_samples", 1))
+        self.critic = FlowChunkValueCritic(
+            self.critic_obs_dim,
+            tuple(cfg.critic_hidden_dims),
+            cfg.activation,
+            flow_steps=self.flow_critic_steps,
+            eval_samples=self.flow_critic_samples,
+        ).to(env.device)
         self.chunk_dim = self._policy.chunk_dim
 
         self.empirical_normalization = bool(cfg.empirical_normalization)
@@ -958,7 +968,6 @@ class SFPO(Algorithm):
         old_action_mean = rollout["old_action_mean"].reshape(raw_batch_size, h, self.num_act)
         old_action_std = rollout["old_action_std"].reshape(raw_batch_size, h, self.num_act)
         prev_action = rollout["prev_action"].reshape(raw_batch_size, self.num_act)
-        old_chunk_values = rollout["chunk_values"].reshape(raw_batch_size)
         chunk_v_targets = rollout["chunk_v_targets"].reshape(raw_batch_size)
         advantages = rollout["advantages"].reshape(raw_batch_size, h)
         raw_gae_advantages = rollout["raw_gae_advantages"].reshape(raw_batch_size, h)
@@ -968,8 +977,6 @@ class SFPO(Algorithm):
 
         mini_batch_size = self._policy_mini_batch_size(batch_size)
         clip_range = float(self.cfg.clip_range)
-        value_clip = float(self.cfg.value_clip_range)
-        use_clipped_value_loss = bool(self.cfg.use_clipped_value_loss)
         value_coef = float(self.cfg.value_loss_coef)
         train_step_indices = rollout["train_step_indices"]
 
@@ -1077,20 +1084,17 @@ class SFPO(Algorithm):
                     policy_loss_per = torch.maximum(unclipped, clipped)  # [micro, h]
                     policy_loss = (policy_loss_per * mask).sum() / mask_sum
 
-                    # Chunk critic loss: V predicts chunk-start value targets.
+                    # Chunk critic loss: flow V models f366's chunk-GAE value
+                    # targets. Actor credit remains the original cross-chunk
+                    # GAE; only the critic function class changes.
                     critic_obs_sub = critic_obs[sub]  # [micro, D]
-                    value = self.critic.evaluate(critic_obs_sub).reshape(-1)
-                    chunk_mask = chunk_valid_mask[sub].to(dtype=value.dtype)
+                    chunk_mask = chunk_valid_mask[sub].to(dtype=critic_obs_sub.dtype)
                     chunk_mask_sum = chunk_mask.sum().clamp(min=1.0)
-                    if use_clipped_value_loss:
-                        value_clipped = old_chunk_values[sub] + (value - old_chunk_values[sub]).clamp(
-                            -value_clip, value_clip
-                        )
-                        value_losses = (value - chunk_v_targets[sub]).pow(2)
-                        value_losses_clipped = (value_clipped - chunk_v_targets[sub]).pow(2)
-                        value_loss_per = torch.max(value_losses, value_losses_clipped)
-                    else:
-                        value_loss_per = (chunk_v_targets[sub] - value).pow(2)
+                    value_loss_per = self.critic.flow_matching_loss_v(
+                        critic_obs_sub,
+                        chunk_v_targets[sub],
+                        fm_samples=self.flow_critic_fm_samples,
+                    )
                     value_loss = (value_loss_per * chunk_mask).sum() / chunk_mask_sum
 
                     # When the KL early-stop has frozen the actor, only the
@@ -1591,7 +1595,7 @@ class SFPO(Algorithm):
             flush=True,
         )
         print(
-            f"[CRITIC] unit=chunk V={metrics['critic/chunk_v_mean']:.4f} "
+            f"[CRITIC] unit=flow_chunk_gae V={metrics['critic/chunk_v_mean']:.4f} "
             f"V_tgt={metrics['critic/chunk_v_target_mean']:.4f} "
             f"one_step={metrics['critic/chunk_one_step_target_mean']:.4f} "
             f"boot={metrics['critic/chunk_bootstrap_mean']:.4f} "
@@ -1700,7 +1704,7 @@ class SFPO(Algorithm):
     def log_banner(self) -> None:
         cfg = self.cfg
         env = self.env
-        print("[INFO] Starting SFPO training (smooth action chunk + chunk GAE + chunk-start V)", flush=True)
+        print("[INFO] Starting SFPO training (smooth action chunk + chunk GAE + flow chunk-start V)", flush=True)
         print(
             f"[INFO] task={env.task.name} terrain={env.task.terrain} motion_file={env.task.motion_file}",
             flush=True,
@@ -1719,7 +1723,7 @@ class SFPO(Algorithm):
             else (f"{float(_amd):.3f}" if _amd is not None else "none")
         )
         print(
-            f"[INFO] critic_unit=chunk_start state_only_critic=True prefix_q=False "
+            f"[INFO] critic_unit=flow_chunk_start state_only_critic=True prefix_q=False "
             f"causal_velocity={self._policy.causal_velocity} causal_arch={self._policy.causal_arch} "
             f"action_transform={self.action_transform} action_max_delta={_amd_str} "
             f"actor_density={self.actor_density} action_noise_std={self.action_noise_std} "
@@ -1732,6 +1736,9 @@ class SFPO(Algorithm):
             f"advantage_norm={cfg.advantage_normalization} "
             f"gamma={cfg.discount_gamma} gae_lambda={float(getattr(cfg, 'gae_lambda', 0.95)):.3f} "
             f"cross_chunk_gae=True td_bootstrap_unit=chunk "
+            f"flow_value_loss=True flow_critic_steps={self.flow_critic_steps} "
+            f"flow_critic_samples={self.flow_critic_samples} "
+            f"flow_critic_fm_samples={self.flow_critic_fm_samples} "
             f"chunk_gamma={float(cfg.discount_gamma) ** int(cfg.horizon):.6f}",
             flush=True,
         )
@@ -1744,7 +1751,7 @@ class SFPO(Algorithm):
         print(
             f"[INFO] policy_epochs={cfg.policy_epochs} clip_range={cfg.clip_range} "
             f"desired_kl={cfg.desired_kl} value_loss_coef={cfg.value_loss_coef} "
-            f"use_clipped_value_loss={cfg.use_clipped_value_loss} "
+            f"use_clipped_value_loss=ignored_by_flow_critic "
             f"num_mini_batches={cfg.num_mini_batches} micro_batch={cfg.micro_batch_size} "
             f"policy_lr={cfg.policy_lr} critic_lr={cfg.value_lr}",
             flush=True,

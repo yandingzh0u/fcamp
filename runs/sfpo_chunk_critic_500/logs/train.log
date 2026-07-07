@@ -659,3 +659,237 @@
 [FRAME_DIAG] frame0_abs=1.4641 frame1_abs=1.4856 in_chunk_delta=0.2403 cross_chunk_delta=0.3616
 [TRAIN_COST] action_rate=4.08163 joint_limit=0.01103 contacts=1.57339 | weighted act_rate=-0.00816 contacts=-0.00315 pos=0.04991 penalty=-0.01352 total=0.03639
 [RETURN_SPLIT] env_raw=0.14268 target_raw=0.14268 failure_cost=0.00000 realized=2.66218
+[UPDATE] 380/500 reward_step=0.03690 env_raw=0.14468 target_raw=0.14468 done_frac=0.01453 mean_reward=10.89005 mean_len=290.71
+[SFPO] loss=0.10602 policy=-0.00403 value=0.11004 ratio=0.9994 [0.204,5.049] clip=0.1986 kl_raw=0.015248 kl/step=0.015248 target/step=0.0100 kl_units=1 grad=1.1411 grad_c=0.3993 lr=0.000133 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=2.7139 V_tgt=2.7253 one_step=2.7179 boot=2.5733 adv=0.0114/0.3380 cont=0.9855 valid_pfx=0.9957 death_frame=3.968 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0115 raw_adv_std=0.3374 | V1=2.7139 V2=2.7263 V3=2.7330 V4=2.7300 | T1=2.7228 T2=2.7413 T3=2.7500 T4=2.7413
+[KL_FRAME] f0=0.031157 f1=0.016343 f2=0.008130 f3=0.005239 clip0=0.3835 adv0=0.6205
+[ROLLOUT] live=3.98 survive=0.92981 per_step=0.03614 episode_projection=18.07
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.12591 old_logp=-5.77000 new_logp=-5.78593 sde_steps=4 action_std=0.3001
+[TRAIN] mean_reward=10.89005 mean_len=290.71 recent_eps=100 completed_eps=2003196
+[UPDATE_EFFECT] action_delta=0.01346358 param_rms_delta=0.00023074
+[TIME] collect=3.563s update=1.311s
+[DONE] timeout=0.01697 anchor_pos=0.00720 anchor_ori=0.00342 ee_body=0.06580
+[TRACK_ROLLOUT] anchor_pos=0.49598 anchor_ori=0.68062 body_pos=0.87738 body_ori=0.30354 body_lin=0.49317 body_ang=0.26014
+[ACT_SUMMARY] abs_mean=1.4796 abs_p95=2.1796 abs_p99=2.4515 abs_max=3.1983 legs=1.2346 waist=0.7540 arms=1.8451
+[FRAME_DIAG] frame0_abs=1.4395 frame1_abs=1.4600 in_chunk_delta=0.2406 cross_chunk_delta=0.3615
+[TRAIN_COST] action_rate=4.05551 joint_limit=0.01149 contacts=1.57024 | weighted act_rate=-0.00811 contacts=-0.00314 pos=0.05045 penalty=-0.01355 total=0.03690
+[RETURN_SPLIT] env_raw=0.14468 target_raw=0.14468 failure_cost=0.00000 realized=2.71794
+[UPDATE] 390/500 reward_step=0.03676 env_raw=0.14416 target_raw=0.14416 done_frac=0.01404 mean_reward=10.05046 mean_len=269.47
+[SFPO] loss=0.10974 policy=-0.00589 value=0.11563 ratio=0.9995 [0.178,4.717] clip=0.1768 kl_raw=0.013306 kl/step=0.013306 target/step=0.0100 kl_units=1 grad=1.1493 grad_c=0.6001 lr=0.000133 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=2.8016 V_tgt=2.8025 one_step=2.8025 boot=2.6584 adv=0.0010/0.3447 cont=0.9860 valid_pfx=0.9958 death_frame=3.969 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0013 raw_adv_std=0.3438 | V1=2.8016 V2=2.8143 V3=2.8204 V4=2.8175 | T1=2.8100 T2=2.8259 T3=2.8348 T4=2.8261
+[KL_FRAME] f0=0.027034 f1=0.014264 f2=0.007218 f3=0.004601 clip0=0.3494 adv0=0.6071
+[ROLLOUT] live=3.98 survive=0.93420 per_step=0.03601 episode_projection=18.01
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.11721 old_logp=-5.59663 new_logp=-5.61044 sde_steps=4 action_std=0.2984
+[TRAIN] mean_reward=10.05046 mean_len=269.47 recent_eps=100 completed_eps=2010101
+[UPDATE_EFFECT] action_delta=0.01443677 param_rms_delta=0.00022309
+[TIME] collect=3.413s update=1.318s
+[DONE] timeout=0.01855 anchor_pos=0.00806 anchor_ori=0.00195 ee_body=0.06250
+[TRACK_ROLLOUT] anchor_pos=0.48628 anchor_ori=0.68871 body_pos=0.87686 body_ori=0.30185 body_lin=0.48958 body_ang=0.26077
+[ACT_SUMMARY] abs_mean=1.4898 abs_p95=2.1724 abs_p99=2.4238 abs_max=3.1642 legs=1.2279 waist=0.7500 arms=1.8729
+[FRAME_DIAG] frame0_abs=1.4492 frame1_abs=1.4702 in_chunk_delta=0.2391 cross_chunk_delta=0.3611
+[TRAIN_COST] action_rate=4.04683 joint_limit=0.01168 contacts=1.56919 | weighted act_rate=-0.00809 contacts=-0.00314 pos=0.05033 penalty=-0.01357 total=0.03676
+[RETURN_SPLIT] env_raw=0.14416 target_raw=0.14416 failure_cost=0.00000 realized=2.80253
+[UPDATE] 400/500 reward_step=0.03746 env_raw=0.14693 target_raw=0.14693 done_frac=0.01412 mean_reward=10.29510 mean_len=281.81
+[SFPO] loss=0.10913 policy=-0.00496 value=0.11409 ratio=0.9992 [0.207,3.394] clip=0.1954 kl_raw=0.014512 kl/step=0.014512 target/step=0.0100 kl_units=1 grad=1.1436 grad_c=0.4296 lr=0.000133 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=2.8727 V_tgt=2.8772 one_step=2.8748 boot=2.7279 adv=0.0045/0.3437 cont=0.9859 valid_pfx=0.9961 death_frame=3.970 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0048 raw_adv_std=0.3428 | V1=2.8727 V2=2.8822 V3=2.8901 V4=2.8890 | T1=2.8788 T2=2.8950 T3=2.9066 T4=2.8974
+[KL_FRAME] f0=0.028312 f1=0.015305 f2=0.008354 f3=0.005982 clip0=0.3624 adv0=0.6019
+[ROLLOUT] live=3.98 survive=0.93787 per_step=0.03671 episode_projection=18.35
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.12412 old_logp=-5.40000 new_logp=-5.41535 sde_steps=4 action_std=0.2965
+[TRAIN] mean_reward=10.29510 mean_len=281.81 recent_eps=100 completed_eps=2016806
+[UPDATE_EFFECT] action_delta=0.01474003 param_rms_delta=0.00022336
+[TIME] collect=3.518s update=1.283s
+[DONE] timeout=0.02295 anchor_pos=0.00696 anchor_ori=0.00269 ee_body=0.05835
+[TRACK_ROLLOUT] anchor_pos=0.49450 anchor_ori=0.69351 body_pos=0.88242 body_ori=0.31147 body_lin=0.49435 body_ang=0.26321
+[ACT_SUMMARY] abs_mean=1.4761 abs_p95=2.1609 abs_p99=2.4129 abs_max=3.1123 legs=1.2253 waist=0.7448 arms=1.8477
+[FRAME_DIAG] frame0_abs=1.4348 frame1_abs=1.4571 in_chunk_delta=0.2385 cross_chunk_delta=0.3626
+[TRAIN_COST] action_rate=4.04601 joint_limit=0.01111 contacts=1.56723 | weighted act_rate=-0.00809 contacts=-0.00313 pos=0.05091 penalty=-0.01345 total=0.03746
+[RETURN_SPLIT] env_raw=0.14693 target_raw=0.14693 failure_cost=0.00000 realized=2.87480
+[VALIDATION_START] update=400 max_steps=500 envs=8192 fixed_seed=disabled
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.004s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.176s
+[VALIDATION_PROGRESS] step=50/500 done=0.03528 alive=0.96472 elapsed=6.150s
+[VALIDATION_PROGRESS] step=100/500 done=0.10901 alive=0.89099 elapsed=12.807s
+[VALIDATION_PROGRESS] step=150/500 done=0.19556 alive=0.80444 elapsed=19.435s
+[VALIDATION_PROGRESS] step=200/500 done=0.22485 alive=0.77515 elapsed=26.068s
+[VALIDATION_PROGRESS] step=250/500 done=0.23450 alive=0.76550 elapsed=32.855s
+[VALIDATION_PROGRESS] step=300/500 done=0.24036 alive=0.75964 elapsed=39.412s
+[VALIDATION_PROGRESS] step=325/500 done=1.00000 alive=0.00000 elapsed=42.861s
+[VALIDATION_EARLY_STOP] step=325 done_frac=1.0000
+[VALIDATION_DONE] update=400 time=42.871s
+[VAL] steps_mean=273.15 steps_min=15 steps_p50=325 steps_p95=325 steps_max=325 fail_phase_mean=272.2 return=15.69818 done=1.00000
+[VAL_EE] left_ankle_bad=0.00317 left_ankle_z=0.04389 right_ankle_bad=0.04114 right_ankle_z=0.04744 left_wrist_bad=0.08521 left_wrist_z=0.08617 right_wrist_bad=0.08533 right_wrist_z=0.07412
+[VAL_CAUSE] anchor_pos_bad=0.04810 anchor_ori_bad=0.00256 ee_body_bad=0.20593 time_out=0.00000 anchor_z=0.08928 anchor_grav=0.13276 ee_z_max=0.11073 ee_z_mean=0.06290
+[VAL_WALL] alive@850=0.7572 motion_complete=0.7572 wrist_fail_825_840=0.0000 steps_p50=325
+[VAL_PUSH] push_applied=1.0000 died_before_push=0.0000 pushed_then_died=0.2428 first_push_step=99.7
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/sfpo_chunk_critic_500/checkpoints/update_0400.pt
+[UPDATE] 410/500 reward_step=0.03777 env_raw=0.14821 target_raw=0.14821 done_frac=0.01300 mean_reward=11.80715 mean_len=316.33
+[SFPO] loss=0.10618 policy=-0.00590 value=0.11208 ratio=0.9993 [0.176,4.392] clip=0.1840 kl_raw=0.013781 kl/step=0.013781 target/step=0.0100 kl_units=1 grad=1.1962 grad_c=0.5716 lr=0.000133 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=2.9350 V_tgt=2.9388 one_step=2.9364 boot=2.7882 adv=0.0039/0.3403 cont=0.9870 valid_pfx=0.9964 death_frame=3.973 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0041 raw_adv_std=0.3391 | V1=2.9350 V2=2.9444 V3=2.9499 V4=2.9497 | T1=2.9410 T2=2.9561 T3=2.9649 T4=2.9584
+[KL_FRAME] f0=0.027539 f1=0.014595 f2=0.007699 f3=0.005203 clip0=0.3561 adv0=0.5928
+[ROLLOUT] live=3.99 survive=0.94287 per_step=0.03703 episode_projection=18.52
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.12049 old_logp=-5.19582 new_logp=-5.21034 sde_steps=4 action_std=0.2947
+[TRAIN] mean_reward=11.80715 mean_len=316.33 recent_eps=100 completed_eps=2023344
+[UPDATE_EFFECT] action_delta=0.01417410 param_rms_delta=0.00022060
+[TIME] collect=3.693s update=1.304s
+[DONE] timeout=0.02112 anchor_pos=0.00647 anchor_ori=0.00244 ee_body=0.05408
+[TRACK_ROLLOUT] anchor_pos=0.49637 anchor_ori=0.69489 body_pos=0.88495 body_ori=0.31557 body_lin=0.49837 body_ang=0.26757
+[ACT_SUMMARY] abs_mean=1.4809 abs_p95=2.1528 abs_p99=2.4059 abs_max=3.0296 legs=1.2343 waist=0.7449 arms=1.8499
+[FRAME_DIAG] frame0_abs=1.4408 frame1_abs=1.4620 in_chunk_delta=0.2378 cross_chunk_delta=0.3599
+[TRAIN_COST] action_rate=4.01140 joint_limit=0.01115 contacts=1.60740 | weighted act_rate=-0.00802 contacts=-0.00321 pos=0.05124 penalty=-0.01347 total=0.03777
+[RETURN_SPLIT] env_raw=0.14821 target_raw=0.14821 failure_cost=0.00000 realized=2.93640
+[UPDATE] 420/500 reward_step=0.03821 env_raw=0.15002 target_raw=0.15002 done_frac=0.01202 mean_reward=12.31080 mean_len=320.35
+[SFPO] loss=0.10822 policy=-0.00452 value=0.11274 ratio=0.9998 [0.224,4.276] clip=0.2020 kl_raw=0.015359 kl/step=0.015359 target/step=0.0100 kl_units=1 grad=1.1650 grad_c=0.4567 lr=0.000133 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=3.0165 V_tgt=3.0186 one_step=3.0176 boot=2.8676 adv=0.0021/0.3417 cont=0.9880 valid_pfx=0.9970 death_frame=3.976 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0022 raw_adv_std=0.3409 | V1=3.0165 V2=3.0234 V3=3.0291 V4=3.0277 | T1=3.0209 T2=3.0349 T3=3.0443 T4=3.0358
+[KL_FRAME] f0=0.030688 f1=0.016283 f2=0.008675 f3=0.005709 clip0=0.3777 adv0=0.5815
+[ROLLOUT] live=3.99 survive=0.95288 per_step=0.03748 episode_projection=18.74
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.12678 old_logp=-5.01190 new_logp=-5.02747 sde_steps=4 action_std=0.2931
+[TRAIN] mean_reward=12.31080 mean_len=320.35 recent_eps=100 completed_eps=2029621
+[UPDATE_EFFECT] action_delta=0.01512749 param_rms_delta=0.00022577
+[TIME] collect=3.642s update=1.291s
+[DONE] timeout=0.02527 anchor_pos=0.00635 anchor_ori=0.00220 ee_body=0.04395
+[TRACK_ROLLOUT] anchor_pos=0.49490 anchor_ori=0.69856 body_pos=0.88780 body_ori=0.32128 body_lin=0.50151 body_ang=0.27416
+[ACT_SUMMARY] abs_mean=1.4725 abs_p95=2.1399 abs_p99=2.3938 abs_max=3.2314 legs=1.2440 waist=0.7417 arms=1.8250
+[FRAME_DIAG] frame0_abs=1.4326 frame1_abs=1.4542 in_chunk_delta=0.2367 cross_chunk_delta=0.3579
+[TRAIN_COST] action_rate=3.96656 joint_limit=0.01100 contacts=1.64303 | weighted act_rate=-0.00793 contacts=-0.00329 pos=0.05163 penalty=-0.01342 total=0.03821
+[RETURN_SPLIT] env_raw=0.15002 target_raw=0.15002 failure_cost=0.00000 realized=3.01762
+[UPDATE] 430/500 reward_step=0.03844 env_raw=0.15092 target_raw=0.15092 done_frac=0.01166 mean_reward=11.71367 mean_len=308.16
+[SFPO] loss=0.10849 policy=-0.00500 value=0.11349 ratio=0.9997 [0.201,3.642] clip=0.1948 kl_raw=0.014695 kl/step=0.014695 target/step=0.0100 kl_units=1 grad=1.2179 grad_c=0.4660 lr=0.000133 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=3.0825 V_tgt=3.0901 one_step=3.0859 boot=2.9350 adv=0.0076/0.3424 cont=0.9883 valid_pfx=0.9970 death_frame=3.976 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0077 raw_adv_std=0.3417 | V1=3.0825 V2=3.0912 V3=3.0981 V4=3.0971 | T1=3.0877 T2=3.1031 T3=3.1116 T4=3.1049
+[KL_FRAME] f0=0.029641 f1=0.015722 f2=0.008159 f3=0.005176 clip0=0.3736 adv0=0.5823
+[ROLLOUT] live=3.99 survive=0.95386 per_step=0.03771 episode_projection=18.85
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.12432 old_logp=-4.87062 new_logp=-4.88571 sde_steps=4 action_std=0.2915
+[TRAIN] mean_reward=11.71367 mean_len=308.16 recent_eps=100 completed_eps=2035740
+[UPDATE_EFFECT] action_delta=0.01437904 param_rms_delta=0.00021871
+[TIME] collect=3.404s update=1.273s
+[DONE] timeout=0.02429 anchor_pos=0.00598 anchor_ori=0.00208 ee_body=0.04346
+[TRACK_ROLLOUT] anchor_pos=0.50281 anchor_ori=0.69627 body_pos=0.88971 body_ori=0.32308 body_lin=0.50249 body_ang=0.27459
+[ACT_SUMMARY] abs_mean=1.4603 abs_p95=2.1177 abs_p99=2.3366 abs_max=3.1500 legs=1.2475 waist=0.7460 arms=1.7959
+[FRAME_DIAG] frame0_abs=1.4200 frame1_abs=1.4414 in_chunk_delta=0.2369 cross_chunk_delta=0.3591
+[TRAIN_COST] action_rate=3.97021 joint_limit=0.01059 contacts=1.64395 | weighted act_rate=-0.00794 contacts=-0.00329 pos=0.05179 penalty=-0.01335 total=0.03844
+[RETURN_SPLIT] env_raw=0.15092 target_raw=0.15092 failure_cost=0.00000 realized=3.08591
+[UPDATE] 440/500 reward_step=0.03892 env_raw=0.15274 target_raw=0.15274 done_frac=0.01292 mean_reward=12.02524 mean_len=317.51
+[SFPO] loss=0.10923 policy=-0.00502 value=0.11425 ratio=0.9998 [0.197,5.769] clip=0.2076 kl_raw=0.015860 kl/step=0.015860 target/step=0.0100 kl_units=1 grad=1.2251 grad_c=0.6419 lr=0.000133 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=3.1567 V_tgt=3.1609 one_step=3.1586 boot=3.0058 adv=0.0042/0.3428 cont=0.9871 valid_pfx=0.9967 death_frame=3.974 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0045 raw_adv_std=0.3418 | V1=3.1567 V2=3.1695 V3=3.1783 V4=3.1777 | T1=3.1646 T2=3.1816 T3=3.1912 T4=3.1795
+[KL_FRAME] f0=0.031729 f1=0.016867 f2=0.008956 f3=0.005795 clip0=0.3859 adv0=0.5714
+[ROLLOUT] live=3.99 survive=0.94934 per_step=0.03816 episode_projection=19.08
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.12906 old_logp=-4.70024 new_logp=-4.71634 sde_steps=4 action_std=0.2900
+[TRAIN] mean_reward=12.02524 mean_len=317.51 recent_eps=100 completed_eps=2041825
+[UPDATE_EFFECT] action_delta=0.01470434 param_rms_delta=0.00022126
+[TIME] collect=3.349s update=1.274s
+[DONE] timeout=0.02722 anchor_pos=0.00659 anchor_ori=0.00354 ee_body=0.04736
+[TRACK_ROLLOUT] anchor_pos=0.51156 anchor_ori=0.70038 body_pos=0.88920 body_ori=0.32962 body_lin=0.50457 body_ang=0.27599
+[ACT_SUMMARY] abs_mean=1.4578 abs_p95=2.1094 abs_p99=2.3165 abs_max=3.0495 legs=1.2313 waist=0.7458 arms=1.8044
+[FRAME_DIAG] frame0_abs=1.4179 frame1_abs=1.4383 in_chunk_delta=0.2363 cross_chunk_delta=0.3596
+[TRAIN_COST] action_rate=3.97543 joint_limit=0.01010 contacts=1.61022 | weighted act_rate=-0.00795 contacts=-0.00322 pos=0.05211 penalty=-0.01319 total=0.03892
+[RETURN_SPLIT] env_raw=0.15274 target_raw=0.15274 failure_cost=0.00000 realized=3.15856
+[UPDATE] 450/500 reward_step=0.03941 env_raw=0.15474 target_raw=0.15474 done_frac=0.01235 mean_reward=14.15311 mean_len=364.35
+[SFPO] loss=0.09538 policy=-0.00504 value=0.10042 ratio=1.0003 [0.168,4.054] clip=0.2043 kl_raw=0.015513 kl/step=0.015513 target/step=0.0100 kl_units=1 grad=1.1838 grad_c=0.3213 lr=0.000133 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=3.2257 V_tgt=3.2309 one_step=3.2282 boot=3.0735 adv=0.0053/0.3233 cont=0.9877 valid_pfx=0.9972 death_frame=3.976 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0054 raw_adv_std=0.3227 | V1=3.2257 V2=3.2351 V3=3.2410 V4=3.2400 | T1=3.2314 T2=3.2448 T3=3.2540 T4=3.2464
+[KL_FRAME] f0=0.030904 f1=0.016574 f2=0.008740 f3=0.005755 clip0=0.3815 adv0=0.5592
+[ROLLOUT] live=3.99 survive=0.95654 per_step=0.03866 episode_projection=19.33
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.12773 old_logp=-4.52360 new_logp=-4.53894 sde_steps=4 action_std=0.2885
+[TRAIN] mean_reward=14.15311 mean_len=364.35 recent_eps=100 completed_eps=2047596
+[UPDATE_EFFECT] action_delta=0.01454434 param_rms_delta=0.00022384
+[TIME] collect=3.463s update=1.269s
+[DONE] timeout=0.03052 anchor_pos=0.00623 anchor_ori=0.00183 ee_body=0.04041
+[TRACK_ROLLOUT] anchor_pos=0.50561 anchor_ori=0.71113 body_pos=0.89069 body_ori=0.32985 body_lin=0.51446 body_ang=0.28482
+[ACT_SUMMARY] abs_mean=1.4770 abs_p95=2.1143 abs_p99=2.3266 abs_max=3.1471 legs=1.2484 waist=0.7339 arms=1.8321
+[FRAME_DIAG] frame0_abs=1.4374 frame1_abs=1.4576 in_chunk_delta=0.2334 cross_chunk_delta=0.3548
+[TRAIN_COST] action_rate=3.89527 joint_limit=0.01017 contacts=1.66641 | weighted act_rate=-0.00779 contacts=-0.00333 pos=0.05256 penalty=-0.01316 total=0.03941
+[RETURN_SPLIT] env_raw=0.15474 target_raw=0.15474 failure_cost=0.00000 realized=3.22822
+[UPDATE] 460/500 reward_step=0.03947 env_raw=0.15508 target_raw=0.15508 done_frac=0.01088 mean_reward=15.13940 mean_len=383.16
+[SFPO] loss=0.10088 policy=-0.00542 value=0.10631 ratio=0.9997 [0.217,7.532] clip=0.2115 kl_raw=0.016175 kl/step=0.016175 target/step=0.0100 kl_units=1 grad=1.1732 grad_c=0.4789 lr=0.000133 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=3.1783 V_tgt=3.1935 one_step=3.1844 boot=3.0293 adv=0.0152/0.3323 cont=0.9891 valid_pfx=0.9977 death_frame=3.980 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0154 raw_adv_std=0.3316 | V1=3.1783 V2=3.1860 V3=3.1912 V4=3.1910 | T1=3.1841 T2=3.1977 T3=3.2070 T4=3.1995
+[KL_FRAME] f0=0.032266 f1=0.017651 f2=0.009052 f3=0.005664 clip0=0.3910 adv0=0.5609
+[ROLLOUT] live=3.99 survive=0.96191 per_step=0.03875 episode_projection=19.37
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.13015 old_logp=-4.35315 new_logp=-4.36968 sde_steps=4 action_std=0.2868
+[TRAIN] mean_reward=15.13940 mean_len=383.16 recent_eps=100 completed_eps=2053398
+[UPDATE_EFFECT] action_delta=0.01407775 param_rms_delta=0.00023259
+[TIME] collect=3.448s update=1.279s
+[DONE] timeout=0.02722 anchor_pos=0.00586 anchor_ori=0.00232 ee_body=0.03430
+[TRACK_ROLLOUT] anchor_pos=0.51056 anchor_ori=0.70830 body_pos=0.89174 body_ori=0.33192 body_lin=0.50863 body_ang=0.28316
+[ACT_SUMMARY] abs_mean=1.4847 abs_p95=2.1225 abs_p99=2.3375 abs_max=3.1719 legs=1.2383 waist=0.7383 arms=1.8558
+[FRAME_DIAG] frame0_abs=1.4448 frame1_abs=1.4653 in_chunk_delta=0.2318 cross_chunk_delta=0.3531
+[TRAIN_COST] action_rate=3.85870 joint_limit=0.01008 contacts=1.64556 | weighted act_rate=-0.00772 contacts=-0.00329 pos=0.05250 penalty=-0.01303 total=0.03947
+[RETURN_SPLIT] env_raw=0.15508 target_raw=0.15508 failure_cost=0.00000 realized=3.18436
+[UPDATE] 470/500 reward_step=0.03981 env_raw=0.15638 target_raw=0.15638 done_frac=0.01125 mean_reward=13.83430 mean_len=350.11
+[SFPO] loss=0.09934 policy=-0.00553 value=0.10486 ratio=0.9994 [0.137,4.110] clip=0.1784 kl_raw=0.013447 kl/step=0.013447 target/step=0.0100 kl_units=1 grad=1.0776 grad_c=0.6027 lr=0.000089 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=3.3002 V_tgt=3.3052 one_step=3.3032 boot=3.1468 adv=0.0051/0.3295 cont=0.9887 valid_pfx=0.9976 death_frame=3.979 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0053 raw_adv_std=0.3288 | V1=3.3002 V2=3.3080 V3=3.3146 V4=3.3140 | T1=3.3055 T2=3.3182 T3=3.3268 T4=3.3198
+[KL_FRAME] f0=0.026788 f1=0.014443 f2=0.007573 f3=0.004924 clip0=0.3480 adv0=0.5582
+[ROLLOUT] live=3.99 survive=0.95996 per_step=0.03907 episode_projection=19.54
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.11859 old_logp=-4.19540 new_logp=-4.20952 sde_steps=4 action_std=0.2853
+[TRAIN] mean_reward=13.83430 mean_len=350.11 recent_eps=100 completed_eps=2059017
+[UPDATE_EFFECT] action_delta=0.01269604 param_rms_delta=0.00018284
+[TIME] collect=3.481s update=1.281s
+[DONE] timeout=0.02747 anchor_pos=0.00537 anchor_ori=0.00159 ee_body=0.03723
+[TRACK_ROLLOUT] anchor_pos=0.51540 anchor_ori=0.70799 body_pos=0.89352 body_ori=0.33487 body_lin=0.51186 body_ang=0.28802
+[ACT_SUMMARY] abs_mean=1.4877 abs_p95=2.1242 abs_p99=2.3423 abs_max=3.0523 legs=1.2420 waist=0.7324 arms=1.8602
+[FRAME_DIAG] frame0_abs=1.4478 frame1_abs=1.4694 in_chunk_delta=0.2296 cross_chunk_delta=0.3508
+[TRAIN_COST] action_rate=3.80087 joint_limit=0.01026 contacts=1.67003 | weighted act_rate=-0.00760 contacts=-0.00334 pos=0.05280 penalty=-0.01299 total=0.03981
+[RETURN_SPLIT] env_raw=0.15638 target_raw=0.15638 failure_cost=0.00000 realized=3.30319
+[UPDATE] 480/500 reward_step=0.04017 env_raw=0.15783 target_raw=0.15783 done_frac=0.01090 mean_reward=14.98807 mean_len=377.48
+[SFPO] loss=0.10347 policy=-0.00490 value=0.10836 ratio=0.9996 [0.223,5.693] clip=0.1996 kl_raw=0.015049 kl/step=0.015049 target/step=0.0100 kl_units=1 grad=1.2892 grad_c=0.4222 lr=0.000133 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=3.3351 V_tgt=3.3426 one_step=3.3377 boot=3.1799 adv=0.0075/0.3357 cont=0.9891 valid_pfx=0.9976 death_frame=3.980 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0077 raw_adv_std=0.3349 | V1=3.3351 V2=3.3431 V3=3.3499 V4=3.3486 | T1=3.3399 T2=3.3539 T3=3.3624 T4=3.3535
+[KL_FRAME] f0=0.029453 f1=0.016122 f2=0.008630 f3=0.005930 clip0=0.3692 adv0=0.5487
+[ROLLOUT] live=3.99 survive=0.96350 per_step=0.03944 episode_projection=19.72
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.12629 old_logp=-4.03541 new_logp=-4.05086 sde_steps=4 action_std=0.2839
+[TRAIN] mean_reward=14.98807 mean_len=377.48 recent_eps=100 completed_eps=2064718
+[UPDATE_EFFECT] action_delta=0.01413459 param_rms_delta=0.00020671
+[TIME] collect=3.435s update=1.272s
+[DONE] timeout=0.02930 anchor_pos=0.00586 anchor_ori=0.00171 ee_body=0.03491
+[TRACK_ROLLOUT] anchor_pos=0.52338 anchor_ori=0.71022 body_pos=0.89523 body_ori=0.33998 body_lin=0.51213 body_ang=0.29223
+[ACT_SUMMARY] abs_mean=1.4790 abs_p95=2.1051 abs_p99=2.3049 abs_max=3.2421 legs=1.2424 waist=0.7222 arms=1.8438
+[FRAME_DIAG] frame0_abs=1.4389 frame1_abs=1.4600 in_chunk_delta=0.2298 cross_chunk_delta=0.3516
+[TRAIN_COST] action_rate=3.80990 joint_limit=0.00990 contacts=1.67641 | weighted act_rate=-0.00762 contacts=-0.00335 pos=0.05313 penalty=-0.01295 total=0.04017
+[RETURN_SPLIT] env_raw=0.15783 target_raw=0.15783 failure_cost=0.00000 realized=3.33771
+[UPDATE] 490/500 reward_step=0.04033 env_raw=0.15844 target_raw=0.15844 done_frac=0.01086 mean_reward=13.88920 mean_len=345.78
+[SFPO] loss=0.09538 policy=-0.00516 value=0.10055 ratio=0.9994 [0.174,5.569] clip=0.1807 kl_raw=0.013613 kl/step=0.013613 target/step=0.0100 kl_units=1 grad=1.1788 grad_c=0.4878 lr=0.000089 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=3.4635 V_tgt=3.4646 one_step=3.4644 boot=3.3060 adv=0.0011/0.3237 cont=0.9891 valid_pfx=0.9977 death_frame=3.980 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0013 raw_adv_std=0.3230 | V1=3.4635 V2=3.4731 V3=3.4808 V4=3.4802 | T1=3.4688 T2=3.4821 T3=3.4910 T4=3.4803
+[KL_FRAME] f0=0.027202 f1=0.014629 f2=0.007607 f3=0.004957 clip0=0.3519 adv0=0.5454
+[ROLLOUT] live=3.99 survive=0.96387 per_step=0.03958 episode_projection=19.79
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.11925 old_logp=-3.86180 new_logp=-3.87606 sde_steps=4 action_std=0.2825
+[TRAIN] mean_reward=13.88920 mean_len=345.78 recent_eps=100 completed_eps=2070116
+[UPDATE_EFFECT] action_delta=0.01259051 param_rms_delta=0.00017854
+[TIME] collect=3.495s update=1.271s
+[DONE] timeout=0.02942 anchor_pos=0.00610 anchor_ori=0.00195 ee_body=0.03308
+[TRACK_ROLLOUT] anchor_pos=0.51874 anchor_ori=0.71347 body_pos=0.89479 body_ori=0.33754 body_lin=0.51673 body_ang=0.29534
+[ACT_SUMMARY] abs_mean=1.4952 abs_p95=2.1234 abs_p99=2.3245 abs_max=3.0906 legs=1.2469 waist=0.7274 arms=1.8725
+[FRAME_DIAG] frame0_abs=1.4563 frame1_abs=1.4768 in_chunk_delta=0.2267 cross_chunk_delta=0.3484
+[TRAIN_COST] action_rate=3.73690 joint_limit=0.01009 contacts=1.69654 | weighted act_rate=-0.00747 contacts=-0.00339 pos=0.05321 penalty=-0.01288 total=0.04033
+[RETURN_SPLIT] env_raw=0.15844 target_raw=0.15844 failure_cost=0.00000 realized=3.46439
+[UPDATE] 500/500 reward_step=0.04089 env_raw=0.16068 target_raw=0.16068 done_frac=0.01152 mean_reward=16.22455 mean_len=402.70
+[SFPO] loss=0.10137 policy=-0.00492 value=0.10629 ratio=1.0002 [0.177,4.864] clip=0.2109 kl_raw=0.016474 kl/step=0.016474 target/step=0.0100 kl_units=1 grad=1.2315 grad_c=0.5314 lr=0.000133 critic_lr=0.000300 early_stop@5
+[CRITIC] unit=chunk V=3.5030 V_tgt=3.5073 one_step=3.5039 boot=3.3433 adv=0.0042/0.3326 cont=0.9885 valid_pfx=0.9978 death_frame=3.980 fail_pen=0.000 gae_lambda=0.950 max_delta=nan raw_adv_mean=0.0045 raw_adv_std=0.3316 | V1=3.5030 V2=3.5136 V3=3.5198 V4=3.5179 | T1=3.5089 T2=3.5228 T3=3.5295 T4=3.5187
+[KL_FRAME] f0=0.033708 f1=0.017734 f2=0.008913 f3=0.005478 clip0=0.3975 adv0=0.5490
+[ROLLOUT] live=3.99 survive=0.96716 per_step=0.04014 episode_projection=20.07
+[POLICY_DETAIL] samples=49152 mb=12288 micro_mb=8192 logp_delta_abs=0.13054 old_logp=-3.69537 new_logp=-3.71164 sde_steps=4 action_std=0.2810
+[TRAIN] mean_reward=16.22455 mean_len=402.70 recent_eps=100 completed_eps=2075543
+[UPDATE_EFFECT] action_delta=0.01430487 param_rms_delta=0.00022148
+[TIME] collect=3.487s update=1.270s
+[DONE] timeout=0.03650 anchor_pos=0.00391 anchor_ori=0.00232 ee_body=0.02930
+[TRACK_ROLLOUT] anchor_pos=0.52835 anchor_ori=0.71811 body_pos=0.89888 body_ori=0.34569 body_lin=0.51799 body_ang=0.29816
+[ACT_SUMMARY] abs_mean=1.4808 abs_p95=2.0996 abs_p99=2.3114 abs_max=2.8588 legs=1.2390 waist=0.7236 arms=1.8503
+[FRAME_DIAG] frame0_abs=1.4415 frame1_abs=1.4626 in_chunk_delta=0.2264 cross_chunk_delta=0.3489
+[TRAIN_COST] action_rate=3.73259 joint_limit=0.00958 contacts=1.70262 | weighted act_rate=-0.00747 contacts=-0.00341 pos=0.05368 penalty=-0.01279 total=0.04089
+[RETURN_SPLIT] env_raw=0.16068 target_raw=0.16068 failure_cost=0.00000 realized=3.50395
+[VALIDATION_START] update=500 max_steps=500 envs=8192 fixed_seed=disabled
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.004s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.166s
+[VALIDATION_PROGRESS] step=50/500 done=0.02161 alive=0.97839 elapsed=6.201s
+[VALIDATION_PROGRESS] step=100/500 done=0.07324 alive=0.92676 elapsed=12.718s
+[VALIDATION_PROGRESS] step=150/500 done=0.11719 alive=0.88281 elapsed=19.272s
+[VALIDATION_PROGRESS] step=200/500 done=0.13354 alive=0.86646 elapsed=25.785s
+[VALIDATION_PROGRESS] step=250/500 done=0.13733 alive=0.86267 elapsed=32.450s
+[VALIDATION_PROGRESS] step=300/500 done=0.14001 alive=0.85999 elapsed=39.013s
+[VALIDATION_PROGRESS] step=325/500 done=1.00000 alive=0.00000 elapsed=42.484s
+[VALIDATION_EARLY_STOP] step=325 done_frac=1.0000
+[VALIDATION_DONE] update=500 time=42.493s
+[VAL] steps_mean=293.79 steps_min=12 steps_p50=325 steps_p95=325 steps_max=325 fail_phase_mean=292.8 return=17.24784 done=1.00000
+[VAL_EE] left_ankle_bad=0.01331 left_ankle_z=0.03748 right_ankle_bad=0.01807 right_ankle_z=0.03293 left_wrist_bad=0.03967 left_wrist_z=0.08552 right_wrist_bad=0.06360 right_wrist_z=0.06429
+[VAL_CAUSE] anchor_pos_bad=0.01953 anchor_ori_bad=0.00220 ee_body_bad=0.12573 time_out=0.00000 anchor_z=0.06547 anchor_grav=0.11239 ee_z_max=0.09999 ee_z_mean=0.05506
+[VAL_WALL] alive@850=0.8583 motion_complete=0.8583 wrist_fail_825_840=0.0000 steps_p50=325
+[VAL_PUSH] push_applied=1.0000 died_before_push=0.0000 pushed_then_died=0.1417 first_push_step=99.1
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/sfpo_chunk_critic_500/checkpoints/update_0500.pt
+[INFO] Training finished.
