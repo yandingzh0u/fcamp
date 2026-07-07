@@ -145,12 +145,12 @@ class SFPOConfig:
         chunk execution stays continuous;
       * causal flow velocity over horizon: ``v_k`` only sees ``z_0..z_k`` so
         the per-frame flow log-prob is a valid conditional density for PPO;
-      * state-only V critic (the action-conditioned Q prefix is dropped: it
-        was trained but never wired into the actor advantage);
-      * per-frame GAE advantage (frame-j unit, lambda smoothing, cross-chunk
-        propagation) instead of the multi-prefix objective
-        ``A_k = T_{k+1} - V(s_0)`` which mixed early-reward credit;
-      * per-frame PPO ratio + flat clip over the causal conditional factors;
+      * state-only chunk-start V critic (the action-conditioned Q prefix is
+        dropped: it was trained but never wired into the actor advantage);
+      * chunk GAE advantage for the sampled ``h``-frame action plan, broadcast
+        to executed frames, instead of frame-local credit for a chunk policy;
+      * per-frame PPO ratio + flat clip as the low-variance carrier for the
+        chunk advantage;
       * terminal failure cost: an immediate per-step penalty added to the
         failure frame's reward with bootstrap=0 (true terminal), NOT an
         absorbing -10 bootstrap that saturated the value distribution;

@@ -300,9 +300,9 @@ def test_sfpo_action_gaussian_density_collect_and_update() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Per-prefix advantage normalization produces zero-mean per prefix
+# Chunk advantage normalization produces zero-mean valid chunk advantages
 # --------------------------------------------------------------------------- #
-def test_per_prefix_advantage_normalization() -> None:
+def test_chunk_advantage_normalization() -> None:
     torch.manual_seed(0)
     env = _NegativeRewardEnv(num_envs=4, reward=0.05)
     algo = _build_algo(env, advantage_normalization="per_prefix")
@@ -310,45 +310,39 @@ def test_per_prefix_advantage_normalization() -> None:
     rollout = algo.collect(obs)
 
     adv = rollout["advantages"]
+    chunk_mask = rollout["chunk_valid_mask"]
+    chunk_adv = adv[..., 0][chunk_mask]
+    if chunk_adv.numel() > 1:
+        assert abs(float(chunk_adv.mean().item())) < 1e-5, (
+            f"chunk advantages not zero-mean: {float(chunk_adv.mean().item())}"
+        )
+    # Same chunk advantage is broadcast to every executed frame; invalid frames are zeroed.
     mask = rollout["valid_prefix_mask"]
-    h = 4
-    for k in range(h):
-        col = adv[..., k][mask[..., k]]
-        if col.numel() > 1:
-            assert abs(float(col.mean().item())) < 1e-5, (
-                f"prefix {k+1} advantages not zero-mean: {float(col.mean().item())}"
-            )
-    # invalid prefixes are zeroed
+    for k in range(1, 4):
+        same_chunk = mask[..., k]
+        if bool(same_chunk.any()):
+            assert torch.allclose(adv[..., k][same_chunk], adv[..., 0][same_chunk], atol=1e-6)
     assert torch.all(adv[~mask] == 0.0)
 
 
 # --------------------------------------------------------------------------- #
-# CRITICAL: actor advantage is the per-frame GAE advantage
-# (frame_v_targets - frame_values), NOT a multi-prefix objective.
+# CRITICAL: actor advantage is chunk GAE advantage broadcast to executed frames.
 # --------------------------------------------------------------------------- #
-def test_actor_advantage_is_per_frame_gae() -> None:
-    """A_j = gae_advantages_j = frame_v_targets_j - frame_values_j.
-
-    This is the standard PPO/GAE estimator: frame-j unit, lambda-smoothed,
-    consistent with the critic V target. Replaces d1b506c's
-    A_k = T_{k+1} - V(s_0) which mixed early-reward credit into all later
-    prefixes.
-    """
+def test_actor_advantage_is_chunk_gae() -> None:
+    """Every executed frame in a sampled chunk carries the same chunk GAE credit."""
     torch.manual_seed(0)
     env = _NegativeRewardEnv(num_envs=2, reward=-0.04)
     algo = _build_algo(env, failure_penalty=1.0, advantage_normalization="none")
     obs = algo.initial_reset()
     rollout = algo.collect(obs)
 
-    frame_v_targets = rollout["frame_v_targets"]  # [chunks, n_envs, h]
-    frame_values = rollout["frame_values"]  # [chunks, n_envs, h]
     adv = rollout["advantages"]  # [chunks, n_envs, h]
     mask = rollout["valid_prefix_mask"]  # [chunks, n_envs, h]
+    chunk_adv = rollout["chunk_advantages"]  # [chunks, n_envs]
 
-    expected = frame_v_targets - frame_values
-    # On valid (alive) frames, advantage == per-frame GAE advantage.
+    expected = chunk_adv.unsqueeze(-1).expand_as(adv)
     assert torch.allclose(adv[mask], expected[mask], atol=1e-5), (
-        "actor advantage must equal per-frame GAE (frame_v_targets - frame_values) on valid frames"
+        "actor advantage must equal chunk GAE broadcast to valid executed frames"
     )
     # Invalid (post-death) frames are masked to 0.
     assert torch.all(adv[~mask] == 0.0)

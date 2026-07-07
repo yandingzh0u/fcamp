@@ -1,4 +1,4 @@
-"""SFPO: causal flow policy + per-frame GAE + absolute-action chunks (v5).
+"""SFPO: causal flow policy + chunk-level actor-critic.
 
 Root-cause redesign of the chunked-action flow-matching policy. The design
 fixes three PPO/GRPO-to-chunk-flow unit mismatches that plagued earlier
@@ -20,14 +20,12 @@ versions:
    conditional density and the PPO ratio ``exp(logp_k_new - logp_k_old)`` is
    aligned with frame-k credit.
 
-3. **Credit assignment + value propagation**: state-only ``V(s)`` critic (the
-   action-conditioned Q prefix was a dead branch -- trained but never wired
-   into the actor advantage, and wiring it via ``A = Q - V`` is biased without
-   Q warm-up). Actor advantage is the **per-frame GAE** ``A_j = R_j - V(s_j)``
-   (frame-j unit, lambda-smoothed, cross-chunk propagation ~20 steps/update),
-   NOT the multi-prefix objective ``A_k = T_{k+1} - V(s_0)`` which mixed
-   early-reward credit into all later prefixes. Per-frame PPO ratio + flat
-   clip are valid because the policy is causal.
+3. **Credit assignment + value propagation**: the actor samples a full
+   ``h``-frame action chunk, so the critic and advantage are trained on the
+   same chunk unit. ``V(s_chunk_start)`` predicts the discounted chunk return
+   plus the next chunk bootstrap; actor frames inside the chunk all receive the
+   same chunk-GAE advantage. Per-frame PPO ratios remain the low-variance
+   carrier for the chunk advantage.
 
 4. **Terminal vs absorbing failure**: failure injects an immediate per-step
    cost on the failure frame (``reward -= failure_penalty``) with bootstrap 0
@@ -724,87 +722,86 @@ class SFPO(Algorithm):
                 old_action_mean_buf[chunk_idx] = action_mean.detach()
                 old_action_std_buf[chunk_idx] = action_std.detach()
 
-            # ---- batched critic evaluation (state-only V: chunk-start + per-frame) ----
-            # Q prefix critic is dropped (was trained but never wired into the
-            # actor advantage; wiring it in via A = Q - V needs Q warm-up and is
-            # left for a later iteration). State-only V is clean and sufficient.
+            # ---- batched critic evaluation (state-only V at chunk start) ----
             critic_obs_flat = critic_obs_buf.reshape(chunks * n_envs, self.critic_obs_dim)
             values_v = self.critic.evaluate(critic_obs_flat).reshape(chunks, n_envs, 1)
+            chunk_values = values_v.squeeze(-1)
 
-            # per-frame pre-action V: re-evaluate the chunk-start critic obs for
-            # frame 0, and the running mid-chunk critic obs for frame j>0. We
-            # approximate frame_values by reusing the chunk-start V for frame 0
-            # and the next-frame V (from next_critic_obs) shifted by one for the
-            # GAE delta. A dedicated frame_critic_obs buffer would be cleaner but
-            # requires storing per-frame pre-action critic obs; the next_critic_obs
-            # already gives us V(s_{t+1}), which is what GAE needs for the delta.
+            # Per-frame V is diagnostic only. The value loss below trains the
+            # critic on chunk-start targets, not on per-frame targets.
             next_critic_obs_flat = next_critic_obs_buf.reshape(chunks * n_envs * h, self.critic_obs_dim)
             frame_next_values = self.critic.evaluate(next_critic_obs_flat).reshape(chunks, n_envs, h)
-
-            # ---- terminal-failure bootstrap (NOT absorbing -10) ----
-            # failure frame: bootstrap = 0 (true terminal, the immediate cost was
-            # already added to the reward above). timeout/motion_complete/alive:
-            # bootstrap = V(s_{t+1}) (soft terminal / continue). This keeps the
-            # target distribution in reward-return units.
-            zero_bootstrap = torch.zeros_like(frame_next_values)
-            frame_bootstrap = torch.where(failure_frame_buf, zero_bootstrap, frame_next_values)
-
-            # ---- cross-chunk per-frame GAE ----
-            # delta_t = r_t + gamma * b_t - V(s_t), with b_t = 0 on failure
-            # (terminal) else V(s_{t+1}). V(s_t) is approximated by shifting
-            # frame_next_values: V(s_t) for frame t = V(s_{t+1}) of frame t-1
-            # (the previous frame's next-state V), with chunk-start V for frame 0.
-            # GAE recurses backward across the whole chunks*h stream; continuity
-            # (alive & ~done) lets advantages propagate across chunk boundaries.
             frame_values = torch.cat(
                 [
                     values_v.expand(-1, -1, h)[..., :1],  # frame 0: chunk-start V
-                    frame_next_values[..., :-1],  # frame j>0: previous frame's next-V
+                    frame_next_values[..., :-1],  # frame j>0: previous frame's next-V (diagnostic)
                 ],
                 dim=-1,
             )
-            frame_td_delta = reward_masked_buf + gamma * frame_bootstrap - frame_values
-            gae = torch.zeros(n_envs, device=device, dtype=frame_td_delta.dtype)
-            gae_advantages = torch.zeros_like(frame_td_delta)
+
+            # ---- chunk return + terminal-aware bootstrap ----
+            gamma_pow_reward = gamma ** torch.arange(h, device=device, dtype=reward_masked_buf.dtype)
+            chunk_discounted_return = (reward_masked_buf * gamma_pow_reward.view(1, 1, h)).sum(dim=-1)
+
+            frame_idx_grid = torch.arange(h, device=device).view(1, 1, h).expand(chunks, n_envs, h)
+            masked_done_idx = torch.where(done_frame_buf, frame_idx_grid, torch.full_like(frame_idx_grid, h))
+            death_frame = masked_done_idx.min(dim=-1).values
+            chunk_done = death_frame < h
+            chunk_failure = failure_frame_buf.any(dim=-1)
+            boot_frame = death_frame.clamp(max=h - 1)
+            boot_obs = next_critic_obs_buf.gather(
+                2,
+                boot_frame.view(chunks, n_envs, 1, 1).expand(-1, -1, 1, self.critic_obs_dim),
+            ).squeeze(2)
+            boot_values = self.critic.evaluate(boot_obs.reshape(chunks * n_envs, self.critic_obs_dim)).reshape(
+                chunks, n_envs
+            )
+            boot_discount = gamma ** (boot_frame.to(dtype=boot_values.dtype) + 1.0)
+            chunk_bootstrap = torch.where(
+                chunk_failure,
+                torch.zeros_like(boot_values),
+                boot_discount * boot_values,
+            )
+            chunk_one_step_target = chunk_discounted_return + chunk_bootstrap
+
+            # ---- cross-chunk GAE on macro transitions ----
+            chunk_td_delta = chunk_one_step_target - chunk_values
+            chunk_advantages = torch.zeros_like(chunk_td_delta)
+            gae = torch.zeros(n_envs, device=device, dtype=chunk_td_delta.dtype)
             gae_lambda = float(getattr(self.cfg, "gae_lambda", 0.95))
-            for flat_t in range(chunks * h - 1, -1, -1):
-                chunk_i = flat_t // h
-                frame_i = flat_t % h
-                alive_f = alive_frame_buf[chunk_i, :, frame_i].to(dtype=frame_td_delta.dtype)
-                # continuity: this frame was alive AND not done (done -> env
-                # reset at chunk end -> next frame is a fresh episode, cut GAE).
-                cont_f = alive_f * (~done_frame_buf[chunk_i, :, frame_i]).to(dtype=frame_td_delta.dtype)
-                delta_f = frame_td_delta[chunk_i, :, frame_i] * alive_f
-                gae = delta_f + gamma * gae_lambda * cont_f * gae
-                gae_advantages[chunk_i, :, frame_i] = gae * alive_f
+            chunk_gamma_lambda = (gamma ** h) * (gae_lambda ** h)
+            chunk_cont = (~chunk_done).to(dtype=chunk_td_delta.dtype)
+            for chunk_i in range(chunks - 1, -1, -1):
+                gae = chunk_td_delta[chunk_i] + chunk_gamma_lambda * chunk_cont[chunk_i] * gae
+                chunk_advantages[chunk_i] = gae
 
-            frame_v_targets = frame_values + gae_advantages
+            chunk_v_targets = chunk_values + chunk_advantages
 
-            # Actor advantage = per-frame GAE advantage (frame-j unit, lambda
-            # smoothing, consistent with the critic V target).
-            advantages = gae_advantages
+            # Actor advantage = chunk GAE advantage. Each executed frame ratio
+            # carries the same chunk-level credit.
             valid_prefix_mask = alive_frame_buf.clone()
-            advantages = self._normalize_advantages(advantages, valid_prefix_mask)
+            chunk_valid_mask = alive_frame_buf[..., 0].clone()
+            normalized_chunk_advantages = self._normalize_chunk_advantages(chunk_advantages, chunk_valid_mask)
+            advantages = normalized_chunk_advantages.unsqueeze(-1).expand(-1, -1, h) * valid_prefix_mask
+            raw_gae_advantages = chunk_advantages.unsqueeze(-1).expand(-1, -1, h) * valid_prefix_mask
+            frame_v_targets = chunk_v_targets.unsqueeze(-1).expand_as(frame_values)
 
             # ---- diagnostic prefix targets (for logging only) ----
-            gamma_pow_reward = gamma ** torch.arange(h, device=device, dtype=reward_masked_buf.dtype)
+            zero_bootstrap = torch.zeros_like(frame_next_values)
+            frame_bootstrap = torch.where(failure_frame_buf, zero_bootstrap, frame_next_values)
             gamma_pow_boot = gamma ** torch.arange(1, h + 1, device=device, dtype=frame_bootstrap.dtype)
             disc_rewards = reward_masked_buf * gamma_pow_reward.view(1, 1, h)
             cum_disc_rewards = torch.cumsum(disc_rewards, dim=-1)
             disc_bootstrap = frame_bootstrap * gamma_pow_boot.view(1, 1, h)
             prefix_targets = cum_disc_rewards + disc_bootstrap  # T_{k+1}, diagnostic
-            frame_idx_grid = torch.arange(h, device=device).view(1, 1, h).expand(chunks, n_envs, h)
-            masked_done_idx = torch.where(done_frame_buf, frame_idx_grid, torch.full_like(frame_idx_grid, h))
-            death_frame = masked_done_idx.min(dim=-1).values
-            clamped_df = death_frame.clamp(max=h - 1)
-            v_targets = prefix_targets.gather(-1, clamped_df.unsqueeze(-1))  # diagnostic
+            v_targets = chunk_v_targets.unsqueeze(-1)
 
         self._obs = obs
         self._critic_obs = critic_obs
         if train_step_indices is None:
             train_step_indices = self._train_step_indices(device)
 
-        chunk_return_realized = v_targets.squeeze(-1)  # [chunks, n_envs] (diagnostic, with failure cost)
+        chunk_return_realized = chunk_one_step_target  # [chunks, n_envs], reward plus terminal-aware bootstrap
         # chunk_raw_return: target-side raw (includes failure cost) -- used for
         # advantage/value computations.
         chunk_raw_return = (reward_masked_buf * gamma_pow_reward.view(1, 1, h)).sum(dim=-1)
@@ -831,10 +828,17 @@ class SFPO(Algorithm):
             "values_v": values_v,
             "frame_values": frame_values,
             "frame_v_targets": frame_v_targets,
+            "chunk_values": chunk_values,
+            "chunk_v_targets": chunk_v_targets,
+            "chunk_advantages": chunk_advantages,
+            "chunk_one_step_target": chunk_one_step_target,
+            "chunk_bootstrap": chunk_bootstrap,
+            "chunk_cont": chunk_cont,
+            "chunk_valid_mask": chunk_valid_mask,
             "prefix_targets": prefix_targets,
             "v_targets": v_targets,
             "advantages": advantages,
-            "raw_gae_advantages": gae_advantages,
+            "raw_gae_advantages": raw_gae_advantages,
             "valid_prefix_mask": valid_prefix_mask,
             "death_frame": death_frame,
             "frame_bootstrap": frame_bootstrap,
@@ -895,8 +899,19 @@ class SFPO(Algorithm):
             out[..., k] = (adv[..., k] - mean) / std
         return out * mask
 
+    def _normalize_chunk_advantages(self, adv: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Normalize chunk advantages over valid chunk starts."""
+        if self.advantage_normalization == "none":
+            return adv * mask
+        valid = adv[mask]
+        if valid.numel() == 0:
+            return adv * mask
+        mean = valid.mean()
+        std = valid.std(unbiased=False) + 1.0e-8
+        return ((adv - mean) / std) * mask
+
     # ------------------------------------------------------------------ #
-    # Update: per-frame ratio + per-prefix PPO + V/Q critic losses
+    # Update: per-frame ratio + chunk advantage + chunk critic loss
     # ------------------------------------------------------------------ #
     def _policy_mini_batch_size(self, sample_count: int) -> int:
         num_mini_batches = max(1, int(self.cfg.num_mini_batches))
@@ -943,13 +958,12 @@ class SFPO(Algorithm):
         old_action_mean = rollout["old_action_mean"].reshape(raw_batch_size, h, self.num_act)
         old_action_std = rollout["old_action_std"].reshape(raw_batch_size, h, self.num_act)
         prev_action = rollout["prev_action"].reshape(raw_batch_size, self.num_act)
-        old_frame_values = rollout["frame_values"].reshape(raw_batch_size, h)
-        frame_v_targets = rollout["frame_v_targets"].reshape(raw_batch_size, h)
-        prefix_targets = rollout["prefix_targets"].reshape(raw_batch_size, h)
-        v_targets = rollout["v_targets"].reshape(raw_batch_size, 1)
+        old_chunk_values = rollout["chunk_values"].reshape(raw_batch_size)
+        chunk_v_targets = rollout["chunk_v_targets"].reshape(raw_batch_size)
         advantages = rollout["advantages"].reshape(raw_batch_size, h)
         raw_gae_advantages = rollout["raw_gae_advantages"].reshape(raw_batch_size, h)
         valid_prefix_mask = rollout["valid_prefix_mask"].reshape(raw_batch_size, h)
+        chunk_valid_mask = rollout["chunk_valid_mask"].reshape(raw_batch_size)
         batch_size = actor_obs.shape[0]
 
         mini_batch_size = self._policy_mini_batch_size(batch_size)
@@ -1048,8 +1062,8 @@ class SFPO(Algorithm):
                     per_frame_log_ratio = new_per_frame_logp - old_per_frame_logp  # [micro, h]
                     # Per-frame PPO ratio (NOT a prefix/joint cumsum ratio).
                     # Each executed chunk component gets its own per-frame
-                    # likelihood ratio and per-frame GAE advantage, so the PG
-                    # estimator is the standard per-action PPO form.
+                    # likelihood ratio, but all executed frames carry the same
+                    # chunk GAE advantage.
                     ratio = torch.exp(per_frame_log_ratio)  # [micro, h]
                     adv = advantages[sub]  # [micro, h]
                     mask = valid_prefix_mask[sub].to(dtype=ratio.dtype)  # [micro, h]
@@ -1063,33 +1077,21 @@ class SFPO(Algorithm):
                     policy_loss_per = torch.maximum(unclipped, clipped)  # [micro, h]
                     policy_loss = (policy_loss_per * mask).sum() / mask_sum
 
-                    # V critic loss over every executed frame state. The critic
-                    # is state-only V; we evaluate V at each frame's pre-action
-                    # state by reusing the stored per-frame next-critic-obs
-                    # shifted by one (frame 0 uses chunk-start critic_obs).
-                    # frame_v_targets = GAE return (frame_values + gae_advantages).
-                    next_critic_obs_sub = rollout["next_critic_obs"].reshape(
-                        raw_batch_size, h, self.critic_obs_dim
-                    )[sub]
+                    # Chunk critic loss: V predicts chunk-start value targets.
                     critic_obs_sub = critic_obs[sub]  # [micro, D]
-                    # per-frame pre-action critic obs: frame 0 = chunk-start,
-                    # frame j>0 = next-critic-obs of frame j-1.
-                    frame_critic_obs_sub = torch.cat(
-                        [critic_obs_sub.unsqueeze(1), next_critic_obs_sub[:, :-1, :]], dim=1
-                    )  # [micro, h, D]
-                    value = self.critic.evaluate(
-                        frame_critic_obs_sub.reshape(-1, self.critic_obs_dim)
-                    ).reshape(-1, h)
+                    value = self.critic.evaluate(critic_obs_sub).reshape(-1)
+                    chunk_mask = chunk_valid_mask[sub].to(dtype=value.dtype)
+                    chunk_mask_sum = chunk_mask.sum().clamp(min=1.0)
                     if use_clipped_value_loss:
-                        value_clipped = old_frame_values[sub] + (value - old_frame_values[sub]).clamp(
+                        value_clipped = old_chunk_values[sub] + (value - old_chunk_values[sub]).clamp(
                             -value_clip, value_clip
                         )
-                        value_losses = (value - frame_v_targets[sub]).pow(2)
-                        value_losses_clipped = (value_clipped - frame_v_targets[sub]).pow(2)
+                        value_losses = (value - chunk_v_targets[sub]).pow(2)
+                        value_losses_clipped = (value_clipped - chunk_v_targets[sub]).pow(2)
                         value_loss_per = torch.max(value_losses, value_losses_clipped)
                     else:
-                        value_loss_per = (frame_v_targets[sub] - value).pow(2)
-                    value_loss = (value_loss_per * mask).sum() / mask_sum
+                        value_loss_per = (chunk_v_targets[sub] - value).pow(2)
+                    value_loss = (value_loss_per * chunk_mask).sum() / chunk_mask_sum
 
                     # When the KL early-stop has frozen the actor, only the
                     # critic loss is backpropagated and the actor optimizer step
@@ -1126,7 +1128,7 @@ class SFPO(Algorithm):
                         mb_totals["old_log_prob"] += float((old_per_frame_logp * mask).sum().item() / mask_sum.item()) * weight
                         mb_totals["new_log_prob"] += float((new_per_frame_logp * mask).sum().item() / mask_sum.item()) * weight
                         mb_totals["v_target_mean"] += float(
-                            (frame_v_targets[sub] * mask).sum().item() / mask_sum.item()
+                            (chunk_v_targets[sub] * chunk_mask).sum().item() / chunk_mask_sum.item()
                         ) * weight
                         mb_totals["valid_prefix_frac"] += float(mask.mean().item()) * weight
                         mb_ratio_min = min(mb_ratio_min, float(ratio.min().item()))
@@ -1234,6 +1236,8 @@ class SFPO(Algorithm):
             "sfpo/valid_prefix_frac": totals["valid_prefix_frac"] / denom,
             "sfpo/failure_penalty": float(self.failure_penalty),
             "sfpo/gae_lambda": float(getattr(self.cfg, "gae_lambda", 0.95)),
+            "sfpo/critic_unit": 1.0,  # 1 = chunk
+            "sfpo/actor_advantage_unit": 1.0,  # 1 = chunk GAE
             "sfpo/action_max_delta": (
                 float(self._policy.action_max_delta.mean().item())
                 if torch.is_tensor(self._policy.action_max_delta)
@@ -1283,6 +1287,13 @@ class SFPO(Algorithm):
         values_v = rollout["values_v"]
         frame_values = rollout["frame_values"]
         frame_v_targets = rollout["frame_v_targets"]
+        chunk_values = rollout["chunk_values"]
+        chunk_v_targets = rollout["chunk_v_targets"]
+        chunk_advantages = rollout["chunk_advantages"]
+        chunk_one_step_target = rollout["chunk_one_step_target"]
+        chunk_bootstrap = rollout["chunk_bootstrap"]
+        chunk_cont = rollout["chunk_cont"]
+        chunk_valid_mask = rollout["chunk_valid_mask"]
         chunk_realized = rollout["chunk_return_realized"]
         chunk_raw = rollout["chunk_raw_return"]  # target-side (with failure cost)
         chunk_env_raw = rollout["chunk_env_raw_return"]  # env-side (no failure cost)
@@ -1393,6 +1404,25 @@ class SFPO(Algorithm):
                 metrics[f"critic/valid_prefix_{k+1}_frac"] = 0.0
         metrics["critic/v_mean"] = float(values_v.mean().item())
         metrics["critic/v_target_mean"] = float(v_targets.mean().item())
+        if bool(chunk_valid_mask.any()):
+            metrics["critic/chunk_v_mean"] = float(chunk_values[chunk_valid_mask].mean().item())
+            metrics["critic/chunk_v_target_mean"] = float(chunk_v_targets[chunk_valid_mask].mean().item())
+            metrics["critic/chunk_one_step_target_mean"] = float(
+                chunk_one_step_target[chunk_valid_mask].mean().item()
+            )
+            metrics["critic/chunk_bootstrap_mean"] = float(chunk_bootstrap[chunk_valid_mask].mean().item())
+            metrics["critic/chunk_adv_mean"] = float(chunk_advantages[chunk_valid_mask].mean().item())
+            metrics["critic/chunk_adv_std"] = float(chunk_advantages[chunk_valid_mask].std(unbiased=False).item())
+            metrics["critic/chunk_cont_frac"] = float(chunk_cont[chunk_valid_mask].mean().item())
+        else:
+            metrics["critic/chunk_v_mean"] = float("nan")
+            metrics["critic/chunk_v_target_mean"] = float("nan")
+            metrics["critic/chunk_one_step_target_mean"] = float("nan")
+            metrics["critic/chunk_bootstrap_mean"] = float("nan")
+            metrics["critic/chunk_adv_mean"] = float("nan")
+            metrics["critic/chunk_adv_std"] = float("nan")
+            metrics["critic/chunk_cont_frac"] = 0.0
+        metrics["critic/chunk_valid_frac"] = float(chunk_valid_mask.float().mean().item())
 
         for key, mask in rollout["done_terms_union"].items():
             metrics[f"done/{key}_frac"] = float(mask.float().mean().item())
@@ -1561,8 +1591,12 @@ class SFPO(Algorithm):
             flush=True,
         )
         print(
-            f"[CRITIC] V={metrics['critic/v_mean']:.4f} "
-            f"V_tgt={metrics['critic/v_target_mean']:.4f} "
+            f"[CRITIC] unit=chunk V={metrics['critic/chunk_v_mean']:.4f} "
+            f"V_tgt={metrics['critic/chunk_v_target_mean']:.4f} "
+            f"one_step={metrics['critic/chunk_one_step_target_mean']:.4f} "
+            f"boot={metrics['critic/chunk_bootstrap_mean']:.4f} "
+            f"adv={metrics['critic/chunk_adv_mean']:.4f}/{metrics['critic/chunk_adv_std']:.4f} "
+            f"cont={metrics['critic/chunk_cont_frac']:.4f} "
             f"valid_pfx={metrics['sfpo/valid_prefix_frac']:.4f} "
             f"death_frame={metrics['rollout/death_frame_mean']:.3f} "
             f"fail_pen={metrics['sfpo/failure_penalty']:.3f} "
@@ -1666,7 +1700,7 @@ class SFPO(Algorithm):
     def log_banner(self) -> None:
         cfg = self.cfg
         env = self.env
-        print("[INFO] Starting SFPO training (smooth action chunk + per-frame GAE + state-V)", flush=True)
+        print("[INFO] Starting SFPO training (smooth action chunk + chunk GAE + chunk-start V)", flush=True)
         print(
             f"[INFO] task={env.task.name} terrain={env.task.terrain} motion_file={env.task.motion_file}",
             flush=True,
@@ -1685,7 +1719,7 @@ class SFPO(Algorithm):
             else (f"{float(_amd):.3f}" if _amd is not None else "none")
         )
         print(
-            f"[INFO] state_only_critic=True prefix_q=False "
+            f"[INFO] critic_unit=chunk_start state_only_critic=True prefix_q=False "
             f"causal_velocity={self._policy.causal_velocity} causal_arch={self._policy.causal_arch} "
             f"action_transform={self.action_transform} action_max_delta={_amd_str} "
             f"actor_density={self.actor_density} action_noise_std={self.action_noise_std} "
@@ -1693,11 +1727,11 @@ class SFPO(Algorithm):
             f"terminal_failure_cost={self.failure_penalty != 0.0} failure_penalty={cfg.failure_penalty} "
             f"per_frame_action_logprob={self.actor_density == 'action_gaussian'} "
             f"per_frame_flow_logprob={self.actor_density == 'sde_path'} per_frame_ratio_ppo=True flat_clip=True "
-            f"actor_advantage=gae_per_frame "
+            f"actor_advantage=gae_chunk "
             f"per_frame_kl_adaptive_lr=True kl_units=1 kl_early_stop_factor={self.kl_early_stop_factor} "
             f"advantage_norm={cfg.advantage_normalization} "
             f"gamma={cfg.discount_gamma} gae_lambda={float(getattr(cfg, 'gae_lambda', 0.95)):.3f} "
-            f"cross_chunk_gae=True td_bootstrap_per_frame=True "
+            f"cross_chunk_gae=True td_bootstrap_unit=chunk "
             f"chunk_gamma={float(cfg.discount_gamma) ** int(cfg.horizon):.6f}",
             flush=True,
         )
