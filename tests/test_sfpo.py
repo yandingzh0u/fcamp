@@ -125,6 +125,7 @@ class _NegativeRewardEnv:
 def _build_algo(env, **overrides):
     base = dict(
         horizon=4, rollout_env_steps=8, flow_steps=2, sde_eta=0.7, init_noise_std=0.8,
+        actor_density="sde_path", action_noise_std=0.8, action_std_trainable=True,
         action_squash_scale=5.0, eval_initial_noise="zero",
         actor_hidden_dims=(16, 16), critic_hidden_dims=(16, 16), activation="elu",
         discount_gamma=0.99, gae_lambda=0.95,
@@ -267,6 +268,35 @@ def test_sfpo_collect_and_update_end_to_end() -> None:
     # actor + critic both have grad norms
     assert metrics["sfpo/grad_norm"] >= 0.0
     assert metrics["sfpo/grad_norm_critic"] >= 0.0
+
+
+def test_sfpo_action_gaussian_density_collect_and_update() -> None:
+    torch.manual_seed(0)
+    env = _NegativeRewardEnv(num_envs=4, reward=0.05)
+    algo = _build_algo(
+        env,
+        actor_density="action_gaussian",
+        action_noise_std=0.4,
+        action_std_trainable=True,
+        action_transform="residual_absolute",
+        action_max_delta=None,
+        failure_penalty=0.0,
+        num_mini_batches=2,
+        micro_batch_size=8,
+    )
+    obs = algo.initial_reset()
+    rollout = algo.collect(obs)
+
+    assert torch.isfinite(rollout["old_log_probs"]).all()
+    assert rollout["old_action_std"].gt(0.0).any()
+    assert torch.allclose(rollout["failure_cost_return"], torch.zeros_like(rollout["failure_cost_return"]))
+
+    metrics = algo.update(rollout, collect_time=0.1)
+    assert metrics["sfpo/actor_density"] == 1.0
+    assert metrics["sfpo/failure_penalty"] == 0.0
+    assert math.isfinite(metrics["sfpo/policy_loss"])
+    assert math.isfinite(metrics["sfpo/kl_raw"])
+    assert metrics["policy/action_std_mean"] > 0.0
 
 
 # --------------------------------------------------------------------------- #

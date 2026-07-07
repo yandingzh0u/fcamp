@@ -28,6 +28,9 @@ parameters:
   flow_steps: 4
   sde_eta: 0.7
   init_noise_std: 0.8
+  actor_density: action_gaussian
+  action_noise_std: 0.8
+  action_std_trainable: true
   eval_initial_noise: zero
   rollout_env_steps: 24
   discount_gamma: 0.99
@@ -51,7 +54,7 @@ parameters:
   causal_arch: prefix_cumsum
   action_transform: residual_absolute
   action_max_delta: null
-  failure_penalty: 10.0
+  failure_penalty: 0.0
   kl_early_stop_factor: 4.0
   advantage_normalization: global
 training:

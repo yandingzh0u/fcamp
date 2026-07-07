@@ -42,8 +42,12 @@ def test_sfpo_config_is_ppo_aligned_h4() -> None:
     assert sfpo.parameters.value_lr == 0.0003
     assert sfpo.parameters.use_clipped_value_loss is True
     assert sfpo.parameters.init_at_random_ep_len is True
-    # action-conditioned multi-horizon critic + absorbing failure target.
-    assert sfpo.parameters.failure_penalty == 10.0
+    # Failure penalty is intentionally removed; PPO ratio/KL is applied to the
+    # executed action-plan density instead of the internal SDE path.
+    assert sfpo.parameters.failure_penalty == 0.0
+    assert sfpo.parameters.actor_density == "action_gaussian"
+    assert sfpo.parameters.action_noise_std == 0.8
+    assert sfpo.parameters.action_std_trainable is True
     assert sfpo.parameters.gae_lambda == 0.95
     assert sfpo.parameters.causal_velocity is True
     assert sfpo.parameters.causal_arch == "prefix_cumsum"

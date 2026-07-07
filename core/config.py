@@ -166,6 +166,9 @@ class SFPOConfig:
     flow_steps: int
     sde_eta: float
     init_noise_std: float
+    actor_density: str
+    action_noise_std: float
+    action_std_trainable: bool
     eval_initial_noise: str
     rollout_env_steps: int
     discount_gamma: float
@@ -357,6 +360,14 @@ def _validate(config: ExperimentConfig) -> None:
             raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
         if config.parameters.failure_penalty < 0.0:
             raise ValueError("SFPO requires parameters.failure_penalty >= 0")
+        density = str(config.parameters.actor_density).lower()
+        if density not in {"sde_path", "action_gaussian"}:
+            raise ValueError(
+                "SFPO parameters.actor_density must be one of "
+                f"'sde_path', 'action_gaussian'; got {config.parameters.actor_density!r}"
+            )
+        if config.parameters.action_noise_std <= 0.0:
+            raise ValueError("SFPO requires parameters.action_noise_std > 0")
         norm = str(config.parameters.advantage_normalization).lower()
         if norm not in {"per_prefix", "global", "none"}:
             raise ValueError(

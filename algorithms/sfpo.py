@@ -52,7 +52,7 @@ from algorithms.base import Algorithm
 from algorithms.kl_scheduler import adaptive_lr_from_kl
 from networks.flow_inference import deterministic_sde_ode_actions
 from networks.flow_policy import FlowMatchingPolicy
-from networks.flow_sampling import flow_grpo_step_per_frame
+from networks.flow_sampling import flow_grpo_step, flow_grpo_step_per_frame
 from networks.mlp_actor_critic import Critic, EmpiricalNormalization
 
 
@@ -113,6 +113,21 @@ class SFPO(Algorithm):
             )
         self.action_transform = action_transform
         self._policy.action_transform = action_transform
+        self.actor_density = str(getattr(cfg, "actor_density", "sde_path")).lower()
+        if self.actor_density not in {"sde_path", "action_gaussian"}:
+            raise ValueError(
+                f"actor_density must be 'sde_path' or 'action_gaussian', got {self.actor_density!r}"
+            )
+        self.action_noise_std = float(getattr(cfg, "action_noise_std", cfg.init_noise_std))
+        self.action_std_trainable = bool(getattr(cfg, "action_std_trainable", True))
+        if self.actor_density == "action_gaussian":
+            if self.action_noise_std <= 0.0:
+                raise ValueError(f"action_noise_std must be > 0, got {self.action_noise_std}")
+            init_log_std = math.log(self.action_noise_std)
+            self._policy.action_log_std = nn.Parameter(
+                torch.full((self.horizon_h, self.num_act), init_log_std, device=env.device)
+            )
+            self._policy.action_log_std.requires_grad_(self.action_std_trainable)
         self.critic = Critic(self.critic_obs_dim, tuple(cfg.critic_hidden_dims), cfg.activation).to(env.device)
         self.chunk_dim = self._policy.chunk_dim
 
@@ -380,6 +395,67 @@ class SFPO(Algorithm):
             prev_action=prev_action,
         )
 
+    def _flow_mean_latent(self, actor_obs: torch.Tensor) -> torch.Tensor:
+        """Differentiable deterministic final flow latent used as the Gaussian mean."""
+        batch = actor_obs.shape[0]
+        latent = torch.zeros(batch, self.chunk_dim, device=actor_obs.device, dtype=actor_obs.dtype)
+        self._policy._validate_inputs(actor_obs, latent, int(self.cfg.flow_steps))
+        obs_prep = self._policy._prepare_observation(actor_obs)
+        steps = int(self.cfg.flow_steps)
+        sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=actor_obs.device, dtype=actor_obs.dtype)
+        zero_step_noise = torch.zeros_like(latent)
+        for step_index in range(steps):
+            sigma = sigma_schedule[step_index]
+            timestep_batch = torch.full((batch,), float(sigma.item()), device=actor_obs.device, dtype=actor_obs.dtype)
+            model_output = self._policy.velocity_field(obs_prep, latent, timestep_batch)
+            latent, _ = flow_grpo_step(
+                model_output=model_output,
+                latents=latent,
+                sigmas=sigma_schedule,
+                index=step_index,
+                eta=float(self.cfg.sde_eta),
+                sample_noise=zero_step_noise,
+            )
+        return latent
+
+    def _flow_mean_actions(self, actor_obs: torch.Tensor, prev_action: torch.Tensor | None = None) -> torch.Tensor:
+        mean_latent = self._flow_mean_latent(actor_obs)
+        return self._policy._action_transform(mean_latent, prev_action=prev_action).view(
+            actor_obs.shape[0], self.horizon_h, self.num_act
+        )
+
+    def _action_gaussian_std(self, reference: torch.Tensor) -> torch.Tensor:
+        if not hasattr(self._policy, "action_log_std"):
+            std = torch.full(
+                (self.horizon_h, self.num_act),
+                self.action_noise_std,
+                device=reference.device,
+                dtype=reference.dtype,
+            )
+        else:
+            log_std = self._policy.action_log_std.to(device=reference.device, dtype=reference.dtype)
+            std = torch.exp(log_std).clamp(min=1.0e-3, max=10.0)
+        return std.view(*((1,) * (reference.ndim - 2)), self.horizon_h, self.num_act).expand_as(reference)
+
+    @staticmethod
+    def _action_gaussian_log_prob(actions: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+        var = std.square()
+        log_std = torch.log(std)
+        log_prob = -0.5 * ((actions - mean).square() / var + 2.0 * log_std + math.log(2.0 * math.pi))
+        return log_prob.sum(dim=-1)
+
+    @staticmethod
+    def _action_gaussian_kl(
+        old_mean: torch.Tensor,
+        old_std: torch.Tensor,
+        new_mean: torch.Tensor,
+        new_std: torch.Tensor,
+    ) -> torch.Tensor:
+        old_var = old_std.square()
+        new_var = new_std.square()
+        kl = torch.log(new_std / old_std) + (old_var + (old_mean - new_mean).square()) / (2.0 * new_var) - 0.5
+        return kl.sum(dim=-1)
+
     # ------------------------------------------------------------------ #
     # Env reset / rollout entry points
     # ------------------------------------------------------------------ #
@@ -448,6 +524,11 @@ class SFPO(Algorithm):
         actions_buf = torch.zeros(chunks, n_envs, h, self.num_act, device=device)
         latents_buf = torch.zeros(chunks, n_envs, flow_steps + 1, self.chunk_dim, device=device)
         old_log_probs_buf = torch.zeros(chunks, n_envs, flow_steps, h, device=device)
+        # For actor_density="action_gaussian" these are final residual-latent
+        # Gaussian parameters. The residual-latent -> action transform is fixed
+        # for old/new policies, so its Jacobian cancels in the PPO ratio.
+        old_action_mean_buf = torch.zeros(chunks, n_envs, h, self.num_act, device=device)
+        old_action_std_buf = torch.zeros(chunks, n_envs, h, self.num_act, device=device)
         # prev_action for the smooth transform: the raw last executed action at
         # chunk start. Stored so update can recompute the same action transform.
         prev_action_buf = torch.zeros(chunks, n_envs, self.num_act, device=device)
@@ -495,13 +576,33 @@ class SFPO(Algorithm):
                 prev_action = obs[..., -self.num_act:].detach()
                 prev_action_buf[chunk_idx] = prev_action
 
-                noise = torch.randn(n_envs, self.chunk_dim, device=device, dtype=obs.dtype)
-                sde_noise = torch.randn(n_envs, flow_steps, self.chunk_dim, device=device, dtype=obs.dtype)
-                sample = self._sample_policy_with_logprobs_per_frame(
-                    actor_obs_n, noise, sde_noise=sde_noise, prev_action=prev_action
-                )
-                train_step_indices = sample["train_step_indices"]
-                action_chunk = sample["actions"]
+                if self.actor_density == "action_gaussian":
+                    mean_latent = self._flow_mean_latent(actor_obs_n).view(n_envs, h, self.num_act)
+                    action_std = self._action_gaussian_std(mean_latent)
+                    sample_latent_chunk = mean_latent + action_std * torch.randn_like(mean_latent)
+                    action_chunk = self._policy._action_transform(
+                        sample_latent_chunk.reshape(n_envs, self.chunk_dim),
+                        prev_action=prev_action,
+                    ).view(n_envs, h, self.num_act)
+                    action_log_probs = self._action_gaussian_log_prob(sample_latent_chunk, mean_latent, action_std)
+                    latent_path = torch.zeros(n_envs, flow_steps + 1, self.chunk_dim, device=device, dtype=obs.dtype)
+                    latent_path[:, -1, :] = sample_latent_chunk.reshape(n_envs, self.chunk_dim)
+                    step_log_probs = torch.zeros(n_envs, flow_steps, h, device=device, dtype=obs.dtype)
+                    step_log_probs[:, 0, :] = action_log_probs
+                    train_step_indices = self._train_step_indices(device)
+                    action_mean = mean_latent
+                else:
+                    noise = torch.randn(n_envs, self.chunk_dim, device=device, dtype=obs.dtype)
+                    sde_noise = torch.randn(n_envs, flow_steps, self.chunk_dim, device=device, dtype=obs.dtype)
+                    sample = self._sample_policy_with_logprobs_per_frame(
+                        actor_obs_n, noise, sde_noise=sde_noise, prev_action=prev_action
+                    )
+                    train_step_indices = sample["train_step_indices"]
+                    action_chunk = sample["actions"]
+                    latent_path = sample["all_latents"]
+                    step_log_probs = sample["log_probs"]
+                    action_mean = action_chunk
+                    action_std = torch.zeros_like(action_chunk)
                 action_abs_max = max(action_abs_max, float(action_chunk.abs().max().item()))
 
                 alive_in_chunk = torch.ones(n_envs, dtype=torch.bool, device=device)
@@ -618,8 +719,10 @@ class SFPO(Algorithm):
                 actor_obs_buf[chunk_idx] = actor_obs_n
                 critic_obs_buf[chunk_idx] = critic_obs_n
                 actions_buf[chunk_idx] = action_chunk.detach()
-                latents_buf[chunk_idx] = sample["all_latents"].detach()
-                old_log_probs_buf[chunk_idx] = sample["log_probs"].detach()
+                latents_buf[chunk_idx] = latent_path.detach()
+                old_log_probs_buf[chunk_idx] = step_log_probs.detach()
+                old_action_mean_buf[chunk_idx] = action_mean.detach()
+                old_action_std_buf[chunk_idx] = action_std.detach()
 
             # ---- batched critic evaluation (state-only V: chunk-start + per-frame) ----
             # Q prefix critic is dropped (was trained but never wired into the
@@ -721,6 +824,8 @@ class SFPO(Algorithm):
             "actions": actions_buf,
             "latents": latents_buf,
             "old_log_probs": old_log_probs_buf,
+            "old_action_mean": old_action_mean_buf,
+            "old_action_std": old_action_std_buf,
             "prev_action": prev_action_buf,
             "train_step_indices": train_step_indices,
             "values_v": values_v,
@@ -835,6 +940,8 @@ class SFPO(Algorithm):
         actions = rollout["actions"].reshape(raw_batch_size, h, self.num_act)
         latent_path = rollout["latents"].reshape(raw_batch_size, flow_steps + 1, self.chunk_dim)
         old_log_probs = rollout["old_log_probs"].reshape(raw_batch_size, flow_steps, h)
+        old_action_mean = rollout["old_action_mean"].reshape(raw_batch_size, h, self.num_act)
+        old_action_std = rollout["old_action_std"].reshape(raw_batch_size, h, self.num_act)
         prev_action = rollout["prev_action"].reshape(raw_batch_size, self.num_act)
         old_frame_values = rollout["frame_values"].reshape(raw_batch_size, h)
         frame_v_targets = rollout["frame_v_targets"].reshape(raw_batch_size, h)
@@ -916,13 +1023,28 @@ class SFPO(Algorithm):
                     sub = idx[micro_start:micro_end]
                     weight = float(sub.numel()) / float(mb_size)
 
-                    new_log_probs = self._compute_transition_log_probs_per_frame(
-                        actor_obs[sub], latent_path[sub], train_step_indices
-                    )  # [micro, steps, h]
                     old_log_probs_sub = old_log_probs[sub]  # [micro, steps, h]
-                    # per-frame total log-prob (sum over flow steps)
-                    new_per_frame_logp = new_log_probs.sum(dim=1)  # [micro, h]
                     old_per_frame_logp = old_log_probs_sub.sum(dim=1)  # [micro, h]
+                    if self.actor_density == "action_gaussian":
+                        sample_latent_chunk = latent_path[sub, -1, :].view(-1, h, self.num_act)
+                        new_action_mean = self._flow_mean_latent(actor_obs[sub]).view(-1, h, self.num_act)
+                        new_action_std = self._action_gaussian_std(new_action_mean)
+                        new_per_frame_logp = self._action_gaussian_log_prob(
+                            sample_latent_chunk, new_action_mean, new_action_std
+                        )
+                        kl_per_frame = self._action_gaussian_kl(
+                            old_action_mean[sub],
+                            old_action_std[sub].clamp(min=1.0e-6),
+                            new_action_mean.detach(),
+                            new_action_std.detach(),
+                        )
+                    else:
+                        new_log_probs = self._compute_transition_log_probs_per_frame(
+                            actor_obs[sub], latent_path[sub], train_step_indices
+                        )  # [micro, steps, h]
+                        # per-frame total log-prob (sum over flow steps)
+                        new_per_frame_logp = new_log_probs.sum(dim=1)  # [micro, h]
+                        kl_per_frame = None
                     per_frame_log_ratio = new_per_frame_logp - old_per_frame_logp  # [micro, h]
                     # Per-frame PPO ratio (NOT a prefix/joint cumsum ratio).
                     # Each executed chunk component gets its own per-frame
@@ -988,7 +1110,8 @@ class SFPO(Algorithm):
                         # ratio (which is per-frame here), but we also track the
                         # prefix KL for early-stop diagnostics. The adaptive LR
                         # uses the masked mean per-frame KL (kl_units=1).
-                        kl_per_frame = 0.5 * per_frame_log_ratio.square()  # [micro, h]
+                        if kl_per_frame is None:
+                            kl_per_frame = 0.5 * per_frame_log_ratio.square()  # [micro, h]
                         kl_per_frame_mean = (kl_per_frame * mask).sum() / mask_sum
                         mb_prefix_kl_accum += (kl_per_frame * mask).sum(dim=0).detach()
                         mb_prefix_kl_count += mask.sum(dim=0).detach()
@@ -1121,6 +1244,7 @@ class SFPO(Algorithm):
                 )
             ),
             "sfpo/action_transform": {"absolute": 0.0, "delta": 1.0, "residual_absolute": 2.0}[self.action_transform],
+            "sfpo/actor_density": {"sde_path": 0.0, "action_gaussian": 1.0}[self.actor_density],
             "sfpo/kl_early_stop_factor": float(self.kl_early_stop_factor),
             "sfpo/early_stop_epoch": float(early_stopped_epoch),
             "sfpo/advantage_normalization": float({"per_prefix": 0.0, "global": 1.0, "none": 2.0}[self.advantage_normalization]),
@@ -1128,6 +1252,11 @@ class SFPO(Algorithm):
             "policy/param_rms_delta": float(param_rms_delta.item()),
             "policy/raw_adv_mean": float(raw_gae_advantages.mean().item()),
             "policy/raw_adv_std": float(raw_gae_advantages.std(unbiased=False).item()),
+            "policy/action_std_mean": (
+                float(torch.exp(self._policy.action_log_std.detach()).mean().item())
+                if hasattr(self._policy, "action_log_std")
+                else float(self.action_noise_std)
+            ),
         }
         for k in range(h):
             update_metrics[f"sfpo/kl_frame_{k}"] = float(per_frame_kl_mean[k]) if k < len(per_frame_kl_mean) else float("nan")
@@ -1464,7 +1593,8 @@ class SFPO(Algorithm):
             f"logp_delta_abs={metrics.get('sfpo/logprob_delta_abs', float('nan')):.5f} "
             f"old_logp={metrics.get('sfpo/old_log_prob', float('nan')):.5f} "
             f"new_logp={metrics.get('sfpo/new_log_prob', float('nan')):.5f} "
-            f"sde_steps={metrics.get('sfpo/sde_train_steps', float('nan')):.0f}",
+            f"sde_steps={metrics.get('sfpo/sde_train_steps', float('nan')):.0f} "
+            f"action_std={metrics.get('policy/action_std_mean', float('nan')):.4f}",
             flush=True,
         )
         print(
@@ -1558,8 +1688,11 @@ class SFPO(Algorithm):
             f"[INFO] state_only_critic=True prefix_q=False "
             f"causal_velocity={self._policy.causal_velocity} causal_arch={self._policy.causal_arch} "
             f"action_transform={self.action_transform} action_max_delta={_amd_str} "
-            f"terminal_failure_cost=True failure_penalty={cfg.failure_penalty} "
-            f"per_frame_flow_logprob=True per_frame_ratio_ppo=True flat_clip=True "
+            f"actor_density={self.actor_density} action_noise_std={self.action_noise_std} "
+            f"action_std_trainable={self.action_std_trainable} "
+            f"terminal_failure_cost={self.failure_penalty != 0.0} failure_penalty={cfg.failure_penalty} "
+            f"per_frame_action_logprob={self.actor_density == 'action_gaussian'} "
+            f"per_frame_flow_logprob={self.actor_density == 'sde_path'} per_frame_ratio_ppo=True flat_clip=True "
             f"actor_advantage=gae_per_frame "
             f"per_frame_kl_adaptive_lr=True kl_units=1 kl_early_stop_factor={self.kl_early_stop_factor} "
             f"advantage_norm={cfg.advantage_normalization} "
