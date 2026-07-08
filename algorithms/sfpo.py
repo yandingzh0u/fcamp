@@ -7,10 +7,11 @@ keeps one supported path:
    full-support residual plan (``residual_absolute``). The env's action-rate
    penalty handles smoothness; SFPO does not use a hard delta clamp.
 
-2. **Causal flow policy**: the velocity field is causal over the horizon
-   (``v_k`` sees only ``z_0..z_k``), so the per-frame SDE log-prob is a real
-   conditional density and the PPO ratio ``exp(logp_k_new - logp_k_old)`` is
-   aligned with frame-k credit.
+2. **Causal flow policy + mean-preserving SDE exploration**: the velocity field
+   is causal over the horizon and is always evaluated on the deterministic mean
+   path. Learnable SDE noise is added as a structured chunk/path offset around
+   that mean path, so exploration does not pollute the zero-noise evaluation
+   trajectory.
 
 3. **Credit assignment + value propagation**: the actor samples a full
    ``h``-frame action chunk, so the critic and advantage are trained on the
@@ -38,10 +39,10 @@ from torch import nn
 
 from algorithms.base import Algorithm
 from algorithms.kl_scheduler import adaptive_lr_from_kl
-from networks.flow_inference import deterministic_sde_ode_actions
+from networks.flow_inference import deterministic_flow_actions
 from networks.flow_critic import FlowChunkValueCritic
 from networks.flow_policy import FlowMatchingPolicy
-from networks.flow_sampling import flow_sde_step
+from networks.flow_sampling import flow_ode_mean
 from networks.mlp_actor_critic import EmpiricalNormalization
 
 
@@ -79,15 +80,15 @@ class SFPO(Algorithm):
         self._policy.set_action_max_delta(None)
         self.action_transform = "residual_absolute"
         self._policy.action_transform = self.action_transform
-        self.action_noise_std = float(cfg.action_noise_std)
-        self.action_std_trainable = bool(getattr(cfg, "action_std_trainable", True))
-        if self.action_noise_std <= 0.0:
-            raise ValueError(f"action_noise_std must be > 0, got {self.action_noise_std}")
-        init_log_std = math.log(self.action_noise_std)
-        self._policy.action_log_std = nn.Parameter(
-            torch.full((self.horizon_h, self.num_act), init_log_std, device=env.device)
+        self.sde_noise_std = float(cfg.sde_noise_std)
+        self.sde_std_trainable = bool(getattr(cfg, "sde_std_trainable", True))
+        if self.sde_noise_std <= 0.0:
+            raise ValueError(f"sde_noise_std must be > 0, got {self.sde_noise_std}")
+        init_log_std = math.log(self.sde_noise_std)
+        self._policy.sde_log_std = nn.Parameter(
+            torch.full((int(cfg.flow_steps), self.horizon_h, self.num_act), init_log_std, device=env.device)
         )
-        self._policy.action_log_std.requires_grad_(self.action_std_trainable)
+        self._policy.sde_log_std.requires_grad_(self.sde_std_trainable)
         self.flow_critic_steps = int(getattr(cfg, "flow_critic_steps", cfg.flow_steps))
         self.flow_critic_samples = int(getattr(cfg, "flow_critic_samples", 4))
         self.flow_critic_fm_samples = int(getattr(cfg, "flow_critic_fm_samples", 1))
@@ -241,11 +242,10 @@ class SFPO(Algorithm):
         self._train_episode_length[done_ids] = 0.0
 
     def _deterministic_actor_actions(self, actor_obs: torch.Tensor, prev_action: torch.Tensor | None = None) -> torch.Tensor:
-        return deterministic_sde_ode_actions(
+        return deterministic_flow_actions(
             self._policy,
             actor_obs,
             steps=int(self.cfg.flow_steps),
-            sde_eta=float(self.cfg.sde_eta),
             initial_noise=None,
             prev_action=prev_action,
         )
@@ -257,36 +257,27 @@ class SFPO(Algorithm):
         # the raw obs BEFORE normalization so the smooth transform anchors on the
         # true last executed action, not a normalized surrogate.
         prev_action = obs[..., -self.num_act:].detach()
-        return deterministic_sde_ode_actions(
+        return deterministic_flow_actions(
             self._policy,
             actor_obs,
             steps=int(self.cfg.flow_steps),
-            sde_eta=float(self.cfg.sde_eta),
             initial_noise=None,
             prev_action=prev_action,
         )
 
     def _flow_mean_latent(self, actor_obs: torch.Tensor) -> torch.Tensor:
-        """Differentiable deterministic final flow latent used as the Gaussian mean."""
+        """Differentiable deterministic final flow latent used for eval/probing."""
         batch = actor_obs.shape[0]
         latent = torch.zeros(batch, self.chunk_dim, device=actor_obs.device, dtype=actor_obs.dtype)
         self._policy._validate_inputs(actor_obs, latent, int(self.cfg.flow_steps))
         obs_prep = self._policy._prepare_observation(actor_obs)
         steps = int(self.cfg.flow_steps)
         sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=actor_obs.device, dtype=actor_obs.dtype)
-        zero_step_noise = torch.zeros_like(latent)
         for step_index in range(steps):
             sigma = sigma_schedule[step_index]
             timestep_batch = torch.full((batch,), float(sigma.item()), device=actor_obs.device, dtype=actor_obs.dtype)
             model_output = self._policy.velocity_field(obs_prep, latent, timestep_batch)
-            latent, _ = flow_sde_step(
-                model_output=model_output,
-                latents=latent,
-                sigmas=sigma_schedule,
-                index=step_index,
-                eta=float(self.cfg.sde_eta),
-                sample_noise=zero_step_noise,
-            )
+            latent = flow_ode_mean(model_output, latent, sigma_schedule, step_index)
         return latent
 
     def _flow_mean_actions(self, actor_obs: torch.Tensor, prev_action: torch.Tensor | None = None) -> torch.Tensor:
@@ -295,28 +286,65 @@ class SFPO(Algorithm):
             actor_obs.shape[0], self.horizon_h, self.num_act
         )
 
-    def _action_gaussian_std(self, reference: torch.Tensor) -> torch.Tensor:
-        if not hasattr(self._policy, "action_log_std"):
-            std = torch.full(
-                (self.horizon_h, self.num_act),
-                self.action_noise_std,
-                device=reference.device,
-                dtype=reference.dtype,
-            )
-        else:
-            log_std = self._policy.action_log_std.to(device=reference.device, dtype=reference.dtype)
-            std = torch.exp(log_std).clamp(min=1.0e-3, max=10.0)
-        return std.view(*((1,) * (reference.ndim - 2)), self.horizon_h, self.num_act).expand_as(reference)
+    def _sde_step_std(self, step_index: int, sigma_schedule: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+        sigma = sigma_schedule[step_index].to(device=reference.device, dtype=reference.dtype)
+        sigma_next = sigma_schedule[step_index + 1].to(device=reference.device, dtype=reference.dtype)
+        sqrt_dt = torch.sqrt(torch.clamp((sigma_next - sigma).abs(), min=1.0e-12))
+        log_std = self._policy.sde_log_std[step_index].to(device=reference.device, dtype=reference.dtype)
+        std = torch.exp(log_std).clamp(min=1.0e-3, max=10.0) * sqrt_dt
+        return std.view(1, self.horizon_h, self.num_act).expand_as(reference)
 
     @staticmethod
-    def _action_gaussian_log_prob(actions: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+    def _chunk_path_from_innovations(innovations: torch.Tensor) -> torch.Tensor:
+        """Causal, invertible frame smoother for action-path exploration noise.
+
+        Innovations are independent in density space. Their normalized
+        cumulative path is an action-level trajectory perturbation, not a
+        residual-latent perturbation.
+        """
+        horizon = innovations.shape[-2]
+        norm = torch.sqrt(
+            torch.arange(1, horizon + 1, device=innovations.device, dtype=innovations.dtype)
+        ).view(*((1,) * (innovations.ndim - 2)), horizon, 1)
+        return torch.cumsum(innovations, dim=-2) / norm
+
+    @staticmethod
+    def _innovations_from_chunk_path(path_noise: torch.Tensor) -> torch.Tensor:
+        horizon = path_noise.shape[-2]
+        norm = torch.sqrt(
+            torch.arange(1, horizon + 1, device=path_noise.device, dtype=path_noise.dtype)
+        ).view(*((1,) * (path_noise.ndim - 2)), horizon, 1)
+        cumulative = path_noise * norm
+        first = cumulative[..., :1, :]
+        rest = cumulative[..., 1:, :] - cumulative[..., :-1, :]
+        return torch.cat([first, rest], dim=-2)
+
+    @staticmethod
+    def _residual_noise_from_path_innovations(innovations: torch.Tensor) -> torch.Tensor:
+        """Convert smooth action-path noise into residual-latent increments.
+
+        ``residual_absolute`` later cumulatively sums latent residuals. Therefore
+        the structured noise must be differenced before it is added to the
+        residual latent; otherwise the action path receives the noise twice.
+        """
+        path_noise = SFPO._chunk_path_from_innovations(innovations)
+        prev = torch.cat([torch.zeros_like(path_noise[..., :1, :]), path_noise[..., :-1, :]], dim=-2)
+        return path_noise - prev
+
+    @staticmethod
+    def _path_innovations_from_residual_noise(residual_noise: torch.Tensor) -> torch.Tensor:
+        path_noise = torch.cumsum(residual_noise, dim=-2)
+        return SFPO._innovations_from_chunk_path(path_noise)
+
+    @staticmethod
+    def _sde_innovation_log_prob(innovation: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
         var = std.square()
         log_std = torch.log(std)
-        log_prob = -0.5 * ((actions - mean).square() / var + 2.0 * log_std + math.log(2.0 * math.pi))
+        log_prob = -0.5 * (innovation.square() / var + 2.0 * log_std + math.log(2.0 * math.pi))
         return log_prob.sum(dim=-1)
 
     @staticmethod
-    def _action_gaussian_kl(
+    def _sde_transition_kl(
         old_mean: torch.Tensor,
         old_std: torch.Tensor,
         new_mean: torch.Tensor,
@@ -324,8 +352,88 @@ class SFPO(Algorithm):
     ) -> torch.Tensor:
         old_var = old_std.square()
         new_var = new_std.square()
-        kl = torch.log(new_std / old_std) + (old_var + (old_mean - new_mean).square()) / (2.0 * new_var) - 0.5
+        mean_delta_innovation = SFPO._path_innovations_from_residual_noise(old_mean - new_mean)
+        kl = torch.log(new_std / old_std) + (old_var + mean_delta_innovation.square()) / (2.0 * new_var) - 0.5
         return kl.sum(dim=-1)
+
+    def _sample_sde_path(
+        self,
+        actor_obs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch = actor_obs.shape[0]
+        steps = int(self.cfg.flow_steps)
+        mean_latent = torch.zeros(batch, self.chunk_dim, device=actor_obs.device, dtype=actor_obs.dtype)
+        sampled_latent = torch.zeros_like(mean_latent)
+        self._policy._validate_inputs(actor_obs, mean_latent, steps)
+        obs_prep = self._policy._prepare_observation(actor_obs)
+        sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=actor_obs.device, dtype=actor_obs.dtype)
+
+        latent_path = torch.zeros(batch, steps + 1, self.chunk_dim, device=actor_obs.device, dtype=actor_obs.dtype)
+        step_log_probs = torch.zeros(batch, steps, self.horizon_h, device=actor_obs.device, dtype=actor_obs.dtype)
+        step_means = torch.zeros(
+            batch, steps, self.horizon_h, self.num_act, device=actor_obs.device, dtype=actor_obs.dtype
+        )
+        step_stds = torch.zeros_like(step_means)
+        latent_path[:, 0, :] = sampled_latent
+
+        for step_index in range(steps):
+            sigma = sigma_schedule[step_index]
+            timestep_batch = torch.full((batch,), float(sigma.item()), device=actor_obs.device, dtype=actor_obs.dtype)
+            model_output = self._policy.velocity_field(obs_prep, mean_latent, timestep_batch)
+            mean_next_flat = flow_ode_mean(model_output, mean_latent, sigma_schedule, step_index)
+            mean_next = mean_next_flat.view(batch, self.horizon_h, self.num_act)
+            noise_offset = (sampled_latent - mean_latent).view(batch, self.horizon_h, self.num_act)
+            transition_mean = mean_next + noise_offset
+            std = self._sde_step_std(step_index, sigma_schedule, transition_mean)
+            innovation = std * torch.randn_like(std)
+            residual_noise = self._residual_noise_from_path_innovations(innovation)
+            sample = transition_mean + residual_noise
+            step_log_probs[:, step_index, :] = self._sde_innovation_log_prob(innovation, std)
+            step_means[:, step_index] = transition_mean
+            step_stds[:, step_index] = std
+            mean_latent = mean_next_flat
+            sampled_latent = sample.reshape(batch, self.chunk_dim)
+            latent_path[:, step_index + 1, :] = sampled_latent
+
+        return sampled_latent, latent_path, step_log_probs, step_means, step_stds
+
+    def _recompute_sde_path_stats(
+        self,
+        actor_obs: torch.Tensor,
+        latent_path: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch = actor_obs.shape[0]
+        steps = int(self.cfg.flow_steps)
+        mean_latent = torch.zeros(batch, self.chunk_dim, device=actor_obs.device, dtype=actor_obs.dtype)
+        self._policy._validate_inputs(actor_obs, mean_latent, steps)
+        obs_prep = self._policy._prepare_observation(actor_obs)
+        sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=actor_obs.device, dtype=actor_obs.dtype)
+
+        step_log_probs = torch.zeros(batch, steps, self.horizon_h, device=actor_obs.device, dtype=actor_obs.dtype)
+        step_means = torch.zeros(
+            batch, steps, self.horizon_h, self.num_act, device=actor_obs.device, dtype=actor_obs.dtype
+        )
+        step_stds = torch.zeros_like(step_means)
+
+        for step_index in range(steps):
+            sampled_latent = latent_path[:, step_index, :]
+            next_latent = latent_path[:, step_index + 1, :].view(batch, self.horizon_h, self.num_act)
+            sigma = sigma_schedule[step_index]
+            timestep_batch = torch.full((batch,), float(sigma.item()), device=actor_obs.device, dtype=actor_obs.dtype)
+            model_output = self._policy.velocity_field(obs_prep, mean_latent, timestep_batch)
+            mean_next_flat = flow_ode_mean(model_output, mean_latent, sigma_schedule, step_index)
+            mean_next = mean_next_flat.view(batch, self.horizon_h, self.num_act)
+            noise_offset = (sampled_latent - mean_latent).view(batch, self.horizon_h, self.num_act)
+            transition_mean = mean_next + noise_offset
+            std = self._sde_step_std(step_index, sigma_schedule, transition_mean)
+            residual_noise = next_latent - transition_mean
+            innovation = self._path_innovations_from_residual_noise(residual_noise)
+            step_log_probs[:, step_index, :] = self._sde_innovation_log_prob(innovation, std)
+            step_means[:, step_index] = transition_mean
+            step_stds[:, step_index] = std
+            mean_latent = mean_next_flat
+
+        return step_log_probs, step_means, step_stds
 
     # ------------------------------------------------------------------ #
     # Env reset / rollout entry points
@@ -395,11 +503,8 @@ class SFPO(Algorithm):
         actions_buf = torch.zeros(chunks, n_envs, h, self.num_act, device=device)
         latents_buf = torch.zeros(chunks, n_envs, flow_steps + 1, self.chunk_dim, device=device)
         old_log_probs_buf = torch.zeros(chunks, n_envs, flow_steps, h, device=device)
-        # Final residual-latent Gaussian parameters. The residual-latent ->
-        # action transform is fixed for old/new policies, so its Jacobian
-        # cancels in the PPO ratio.
-        old_action_mean_buf = torch.zeros(chunks, n_envs, h, self.num_act, device=device)
-        old_action_std_buf = torch.zeros(chunks, n_envs, h, self.num_act, device=device)
+        old_sde_mean_buf = torch.zeros(chunks, n_envs, flow_steps, h, self.num_act, device=device)
+        old_sde_std_buf = torch.zeros_like(old_sde_mean_buf)
         # prev_action for the smooth transform: the raw last executed action at
         # chunk start. Stored so update can recompute the same action transform.
         prev_action_buf = torch.zeros(chunks, n_envs, self.num_act, device=device)
@@ -447,20 +552,12 @@ class SFPO(Algorithm):
                 prev_action = obs[..., -self.num_act:].detach()
                 prev_action_buf[chunk_idx] = prev_action
 
-                mean_latent = self._flow_mean_latent(actor_obs_n).view(n_envs, h, self.num_act)
-                action_std = self._action_gaussian_std(mean_latent)
-                sample_latent_chunk = mean_latent + action_std * torch.randn_like(mean_latent)
+                final_latent, latent_path, step_log_probs, step_means, step_stds = self._sample_sde_path(actor_obs_n)
                 action_chunk = self._policy._action_transform(
-                    sample_latent_chunk.reshape(n_envs, self.chunk_dim),
+                    final_latent,
                     prev_action=prev_action,
                 ).view(n_envs, h, self.num_act)
-                action_log_probs = self._action_gaussian_log_prob(sample_latent_chunk, mean_latent, action_std)
-                latent_path = torch.zeros(n_envs, flow_steps + 1, self.chunk_dim, device=device, dtype=obs.dtype)
-                latent_path[:, -1, :] = sample_latent_chunk.reshape(n_envs, self.chunk_dim)
-                step_log_probs = torch.zeros(n_envs, flow_steps, h, device=device, dtype=obs.dtype)
-                step_log_probs[:, 0, :] = action_log_probs
                 train_step_indices = self._train_step_indices(device)
-                action_mean = mean_latent
                 action_abs_max = max(action_abs_max, float(action_chunk.abs().max().item()))
 
                 alive_in_chunk = torch.ones(n_envs, dtype=torch.bool, device=device)
@@ -567,8 +664,8 @@ class SFPO(Algorithm):
                 actions_buf[chunk_idx] = action_chunk.detach()
                 latents_buf[chunk_idx] = latent_path.detach()
                 old_log_probs_buf[chunk_idx] = step_log_probs.detach()
-                old_action_mean_buf[chunk_idx] = action_mean.detach()
-                old_action_std_buf[chunk_idx] = action_std.detach()
+                old_sde_mean_buf[chunk_idx] = step_means.detach()
+                old_sde_std_buf[chunk_idx] = step_stds.detach()
 
             # ---- batched critic evaluation (state-only V at chunk start) ----
             critic_obs_flat = critic_obs_buf.reshape(chunks * n_envs, self.critic_obs_dim)
@@ -665,8 +762,8 @@ class SFPO(Algorithm):
             "actions": actions_buf,
             "latents": latents_buf,
             "old_log_probs": old_log_probs_buf,
-            "old_action_mean": old_action_mean_buf,
-            "old_action_std": old_action_std_buf,
+            "old_sde_mean": old_sde_mean_buf,
+            "old_sde_std": old_sde_std_buf,
             "prev_action": prev_action_buf,
             "train_step_indices": train_step_indices,
             "values_v": values_v,
@@ -796,11 +893,10 @@ class SFPO(Algorithm):
 
         actor_obs = rollout["actor_obs"].reshape(raw_batch_size, self.actor_obs_dim)
         critic_obs = rollout["critic_obs"].reshape(raw_batch_size, self.critic_obs_dim)
-        actions = rollout["actions"].reshape(raw_batch_size, h, self.num_act)
         latent_path = rollout["latents"].reshape(raw_batch_size, flow_steps + 1, self.chunk_dim)
         old_log_probs = rollout["old_log_probs"].reshape(raw_batch_size, flow_steps, h)
-        old_action_mean = rollout["old_action_mean"].reshape(raw_batch_size, h, self.num_act)
-        old_action_std = rollout["old_action_std"].reshape(raw_batch_size, h, self.num_act)
+        old_sde_mean = rollout["old_sde_mean"].reshape(raw_batch_size, flow_steps, h, self.num_act)
+        old_sde_std = rollout["old_sde_std"].reshape(raw_batch_size, flow_steps, h, self.num_act)
         prev_action = rollout["prev_action"].reshape(raw_batch_size, self.num_act)
         chunk_v_targets = rollout["chunk_v_targets"].reshape(raw_batch_size)
         advantages = rollout["advantages"].reshape(raw_batch_size, h)
@@ -880,18 +976,17 @@ class SFPO(Algorithm):
 
                     old_log_probs_sub = old_log_probs[sub]  # [micro, steps, h]
                     old_per_frame_logp = old_log_probs_sub.sum(dim=1)  # [micro, h]
-                    sample_latent_chunk = latent_path[sub, -1, :].view(-1, h, self.num_act)
-                    new_action_mean = self._flow_mean_latent(actor_obs[sub]).view(-1, h, self.num_act)
-                    new_action_std = self._action_gaussian_std(new_action_mean)
-                    new_per_frame_logp = self._action_gaussian_log_prob(
-                        sample_latent_chunk, new_action_mean, new_action_std
+                    new_log_probs, new_sde_mean, new_sde_std = self._recompute_sde_path_stats(
+                        actor_obs[sub],
+                        latent_path[sub],
                     )
-                    kl_per_frame = self._action_gaussian_kl(
-                        old_action_mean[sub],
-                        old_action_std[sub].clamp(min=1.0e-6),
-                        new_action_mean.detach(),
-                        new_action_std.detach(),
-                    )
+                    new_per_frame_logp = new_log_probs.sum(dim=1)
+                    kl_per_frame = self._sde_transition_kl(
+                        old_sde_mean[sub],
+                        old_sde_std[sub].clamp(min=1.0e-6),
+                        new_sde_mean.detach(),
+                        new_sde_std.detach().clamp(min=1.0e-6),
+                    ).sum(dim=1)
                     per_frame_log_ratio = new_per_frame_logp - old_per_frame_logp  # [micro, h]
                     # Per-frame PPO ratio (NOT a prefix/joint cumsum ratio).
                     # Each executed chunk component gets its own per-frame
@@ -1031,6 +1126,7 @@ class SFPO(Algorithm):
                 param_delta_sq = param_delta_sq + torch.sum(delta * delta)
                 param_count += delta.numel()
             param_rms_delta = torch.sqrt(param_delta_sq / max(param_count, 1))
+            sde_std = torch.exp(self._policy.sde_log_std.detach()).clamp(min=1.0e-3, max=10.0)
 
         update_metrics = {
             "sfpo/loss": totals["loss"] / denom,
@@ -1073,11 +1169,10 @@ class SFPO(Algorithm):
             "policy/param_rms_delta": float(param_rms_delta.item()),
             "policy/raw_adv_mean": float(raw_gae_advantages.mean().item()),
             "policy/raw_adv_std": float(raw_gae_advantages.std(unbiased=False).item()),
-            "policy/action_std_mean": (
-                float(torch.exp(self._policy.action_log_std.detach()).mean().item())
-                if hasattr(self._policy, "action_log_std")
-                else float(self.action_noise_std)
-            ),
+            "policy/sde_std_mean": float(sde_std.mean().item()),
+            "policy/sde_std_min": float(sde_std.min().item()),
+            "policy/sde_std_max": float(sde_std.max().item()),
+            "policy/sde_std_params": float(self._policy.sde_log_std.numel()),
         }
         for k in range(h):
             update_metrics[f"sfpo/kl_frame_{k}"] = float(per_frame_kl_mean[k]) if k < len(per_frame_kl_mean) else float("nan")
@@ -1444,7 +1539,11 @@ class SFPO(Algorithm):
             f"old_logp={metrics.get('sfpo/old_log_prob', float('nan')):.5f} "
             f"new_logp={metrics.get('sfpo/new_log_prob', float('nan')):.5f} "
             f"sde_steps={metrics.get('sfpo/sde_train_steps', float('nan')):.0f} "
-            f"action_std={metrics.get('policy/action_std_mean', float('nan')):.4f}",
+            f"sde_mode=mean_path "
+            f"sde_std={metrics.get('policy/sde_std_mean', float('nan')):.4f} "
+            f"sde_std_min={metrics.get('policy/sde_std_min', float('nan')):.4f} "
+            f"sde_std_max={metrics.get('policy/sde_std_max', float('nan')):.4f} "
+            f"sde_params={metrics.get('policy/sde_std_params', float('nan')):.0f}",
             flush=True,
         )
         print(
@@ -1525,17 +1624,17 @@ class SFPO(Algorithm):
             f"[INFO] algo=sfpo actor_obs_dim={self.actor_obs_dim} critic_obs_dim={self.critic_obs_dim} "
             f"action_dim={self.num_act} horizon={cfg.horizon} rollout_chunks={self._chunks_per_update()} "
             f"rollout_env_steps={cfg.rollout_env_steps} flow_steps={cfg.flow_steps} "
-            f"sde_eta={cfg.sde_eta}",
+            f"sde_noise_std={cfg.sde_noise_std}",
             flush=True,
         )
         print(
             f"[INFO] critic_unit=flow_chunk_start state_only_critic=True prefix_q=False "
             f"causal_velocity={self._policy.causal_velocity} causal_arch={self._policy.causal_arch} "
             f"action_transform={self.action_transform} action_max_delta=none "
-            f"policy_density=action_gaussian action_noise_std={self.action_noise_std} "
-            f"action_std_trainable={self.action_std_trainable} "
+            f"exploration=mean_preserving_structured_sde sde_std_trainable={self.sde_std_trainable} "
+            f"sde_std_params={self._policy.sde_log_std.numel()} "
             f"terminal_failure_cost=False "
-            f"per_frame_action_logprob=True per_frame_flow_logprob=False "
+            f"structured_path_logprob=True "
             f"per_frame_ratio_ppo=True flat_clip=True "
             f"actor_advantage=gae_chunk "
             f"per_frame_kl_adaptive_lr=True kl_units=1 kl_early_stop_factor={self.kl_early_stop_factor} "

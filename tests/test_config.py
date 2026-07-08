@@ -40,17 +40,17 @@ def test_sfpo_config_is_ppo_aligned_h4() -> None:
     assert sfpo.parameters.policy_lr == 0.0003
     assert sfpo.parameters.value_lr == 0.0003
     assert sfpo.parameters.init_at_random_ep_len is True
-    # Failure penalty and SDE-path density are intentionally removed from the
-    # config surface. SFPO always uses action-Gaussian density and zero penalty.
-    assert sfpo.parameters.action_noise_std == 0.8
-    assert sfpo.parameters.action_std_trainable is True
+    # Failure penalty and final-action density are intentionally removed from
+    # the config surface. SFPO uses mean-preserving structured SDE exploration
+    # and zero hand-written failure penalty.
+    assert sfpo.parameters.sde_noise_std == 0.8
+    assert sfpo.parameters.sde_std_trainable is True
     assert sfpo.parameters.gae_lambda == 0.95
     assert sfpo.parameters.kl_early_stop_factor == 4.0
     assert sfpo.parameters.advantage_normalization == "global"
     assert sfpo.training.max_updates == 1000
     # SFPO-only flow/SDE head is preserved.
     assert sfpo.parameters.flow_steps >= 1
-    assert sfpo.parameters.sde_eta > 0.0
 
 
 def test_desired_kl_is_unified_per_step_budget() -> None:

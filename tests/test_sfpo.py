@@ -85,8 +85,8 @@ class _NegativeRewardEnv:
 
 def _build_algo(env, **overrides):
     base = dict(
-        horizon=4, rollout_env_steps=8, flow_steps=2, sde_eta=0.7,
-        action_noise_std=0.8, action_std_trainable=True,
+        horizon=4, rollout_env_steps=8, flow_steps=2,
+        sde_noise_std=0.8, sde_std_trainable=True,
         action_squash_scale=5.0,
         actor_hidden_dims=(16, 16), critic_hidden_dims=(16, 16), activation="elu",
         discount_gamma=0.99, gae_lambda=0.95,
@@ -167,13 +167,13 @@ def test_sfpo_collect_and_update_end_to_end() -> None:
     assert metrics["sfpo/grad_norm_critic"] >= 0.0
 
 
-def test_sfpo_action_gaussian_density_collect_and_update() -> None:
+def test_sfpo_learned_sde_density_collect_and_update() -> None:
     torch.manual_seed(0)
     env = _NegativeRewardEnv(num_envs=4, reward=0.05)
     algo = _build_algo(
         env,
-        action_noise_std=0.4,
-        action_std_trainable=True,
+        sde_noise_std=0.4,
+        sde_std_trainable=True,
         num_mini_batches=2,
         micro_batch_size=8,
     )
@@ -181,13 +181,16 @@ def test_sfpo_action_gaussian_density_collect_and_update() -> None:
     rollout = algo.collect(obs)
 
     assert torch.isfinite(rollout["old_log_probs"]).all()
-    assert rollout["old_action_std"].gt(0.0).any()
+    assert rollout["old_sde_std"].gt(0.0).any()
+    assert algo._policy.sde_log_std.shape == (2, 4, 3)
+    assert algo._policy.sde_log_std.numel() == 24
     assert torch.allclose(rollout["failure_cost_return"], torch.zeros_like(rollout["failure_cost_return"]))
 
     metrics = algo.update(rollout, collect_time=0.1)
     assert math.isfinite(metrics["sfpo/policy_loss"])
     assert math.isfinite(metrics["sfpo/kl_raw"])
-    assert metrics["policy/action_std_mean"] > 0.0
+    assert metrics["policy/sde_std_mean"] > 0.0
+    assert metrics["policy/sde_std_params"] == 24.0
 
 
 # --------------------------------------------------------------------------- #
@@ -250,18 +253,14 @@ def test_actor_advantage_is_chunk_gae() -> None:
 def _causal_action_grad_leak(policy, frame_k: int, horizon: int = 4, action_dim: int = 3) -> float:
     """Return max |grad| of a_k w.r.t. future noise frames j>k."""
     torch.manual_seed(0)
-    from networks.flow_sampling import flow_sde_step
+    from networks.flow_sampling import flow_ode_mean
     obs = torch.randn(2, policy.obs_dim)
     noise = torch.randn(2, policy.chunk_dim, requires_grad=True)
-    sde_noise = torch.randn(2, 3, policy.chunk_dim)
     sigma_schedule = torch.linspace(1.0, 0.0, 4, dtype=noise.dtype)
     latent = noise * 0.8
     t_batch = torch.full((2,), 1.0, dtype=noise.dtype)
     model_out = policy.velocity_field(obs, latent, t_batch)
-    new_latent, _ = flow_sde_step(
-        model_output=model_out, latents=latent, sigmas=sigma_schedule, index=0,
-        eta=0.7, sample_noise=sde_noise[:, 0],
-    )
+    new_latent = flow_ode_mean(model_out, latent, sigma_schedule, 0)
     noise.grad = None
     actions = policy._action_transform(new_latent[0], prev_action=torch.zeros(action_dim))
     actions = actions.view(horizon, action_dim)

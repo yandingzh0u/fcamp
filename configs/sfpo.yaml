@@ -26,9 +26,8 @@ parameters:
   activation: elu
   action_squash_scale: 5.0
   flow_steps: 4
-  sde_eta: 0.7
-  action_noise_std: 0.8
-  action_std_trainable: true
+  sde_noise_std: 0.8
+  sde_std_trainable: true
   rollout_env_steps: 24
   discount_gamma: 0.99
   gae_lambda: 0.95

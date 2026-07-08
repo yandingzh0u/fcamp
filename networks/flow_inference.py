@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import torch
 
-from .flow_sampling import flow_sde_step
+from .flow_sampling import flow_ode_mean
 
 
 @torch.no_grad()
-def deterministic_sde_ode_actions(
+def deterministic_flow_actions(
     policy,
     observation: torch.Tensor,
     *,
     steps: int,
-    sde_eta: float = 0.7,
     initial_noise: torch.Tensor | None = None,
     prev_action: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -34,7 +33,6 @@ def deterministic_sde_ode_actions(
         device=initial_noise.device,
         dtype=initial_noise.dtype,
     )
-    zero_step_noise = torch.zeros_like(initial_noise)
     for step_index in range(steps):
         sigma = sigma_schedule[step_index]
         time_batch = torch.full(
@@ -44,14 +42,7 @@ def deterministic_sde_ode_actions(
             dtype=initial_noise.dtype,
         )
         model_output = policy.velocity_field(obs_prep, latent, time_batch)
-        latent, _ = flow_sde_step(
-            model_output=model_output,
-            latents=latent,
-            sigmas=sigma_schedule,
-            index=step_index,
-            eta=sde_eta,
-            sample_noise=zero_step_noise,
-        )
+        latent = flow_ode_mean(model_output, latent, sigma_schedule, step_index)
 
     return policy._action_transform(latent, prev_action=prev_action).view(
         initial_noise.shape[0],
