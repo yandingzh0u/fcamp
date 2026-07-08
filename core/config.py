@@ -110,7 +110,7 @@ class SFPOConfig:
     """SFPO's single supported training path.
 
     SFPO uses one actor-density path: a causal residual flow policy with
-    mean-preserving structured SDE exploration, a chunk-start flow value critic,
+    action-chunk coefficients-preserving exploration, a chunk-start flow value critic,
     and no hand-written failure penalty.
     """
 
@@ -120,8 +120,8 @@ class SFPOConfig:
     activation: str
     action_squash_scale: float
     flow_steps: int
-    sde_noise_std: float
-    sde_std_trainable: bool
+    cps_noise_level: float
+    cps_trainable: bool
     rollout_env_steps: int
     discount_gamma: float
     gae_lambda: float
@@ -284,8 +284,8 @@ def _validate(config: ExperimentConfig) -> None:
             raise ValueError("SFPO requires parameters.rollout_env_steps > 0")
         if config.parameters.rollout_env_steps % config.parameters.horizon:
             raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
-        if config.parameters.sde_noise_std <= 0.0:
-            raise ValueError("SFPO requires parameters.sde_noise_std > 0")
+        if not (0.0 < config.parameters.cps_noise_level < 1.0):
+            raise ValueError("SFPO requires parameters.cps_noise_level in (0, 1)")
         norm = str(config.parameters.advantage_normalization).lower()
         if norm not in {"per_prefix", "global", "none"}:
             raise ValueError(

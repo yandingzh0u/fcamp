@@ -86,7 +86,7 @@ class _NegativeRewardEnv:
 def _build_algo(env, **overrides):
     base = dict(
         horizon=4, rollout_env_steps=8, flow_steps=2,
-        sde_noise_std=0.8, sde_std_trainable=True,
+        cps_noise_level=0.8, cps_trainable=True,
         action_squash_scale=5.0,
         actor_hidden_dims=(16, 16), critic_hidden_dims=(16, 16), activation="elu",
         discount_gamma=0.99, gae_lambda=0.95,
@@ -167,13 +167,13 @@ def test_sfpo_collect_and_update_end_to_end() -> None:
     assert metrics["sfpo/grad_norm_critic"] >= 0.0
 
 
-def test_sfpo_learned_sde_density_collect_and_update() -> None:
+def test_sfpo_action_cps_density_collect_and_update() -> None:
     torch.manual_seed(0)
     env = _NegativeRewardEnv(num_envs=4, reward=0.05)
     algo = _build_algo(
         env,
-        sde_noise_std=0.4,
-        sde_std_trainable=True,
+        cps_noise_level=0.4,
+        cps_trainable=True,
         num_mini_batches=2,
         micro_batch_size=8,
     )
@@ -181,16 +181,16 @@ def test_sfpo_learned_sde_density_collect_and_update() -> None:
     rollout = algo.collect(obs)
 
     assert torch.isfinite(rollout["old_log_probs"]).all()
-    assert rollout["old_sde_std"].gt(0.0).any()
-    assert algo._policy.sde_log_std.shape == (2, 4, 3)
-    assert algo._policy.sde_log_std.numel() == 24
+    assert rollout["old_cps_noise_coeff"].gt(0.0).any()
+    assert algo._policy.cps_logit.shape == (2, 4, 3)
+    assert algo._policy.cps_logit.numel() == 24
     assert torch.allclose(rollout["failure_cost_return"], torch.zeros_like(rollout["failure_cost_return"]))
 
     metrics = algo.update(rollout, collect_time=0.1)
     assert math.isfinite(metrics["sfpo/policy_loss"])
     assert math.isfinite(metrics["sfpo/kl_raw"])
-    assert metrics["policy/sde_std_mean"] > 0.0
-    assert metrics["policy/sde_std_params"] == 24.0
+    assert metrics["policy/cps_eta_mean"] > 0.0
+    assert metrics["policy/cps_params"] == 24.0
 
 
 # --------------------------------------------------------------------------- #

@@ -41,15 +41,15 @@ def test_sfpo_config_is_ppo_aligned_h4() -> None:
     assert sfpo.parameters.value_lr == 0.0003
     assert sfpo.parameters.init_at_random_ep_len is True
     # Failure penalty and final-action density are intentionally removed from
-    # the config surface. SFPO uses mean-preserving structured SDE exploration
-    # and zero hand-written failure penalty.
-    assert sfpo.parameters.sde_noise_std == 0.8
-    assert sfpo.parameters.sde_std_trainable is True
+    # the config surface. SFPO uses action-chunk CPS exploration and zero
+    # hand-written failure penalty.
+    assert sfpo.parameters.cps_noise_level == 0.8
+    assert sfpo.parameters.cps_trainable is True
     assert sfpo.parameters.gae_lambda == 0.95
     assert sfpo.parameters.kl_early_stop_factor == 4.0
     assert sfpo.parameters.advantage_normalization == "global"
     assert sfpo.training.max_updates == 1000
-    # SFPO-only flow/SDE head is preserved.
+    # SFPO-only flow/CPS head is preserved.
     assert sfpo.parameters.flow_steps >= 1
 
 
