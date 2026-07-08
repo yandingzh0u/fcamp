@@ -1,6 +1,6 @@
 """Shared KL-based adaptive learning-rate controller.
 
-The contract across PPO / SFPO / MixGRPO:
+The contract across PPO / SFPO:
 
 * ``desired_kl`` in the config is a **per-env-control-step KL budget**, NOT a
   per-sample / per-chunk budget. This makes ``desired_kl: 0.01`` mean the same
@@ -8,11 +8,7 @@ The contract across PPO / SFPO / MixGRPO:
 
 * The raw KL observed during the update is algorithm-specific:
 
-  - **PPO / MixGRPO** use a *chunk*-level (joint) KL: for a horizon-``h``
-    policy the joint log-prob ratio is roughly ``h`` times a single-step
-    ratio, so the raw KL scales with ``h``. To compare apples to apples we
-    normalize by ``kl_units`` (= ``h``) before comparing against
-    ``desired_kl``.
+  - **PPO** uses the normal per-control-step KL budget.
 
   - **SFPO** uses per-frame / per-prefix ratios and the adaptive-LR KL is the
     masked MEAN per-frame KL (a per-control-step quantity), so ``kl_units=1``
@@ -21,13 +17,10 @@ The contract across PPO / SFPO / MixGRPO:
   Examples (``desired_kl = 0.01``)::
 
       PPO        h=1  -> kl_units=1  -> raw_target = 0.01 * 1   = 0.01
-      MixGRPO    h=4  -> kl_units=4  -> raw_target = 0.01 * 4   = 0.04
       SFPO       h=4  -> kl_units=1  -> raw_target = 0.01 * 1   = 0.01
 
-Only ``horizon`` is used as the normalizer for the chunk-level algorithms.
-``flow_steps`` is NOT used because the per-SDE-step log-prob is already
-averaged inside ``kl_loss``. Group counts are NOT used because they are a
-sampling/sorting structure, not a control-step length.
+``flow_steps`` is NOT used as a KL normalizer. It is an internal flow
+integration detail, not an environment control-step length.
 
 FPO is intentionally NOT routed through here: its ``kl`` is a prediction MSE,
 not a log-prob KL, so it cannot share the ``desired_kl`` semantics.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from .flow_sampling import flow_grpo_step
+from .flow_sampling import flow_sde_step
 
 
 @torch.no_grad()
@@ -44,7 +44,7 @@ def deterministic_sde_ode_actions(
             dtype=initial_noise.dtype,
         )
         model_output = policy.velocity_field(obs_prep, latent, time_batch)
-        latent, _ = flow_grpo_step(
+        latent, _ = flow_sde_step(
             model_output=model_output,
             latents=latent,
             sigmas=sigma_schedule,

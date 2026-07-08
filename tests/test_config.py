@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from core.config import FPOConfig, MixGRPOConfig, PPOConfig, SFPOConfig, config_from_dict, load_config
+from core.config import FPOConfig, PPOConfig, SFPOConfig, config_from_dict, load_config
 from env.tasks import TASKS
 
 
@@ -13,18 +13,17 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_algorithm_configs_are_disjoint() -> None:
     ppo = load_config(ROOT / "configs" / "ppo.yaml")
     fpo = load_config(ROOT / "configs" / "fpo.yaml")
-    mixgrpo = load_config(ROOT / "configs" / "mixgrpo.yaml")
     sfpo = load_config(ROOT / "configs" / "sfpo.yaml")
     assert isinstance(ppo.parameters, PPOConfig)
     assert isinstance(fpo.parameters, FPOConfig)
-    assert isinstance(mixgrpo.parameters, MixGRPOConfig)
     assert isinstance(sfpo.parameters, SFPOConfig)
     assert "flow_steps" not in {field.name for field in fields(PPOConfig)}
     assert "entropy_coef" not in {field.name for field in fields(FPOConfig)}
-    assert "critic_hidden_dims" not in {field.name for field in fields(MixGRPOConfig)}
     sfpo_fields = {field.name for field in fields(SFPOConfig)}
     assert "num_generations" not in sfpo_fields
     assert "tail_bootstrap_steps" not in sfpo_fields
+    assert "actor_density" not in sfpo_fields
+    assert "failure_penalty" not in sfpo_fields
 
 
 def test_sfpo_config_is_ppo_aligned_h4() -> None:
@@ -40,19 +39,12 @@ def test_sfpo_config_is_ppo_aligned_h4() -> None:
     assert sfpo.parameters.desired_kl == 0.01
     assert sfpo.parameters.policy_lr == 0.0003
     assert sfpo.parameters.value_lr == 0.0003
-    assert sfpo.parameters.use_clipped_value_loss is True
     assert sfpo.parameters.init_at_random_ep_len is True
-    # Failure penalty is intentionally removed; PPO ratio/KL is applied to the
-    # executed action-plan density instead of the internal SDE path.
-    assert sfpo.parameters.failure_penalty == 0.0
-    assert sfpo.parameters.actor_density == "action_gaussian"
+    # Failure penalty and SDE-path density are intentionally removed from the
+    # config surface. SFPO always uses action-Gaussian density and zero penalty.
     assert sfpo.parameters.action_noise_std == 0.8
     assert sfpo.parameters.action_std_trainable is True
     assert sfpo.parameters.gae_lambda == 0.95
-    assert sfpo.parameters.causal_velocity is True
-    assert sfpo.parameters.causal_arch == "prefix_cumsum"
-    assert sfpo.parameters.action_transform == "residual_absolute"
-    assert sfpo.parameters.action_max_delta is None
     assert sfpo.parameters.kl_early_stop_factor == 4.0
     assert sfpo.parameters.advantage_normalization == "global"
     assert sfpo.training.max_updates == 1000
@@ -62,24 +54,19 @@ def test_sfpo_config_is_ppo_aligned_h4() -> None:
 
 
 def test_desired_kl_is_unified_per_step_budget() -> None:
-    # desired_kl is a per-env-control-step KL budget, shared across PPO/SFPO/
-    # MixGRPO so it never needs per-horizon hand-tuning.
+    # desired_kl is a per-env-control-step KL budget shared across PPO/SFPO.
     #
-    #   PPO / MixGRPO: joint-chunk KL → kl_units = horizon
+    #   PPO: per-step KL
     #   SFPO: per-frame KL → kl_units = 1
     #
     # The raw target internally is desired_kl * kl_units; for SFPO kl_units=1
     # so the raw target equals desired_kl directly.
     ppo = load_config(ROOT / "configs" / "ppo.yaml")
     sfpo = load_config(ROOT / "configs" / "sfpo.yaml")
-    mixgrpo = load_config(ROOT / "configs" / "mixgrpo.yaml")
     assert ppo.parameters.desired_kl == 0.01
     assert sfpo.parameters.desired_kl == 0.01
-    assert mixgrpo.parameters.desired_kl == 0.01
     # SFPO kl_units=1 (per-frame), not horizon-scaled.
     assert sfpo.parameters.desired_kl * 1 == 0.01
-    # MixGRPO still uses horizon-scaled raw target.
-    assert mixgrpo.parameters.desired_kl * mixgrpo.parameters.horizon == 0.01 * 12
 
 
 def test_task_binds_motion_and_terrain() -> None:

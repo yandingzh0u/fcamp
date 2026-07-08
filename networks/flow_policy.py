@@ -93,12 +93,8 @@ class FlowMatchingPolicy(nn.Module):
         # per-frame step is bounded by max_delta, matching the environment's
         # action-rate penalty contract.
         self.action_max_delta: torch.Tensor | None = None
-        # Action transform selector. Authoritative for "residual_absolute"
-        # (v6). "absolute"/"delta" still fall through to the action_max_delta-
-        # driven branches below for backward compatibility with non-SFPO callers
-        # (e.g. MixGRPO, which never sets action_max_delta and relies on the
-        # absolute squash). SFPO.build() keeps this consistent with
-        # action_max_delta for absolute/delta.
+        # Action transform selector. SFPO sets "residual_absolute"; the
+        # absolute/delta branches remain for direct FlowMatchingPolicy tests.
         self.action_transform: str = "absolute"
 
     def set_action_max_delta(self, max_delta) -> None:

@@ -42,7 +42,6 @@ from core.config import (
     ALGORITHM_CONFIGS,
     EnvironmentConfig,
     ExperimentConfig,
-    MixGRPOConfig,
     TrainingConfig,
     config_from_dict,
 )
@@ -112,10 +111,6 @@ def main() -> None:
             else args_cli.startup_randomization
         ),
     )
-    parameters = cfg.parameters
-    if isinstance(parameters, MixGRPOConfig):
-        parameters = replace(parameters, num_generations=1)
-
     torch.manual_seed(args_cli.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args_cli.seed)
@@ -126,7 +121,7 @@ def main() -> None:
         render=not args_cli.headless,
         render_every=args_cli.render_every,
     )
-    algo = make_algorithm(cfg.algorithm)(parameters, env, simulation_app)
+    algo = make_algorithm(cfg.algorithm)(cfg.parameters, env, simulation_app)
     algo.build()
     algo.policy.load_state_dict(payload["policy"])
     algo.policy.eval()

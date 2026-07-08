@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from .fpo import FPO
-from .mixgrpo import MixGRPO
 from .ppo import PPO
 from .sfpo import SFPO
 
 _REGISTRY = {
-    "mixgrpo": MixGRPO,
     "ppo": PPO,
     "fpo": FPO,
     "sfpo": SFPO,

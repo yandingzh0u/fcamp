@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from algorithms.mixgrpo import MixGRPO
 from core.checkpoint import Checkpointer
 
 
@@ -63,42 +62,3 @@ def test_reset_sampler_on_resume_skips_compatible_checkpoint_state(tmp_path) -> 
     assert sampler.load_calls == 0
     assert not bool(trainer.env._failure_recorded.any())
     assert trainer.start_update == 13
-
-
-class _TailEnv:
-    def __init__(self) -> None:
-        self.record_motion_failures = True
-        self.record_flags_seen: list[bool] = []
-
-    def step(self, action: torch.Tensor, auto_reset: bool = False):
-        del auto_reset
-        self.record_flags_seen.append(self.record_motion_failures)
-        count = action.shape[0]
-        reward = torch.ones(count, device=action.device)
-        done = torch.zeros(count, dtype=torch.bool, device=action.device)
-        info = {"done_terms": {"time_out": done.clone()}}
-        return action, reward, done, info
-
-
-def test_mixgrpo_tail_bootstrap_disables_and_restores_sampler_recording() -> None:
-    algo = object.__new__(MixGRPO)
-    algo._policy = nn.Identity()
-    algo._policy.train()
-    algo.env = _TailEnv()
-    algo.cfg = SimpleNamespace(horizon=1)
-    algo.deterministic_actions = lambda obs: obs.unsqueeze(1)
-
-    obs = torch.zeros(4, 3)
-    alive = torch.ones(4, dtype=torch.bool)
-    result = algo._compute_tail_bootstrap(
-        obs,
-        alive,
-        tail_steps=3,
-        gamma=0.99,
-        terminal_penalty=1.0,
-    )
-
-    assert result.shape == (4,)
-    assert algo.env.record_flags_seen == [False, False, False]
-    assert algo.env.record_motion_failures is True
-    assert algo._policy.training is True

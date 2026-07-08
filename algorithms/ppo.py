@@ -390,7 +390,7 @@ class PPO(Algorithm):
         if desired_kl <= 0.0:
             return
         # kl_units=1 for PPO, so this is behavior-preserving while sharing the
-        # same per-step KL contract as SFPO/MixGRPO.
+        # same per-step KL contract as SFPO.
         new_actor_lr, _ = adaptive_lr_from_kl(
             raw_kl=kl_mean,
             kl_units=self.kl_units,

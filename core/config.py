@@ -7,7 +7,7 @@ from typing import Any, Literal, TypeAlias
 import yaml
 
 
-AlgorithmName: TypeAlias = Literal["ppo", "fpo", "mixgrpo", "sfpo"]
+AlgorithmName: TypeAlias = Literal["ppo", "fpo", "sfpo"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,56 +106,12 @@ class FPOConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class MixGRPOConfig:
-    horizon: int
-    actor_hidden_dims: tuple[int, ...]
-    activation: str
-    action_squash_scale: float
-    flow_steps: int
-    sde_eta: float
-    init_noise_std: float
-    init_same_noise: bool
-    first_generation_zero_noise: bool
-    eval_initial_noise: str
-    num_generations: int
-    rollout_env_steps: int
-    tail_bootstrap_steps: int
-    terminal_penalty: float
-    discount_gamma: float
-    clip_range: float
-    adv_clip_max: float
-    desired_kl: float
-    entropy_coef: float
-    policy_epochs: int
-    num_mini_batches: int
-    micro_batch_size: int
-    max_grad_norm: float
-    policy_lr: float
-
-
-@dataclass(frozen=True, slots=True)
 class SFPOConfig:
-    """Causal smooth-chunk SFPO (root-cause redesign).
+    """SFPO's single supported training path.
 
-    Fixes the PPO/GRPO-to-chunk-flow unit mismatches:
-
-      * action chunk is a previous-action-conditioned smooth trajectory
-        (bounded delta from the last executed action), NOT absolute actions --
-        matches the environment's action-rate penalty contract so open-loop
-        chunk execution stays continuous;
-      * causal flow velocity over horizon: ``v_k`` only sees ``z_0..z_k`` so
-        the per-frame flow log-prob is a valid conditional density for PPO;
-      * state-only chunk-start V critic (the action-conditioned Q prefix is
-        dropped: it was trained but never wired into the actor advantage);
-      * chunk GAE advantage for the sampled ``h``-frame action plan, broadcast
-        to executed frames, instead of frame-local credit for a chunk policy;
-      * per-frame PPO ratio + flat clip as the low-variance carrier for the
-        chunk advantage;
-      * terminal failure cost: an immediate per-step penalty added to the
-        failure frame's reward with bootstrap=0 (true terminal), NOT an
-        absorbing -10 bootstrap that saturated the value distribution;
-      * KL controller updated before each minibatch optimizer step
-        (PPO-aligned) with actor epoch early-stop on prefix KL.
+    The older SDE-path-density ablations are intentionally removed: SFPO now
+    uses a causal residual flow policy, action-Gaussian PPO density,
+    chunk-start flow value critic, and no hand-written failure penalty.
     """
 
     horizon: int
@@ -165,11 +121,8 @@ class SFPOConfig:
     action_squash_scale: float
     flow_steps: int
     sde_eta: float
-    init_noise_std: float
-    actor_density: str
     action_noise_std: float
     action_std_trainable: bool
-    eval_initial_noise: str
     rollout_env_steps: int
     discount_gamma: float
     gae_lambda: float
@@ -179,8 +132,6 @@ class SFPOConfig:
     num_mini_batches: int
     micro_batch_size: int
     value_loss_coef: float
-    value_clip_range: float
-    use_clipped_value_loss: bool
     policy_lr: float
     value_lr: float
     weight_decay: float
@@ -188,28 +139,12 @@ class SFPOConfig:
     empirical_normalization: bool
     init_at_random_ep_len: bool
     max_grad_norm: float
-    # causal flow policy: v_k depends only on z_0..z_k (prefix-cumsum), so
-    # logp_k is a genuine conditional density and per-frame PPO ratio is valid.
-    causal_velocity: bool
-    causal_arch: str
-    # action transform: "absolute" (v5 default) = flow latent is an absolute
-    # joint target squashed by a_k = scale*tanh(raw_k/scale) -- PPO-like full
-    # action support, the env's action-rate penalty handles smoothness.
-    # "delta" (legacy v4) = bounded per-frame delta integrator
-    # a_i = prev + max_delta*tanh(raw_i); retained for ablation only (it
-    # starved the actor of action freedom).
-    action_transform: str
-    # per-frame max delta for action_transform="delta"; None when
-    # action_transform="absolute".
-    action_max_delta: float | None
-    # terminal failure cost
-    failure_penalty: float
     # KL controller
     kl_early_stop_factor: float
     advantage_normalization: str
 
 
-AlgorithmConfig: TypeAlias = PPOConfig | FPOConfig | MixGRPOConfig | SFPOConfig
+AlgorithmConfig: TypeAlias = PPOConfig | FPOConfig | SFPOConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,15 +174,12 @@ class ExperimentConfig:
 
     @property
     def observation_group_size(self) -> int:
-        if isinstance(self.parameters, MixGRPOConfig):
-            return self.parameters.num_generations
         return 1
 
 
 ALGORITHM_CONFIGS = {
     "ppo": PPOConfig,
     "fpo": FPOConfig,
-    "mixgrpo": MixGRPOConfig,
     "sfpo": SFPOConfig,
 }
 
@@ -344,11 +276,6 @@ def _validate(config: ExperimentConfig) -> None:
     if train.log_every < 1:
         raise ValueError("training.log_every must be positive")
     resolve_task(env.task)
-    if isinstance(config.parameters, MixGRPOConfig):
-        if config.parameters.num_generations < 2:
-            raise ValueError("MixGRPO requires parameters.num_generations >= 2")
-        if env.num_envs % config.parameters.num_generations:
-            raise ValueError("environment.num_envs must be divisible by parameters.num_generations")
     if isinstance(config.parameters, SFPOConfig):
         if config.parameters.horizon < 1:
             raise ValueError("SFPO requires parameters.horizon >= 1")
@@ -358,14 +285,6 @@ def _validate(config: ExperimentConfig) -> None:
             raise ValueError("SFPO requires parameters.rollout_env_steps > 0")
         if config.parameters.rollout_env_steps % config.parameters.horizon:
             raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
-        if config.parameters.failure_penalty < 0.0:
-            raise ValueError("SFPO requires parameters.failure_penalty >= 0")
-        density = str(config.parameters.actor_density).lower()
-        if density not in {"sde_path", "action_gaussian"}:
-            raise ValueError(
-                "SFPO parameters.actor_density must be one of "
-                f"'sde_path', 'action_gaussian'; got {config.parameters.actor_density!r}"
-            )
         if config.parameters.action_noise_std <= 0.0:
             raise ValueError("SFPO requires parameters.action_noise_std > 0")
         norm = str(config.parameters.advantage_normalization).lower()
@@ -374,20 +293,3 @@ def _validate(config: ExperimentConfig) -> None:
                 "SFPO parameters.advantage_normalization must be one of "
                 f"'per_prefix', 'global', 'none'; got {config.parameters.advantage_normalization!r}"
             )
-        transform = str(config.parameters.action_transform).lower()
-        if transform not in {"absolute", "delta", "residual_absolute"}:
-            raise ValueError(
-                "SFPO parameters.action_transform must be one of "
-                f"'absolute', 'delta', 'residual_absolute'; got {config.parameters.action_transform!r}"
-            )
-        if transform == "delta":
-            if config.parameters.action_max_delta is None:
-                raise ValueError(
-                    "SFPO parameters.action_max_delta must be a positive float "
-                    "when action_transform='delta'"
-                )
-            if config.parameters.action_max_delta <= 0.0:
-                raise ValueError(
-                    "SFPO parameters.action_max_delta must be > 0 when "
-                    "action_transform='delta'"
-                )
