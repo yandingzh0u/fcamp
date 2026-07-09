@@ -45,6 +45,7 @@ def test_sfpo_config_is_ppo_aligned_h4() -> None:
     # hand-written failure penalty.
     assert sfpo.parameters.cps_noise_level == 0.8
     assert sfpo.parameters.cps_trainable is True
+    assert sfpo.parameters.cps_cov_rank == 8
     assert sfpo.parameters.gae_lambda == 0.95
     assert sfpo.parameters.kl_early_stop_factor == 4.0
     assert sfpo.parameters.advantage_normalization == "global"

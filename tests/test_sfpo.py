@@ -86,7 +86,7 @@ class _NegativeRewardEnv:
 def _build_algo(env, **overrides):
     base = dict(
         horizon=4, rollout_env_steps=8, flow_steps=2,
-        cps_noise_level=0.8, cps_trainable=True,
+        cps_noise_level=0.8, cps_trainable=True, cps_cov_rank=2,
         action_squash_scale=5.0,
         actor_hidden_dims=(16, 16), critic_hidden_dims=(16, 16), activation="elu",
         discount_gamma=0.99, gae_lambda=0.95,
@@ -182,15 +182,71 @@ def test_sfpo_action_cps_density_collect_and_update() -> None:
 
     assert torch.isfinite(rollout["old_log_probs"]).all()
     assert rollout["old_cps_noise_coeff"].gt(0.0).any()
-    assert algo._policy.cps_logit.shape == (2, 4, 3)
-    assert algo._policy.cps_logit.numel() == 24
+    assert "cps_condition" not in rollout
+    flat_dim = 4 * 3
+    rank = 2
+    expected_params = 2 * (flat_dim + flat_dim * rank)
+    assert algo._policy.cps_diag_raw.shape == (2, flat_dim)
+    assert algo._policy.cps_lowrank_raw.shape == (2, flat_dim, rank)
+    assert algo._policy.cps_diag_raw.numel() + algo._policy.cps_lowrank_raw.numel() == expected_params
+    _, _, cov, _, _, trace_normalized = algo._cps_covariance_factors(
+        0,
+        device=algo._policy.cps_diag_raw.device,
+        dtype=algo._policy.cps_diag_raw.dtype,
+    )
+    assert torch.allclose(cov, torch.eye(flat_dim), atol=1e-3)
+    assert abs(float(trace_normalized.item()) - 1.0) < 1e-6
     assert torch.allclose(rollout["failure_cost_return"], torch.zeros_like(rollout["failure_cost_return"]))
 
     metrics = algo.update(rollout, collect_time=0.1)
     assert math.isfinite(metrics["sfpo/policy_loss"])
     assert math.isfinite(metrics["sfpo/kl_raw"])
-    assert metrics["policy/cps_eta_mean"] > 0.0
-    assert metrics["policy/cps_params"] == 24.0
+    assert metrics["policy/cps_base_eta"] > 0.0
+    assert abs(metrics["policy/cps_eta_mean"] - 0.4) < 1e-3
+    assert abs(metrics["policy/cps_cov_trace_mean"] - 1.0) < 1e-5
+    assert metrics["policy/cps_cov_rank"] == float(rank)
+    assert metrics["policy/cps_params"] == float(expected_params)
+
+
+def test_sfpo_rank_zero_is_diagonal_gaussian_cps_baseline() -> None:
+    torch.manual_seed(1)
+    env = _NegativeRewardEnv(num_envs=4, reward=0.05)
+    algo = _build_algo(
+        env,
+        flow_steps=2,
+        cps_cov_rank=0,
+        rollout_env_steps=8,
+        policy_epochs=1,
+        cps_noise_level=0.4,
+        num_mini_batches=2,
+        micro_batch_size=8,
+    )
+    obs = algo.initial_reset()
+    rollout = algo.collect(obs)
+
+    flat_dim = 4 * 3
+    expected_params = 2 * flat_dim
+    assert algo._policy.cps_diag_raw.shape == (2, flat_dim)
+    assert algo._policy.cps_lowrank_raw.shape == (2, flat_dim, 0)
+    assert algo._policy.cps_diag_raw.numel() + algo._policy.cps_lowrank_raw.numel() == expected_params
+
+    _, lowrank, cov, _, _, trace_normalized = algo._cps_covariance_factors(
+        0,
+        device=algo._policy.cps_diag_raw.device,
+        dtype=algo._policy.cps_diag_raw.dtype,
+    )
+    offdiag = cov - torch.diag_embed(torch.diagonal(cov))
+    assert lowrank.numel() == 0
+    assert torch.allclose(offdiag, torch.zeros_like(offdiag), atol=1e-7)
+    assert abs(float(trace_normalized.item()) - 1.0) < 1e-6
+    assert torch.isfinite(rollout["old_log_probs"]).all()
+
+    metrics = algo.update(rollout, collect_time=0.1)
+    assert math.isfinite(metrics["sfpo/policy_loss"])
+    assert metrics["policy/cps_cov_rank"] == 0.0
+    assert metrics["policy/cps_params"] == float(expected_params)
+    assert abs(metrics["policy/cps_cov_offdiag_abs"]) < 1e-7
+    assert abs(metrics["policy/cps_cov_lowrank_energy"]) < 1e-7
 
 
 # --------------------------------------------------------------------------- #

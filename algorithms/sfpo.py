@@ -1,33 +1,13 @@
-"""SFPO: causal flow policy + chunk-level actor-critic.
 
-Root-cause redesign of the chunked-action flow-matching policy. The design
-keeps one supported path:
 
-1. **Action semantics**: the flow latent is a previous-action-anchored
-   full-support residual plan (``residual_absolute``). The env's action-rate
-   penalty handles smoothness; SFPO does not use a hard delta clamp.
+"""SFPO: causal flow policy with trace-normalized low-rank CPS exploration.
 
-2. **Causal flow policy + action-chunk CPS exploration**: the deterministic
-   flow ODE is the zero-noise action-plan backbone. Stochasticity lives in a
-   separate action-path offset process whose CPS coefficients satisfy
-   ``pred_coeff^2 + noise_coeff^2 = 1`` at every flow step. The learnable CPS
-   mixing angle controls how much offset energy is retained versus refreshed by
-   Brownian causal path noise; the noise is never fed back into the drift.
-
-3. **Credit assignment + value propagation**: the actor samples a full
-   ``h``-frame action chunk, so the critic and advantage are trained on the
-   same chunk unit. ``V(s_chunk_start)`` predicts the discounted chunk return
-   plus the next chunk bootstrap; actor frames inside the chunk all receive the
-   same chunk-GAE advantage. Per-frame PPO ratios remain the low-variance
-   carrier for the chunk advantage.
-
-4. **Terminal handling**: failures terminate with bootstrap 0. No hand-written
-   failure penalty is injected into the reward.
-
-KL controller is PPO-aligned: the masked mean per-frame KL drives the ACTOR
-learning rate (critic LR is decoupled, fixed at ``value_lr``), updated before
-each minibatch optimizer step, with an actor-epoch early-stop that freezes the
-actor (critic keeps training) when KL exceeds ``kl_early_stop_factor * desired_kl``.
+The actor keeps one stochastic path: a deterministic residual flow backbone plus
+in-flow CPS exploration. Fresh noise is sampled in the 4xaction_dim trajectory
+space through a learned diagonal-plus-low-rank covariance whose trace is
+normalized to preserve the scalar CPS noise budget. The exact covariance
+transition density is used for the PPO ratio/KL; there is no action-Gaussian
+exploration branch or hand-written failure penalty.
 """
 
 from __future__ import annotations
@@ -37,6 +17,7 @@ from collections import deque
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from algorithms.base import Algorithm
 from algorithms.kl_scheduler import adaptive_lr_from_kl
@@ -84,11 +65,20 @@ class SFPO(Algorithm):
         self.cps_trainable = bool(getattr(cfg, "cps_trainable", True))
         if not (0.0 < self.cps_noise_level < 1.0):
             raise ValueError(f"cps_noise_level must be in (0, 1), got {self.cps_noise_level}")
-        init_logit = math.log(self.cps_noise_level / (1.0 - self.cps_noise_level))
-        self._policy.cps_logit = nn.Parameter(
-            torch.full((int(cfg.flow_steps), self.horizon_h, self.num_act), init_logit, device=env.device)
+        steps = int(cfg.flow_steps)
+        self._cps_flat_dim = self.horizon_h * self.num_act
+        self.cps_cov_rank = int(getattr(cfg, "cps_cov_rank", 8))
+        if self.cps_cov_rank < 0:
+            raise ValueError(f"cps_cov_rank must be >= 0, got {self.cps_cov_rank}")
+        init_diag = math.log(math.exp(1.0) - 1.0)
+        self._policy.cps_diag_raw = nn.Parameter(
+            torch.full((steps, self._cps_flat_dim), init_diag, device=env.device)
         )
-        self._policy.cps_logit.requires_grad_(self.cps_trainable)
+        self._policy.cps_lowrank_raw = nn.Parameter(
+            1.0e-3 * torch.randn(steps, self._cps_flat_dim, self.cps_cov_rank, device=env.device)
+        )
+        self._policy.cps_diag_raw.requires_grad_(self.cps_trainable)
+        self._policy.cps_lowrank_raw.requires_grad_(self.cps_trainable)
         self.flow_critic_steps = int(getattr(cfg, "flow_critic_steps", cfg.flow_steps))
         self.flow_critic_samples = int(getattr(cfg, "flow_critic_samples", 4))
         self.flow_critic_fm_samples = int(getattr(cfg, "flow_critic_fm_samples", 1))
@@ -282,21 +272,36 @@ class SFPO(Algorithm):
         sigma_next = sigma_schedule[step_index + 1].to(device=reference.device, dtype=reference.dtype)
         delta_sigma = torch.clamp(sigma - sigma_next, min=0.0)
         sqrt_delta = torch.sqrt(delta_sigma)
-        eta = torch.sigmoid(self._policy.cps_logit[step_index]).to(device=reference.device, dtype=reference.dtype)
+        eta = torch.as_tensor(self.cps_noise_level, device=reference.device, dtype=reference.dtype)
         beta = 0.5 * math.pi * eta
         del sigma_next
         # Mean-preserving Action-CPS applies coefficient preservation to the
         # exploration offset process, not to the deterministic flow backbone.
-        # Fresh Brownian energy is incremental; retained offset energy fills the
-        # remaining unit coefficient.
+        # The fresh structured noise is trace-normalized, so the average
+        # Brownian energy is still exactly the scalar CPS budget below.
         noise_coeff = torch.sin(beta) * sqrt_delta
         predicted_sq = torch.clamp(1.0 - noise_coeff.square(), min=1.0e-12)
         predicted_coeff = torch.sqrt(predicted_sq)
-        return (
-            predicted_coeff.view(1, self.horizon_h, self.num_act).expand_as(reference),
-            noise_coeff.view(1, self.horizon_h, self.num_act).expand_as(reference),
-            eta.view(1, self.horizon_h, self.num_act).expand_as(reference),
-        )
+        return predicted_coeff, noise_coeff, eta
+
+    def _cps_covariance_factors(
+        self,
+        step_index: int,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        diag = F.softplus(self._policy.cps_diag_raw[step_index].to(device=device, dtype=dtype)) + 1.0e-4
+        lowrank = self._policy.cps_lowrank_raw[step_index].to(device=device, dtype=dtype)
+        trace = (diag.square().sum() + lowrank.square().sum()).clamp(min=1.0e-12)
+        scale = torch.sqrt(trace / float(self._cps_flat_dim))
+        diag = diag / scale
+        lowrank = lowrank / scale
+        cov = torch.diag_embed(diag.square()) + lowrank @ lowrank.transpose(0, 1)
+        chol = torch.linalg.cholesky(cov)
+        log_diag_chol = torch.log(torch.diagonal(chol).clamp(min=1.0e-8))
+        trace_normalized = (diag.square().sum() + lowrank.square().sum()) / float(self._cps_flat_dim)
+        return diag, lowrank, cov, chol, log_diag_chol, trace_normalized
 
     def _cps_backbone_step(
         self,
@@ -349,23 +354,54 @@ class SFPO(Algorithm):
         rest = cumulative[..., 1:, :] - cumulative[..., :-1, :]
         return torch.cat([first, rest], dim=-2)
 
-    @staticmethod
-    def _cps_innovation_log_prob(innovation: torch.Tensor, noise_coeff: torch.Tensor) -> torch.Tensor:
-        # PPO needs the density of the executed stochastic transition. The
-        # Brownian increment is Gaussian; this is not an action-Gaussian policy,
-        # it is the SDE transition density induced by the CPS offset process.
+    def _sample_cps_innovation(
+        self,
+        *,
+        batch: int,
+        step_index: int,
+        noise_coeff: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        diag, lowrank, _, _, _, _ = self._cps_covariance_factors(step_index, device=device, dtype=dtype)
+        eps_diag = torch.randn(batch, self._cps_flat_dim, device=device, dtype=dtype)
+        eps_rank = torch.randn(batch, self.cps_cov_rank, device=device, dtype=dtype)
+        innovation = eps_diag * diag.view(1, -1) + eps_rank @ lowrank.transpose(0, 1)
+        return (innovation * noise_coeff).view(batch, self.horizon_h, self.num_act)
+
+    def _cps_innovation_log_prob(
+        self,
+        innovation: torch.Tensor,
+        noise_coeff: torch.Tensor,
+        step_index: int,
+    ) -> torch.Tensor:
+        # Exact low-rank-plus-diagonal CPS density. Cholesky orders dimensions
+        # by frame, so grouping component log-probs back into frames gives a
+        # causal conditional decomposition of the joint chunk density.
+        batch = innovation.shape[0]
         safe_std = torch.clamp(noise_coeff, min=1.0e-6)
-        log_prob = -0.5 * (
-            innovation.square() / safe_std.square()
-            + 2.0 * torch.log(safe_std)
-            + math.log(2.0 * math.pi)
+        _, _, _, chol, log_diag_chol, _ = self._cps_covariance_factors(
+            step_index,
+            device=innovation.device,
+            dtype=innovation.dtype,
         )
-        return log_prob.sum(dim=-1)
+        flat = innovation.reshape(batch, self._cps_flat_dim) / safe_std
+        whitened = torch.linalg.solve_triangular(
+            chol,
+            flat.transpose(0, 1),
+            upper=False,
+        ).transpose(0, 1)
+        component_log_prob = (
+            -0.5 * (whitened.square() + math.log(2.0 * math.pi))
+            - log_diag_chol.view(1, self._cps_flat_dim)
+            - torch.log(safe_std)
+        )
+        return component_log_prob.view(batch, self.horizon_h, self.num_act).sum(dim=-1)
 
     def _sample_cps_path(
         self,
         actor_obs: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         batch = actor_obs.shape[0]
         steps = int(self.cfg.flow_steps)
         mean_latent = torch.zeros(batch, self.chunk_dim, device=actor_obs.device, dtype=actor_obs.dtype)
@@ -376,10 +412,9 @@ class SFPO(Algorithm):
 
         latent_path = torch.zeros(batch, steps + 1, self.chunk_dim, device=actor_obs.device, dtype=actor_obs.dtype)
         step_log_probs = torch.zeros(batch, steps, self.horizon_h, device=actor_obs.device, dtype=actor_obs.dtype)
-        step_mean_paths = torch.zeros(
+        step_noise_coeffs = torch.zeros(
             batch, steps, self.horizon_h, self.num_act, device=actor_obs.device, dtype=actor_obs.dtype
         )
-        step_noise_coeffs = torch.zeros_like(step_mean_paths)
         latent_path[:, 0, :] = sampled_latent
 
         for step_index in range(steps):
@@ -394,24 +429,29 @@ class SFPO(Algorithm):
             )
             offset_path = self._path_from_residual(offset)
             mean_path = next_mean_path + predicted_coeff * offset_path
-            innovation = noise_coeff * torch.randn_like(noise_coeff)
+            innovation = self._sample_cps_innovation(
+                batch=batch,
+                step_index=step_index,
+                noise_coeff=noise_coeff,
+                device=actor_obs.device,
+                dtype=actor_obs.dtype,
+            )
             random_path = self._chunk_path_from_innovations(innovation)
             sample_path = mean_path + random_path
             sample = self._residual_from_path(sample_path)
-            step_log_probs[:, step_index, :] = self._cps_innovation_log_prob(innovation, noise_coeff)
-            step_mean_paths[:, step_index] = mean_path
+            step_log_probs[:, step_index, :] = self._cps_innovation_log_prob(innovation, noise_coeff, step_index)
             step_noise_coeffs[:, step_index] = noise_coeff
             mean_latent = self._residual_from_path(next_mean_path).reshape(batch, self.chunk_dim)
             sampled_latent = sample.reshape(batch, self.chunk_dim)
             latent_path[:, step_index + 1, :] = sampled_latent
 
-        return sampled_latent, latent_path, step_log_probs, step_mean_paths, step_noise_coeffs
+        return sampled_latent, latent_path, step_log_probs, step_noise_coeffs
 
     def _recompute_cps_path_stats(
         self,
         actor_obs: torch.Tensor,
         latent_path: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         batch = actor_obs.shape[0]
         steps = int(self.cfg.flow_steps)
         mean_latent = torch.zeros(batch, self.chunk_dim, device=actor_obs.device, dtype=actor_obs.dtype)
@@ -420,10 +460,6 @@ class SFPO(Algorithm):
         sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=actor_obs.device, dtype=actor_obs.dtype)
 
         step_log_probs = torch.zeros(batch, steps, self.horizon_h, device=actor_obs.device, dtype=actor_obs.dtype)
-        step_mean_paths = torch.zeros(
-            batch, steps, self.horizon_h, self.num_act, device=actor_obs.device, dtype=actor_obs.dtype
-        )
-        step_noise_coeffs = torch.zeros_like(step_mean_paths)
 
         for step_index in range(steps):
             sampled_latent = latent_path[:, step_index, :]
@@ -442,12 +478,10 @@ class SFPO(Algorithm):
             next_path = self._path_from_residual(next_latent)
             path_noise = next_path - mean_path
             innovation = self._innovations_from_chunk_path(path_noise)
-            step_log_probs[:, step_index, :] = self._cps_innovation_log_prob(innovation, noise_coeff)
-            step_mean_paths[:, step_index] = mean_path
-            step_noise_coeffs[:, step_index] = noise_coeff
+            step_log_probs[:, step_index, :] = self._cps_innovation_log_prob(innovation, noise_coeff, step_index)
             mean_latent = self._residual_from_path(next_mean_path).reshape(batch, self.chunk_dim)
 
-        return step_log_probs, step_mean_paths, step_noise_coeffs
+        return step_log_probs
 
     # ------------------------------------------------------------------ #
     # Env reset / rollout entry points
@@ -517,8 +551,7 @@ class SFPO(Algorithm):
         actions_buf = torch.zeros(chunks, n_envs, h, self.num_act, device=device)
         latents_buf = torch.zeros(chunks, n_envs, flow_steps + 1, self.chunk_dim, device=device)
         old_log_probs_buf = torch.zeros(chunks, n_envs, flow_steps, h, device=device)
-        old_cps_mean_buf = torch.zeros(chunks, n_envs, flow_steps, h, self.num_act, device=device)
-        old_cps_noise_coeff_buf = torch.zeros_like(old_cps_mean_buf)
+        old_cps_noise_coeff_buf = torch.zeros(chunks, n_envs, flow_steps, h, self.num_act, device=device)
         # prev_action for the smooth transform: the raw last executed action at
         # chunk start. Stored so update can recompute the same action transform.
         prev_action_buf = torch.zeros(chunks, n_envs, self.num_act, device=device)
@@ -566,7 +599,12 @@ class SFPO(Algorithm):
                 prev_action = obs[..., -self.num_act:].detach()
                 prev_action_buf[chunk_idx] = prev_action
 
-                final_latent, latent_path, step_log_probs, step_means, step_noise_coeffs = self._sample_cps_path(actor_obs_n)
+                (
+                    final_latent,
+                    latent_path,
+                    step_log_probs,
+                    step_noise_coeffs,
+                ) = self._sample_cps_path(actor_obs_n)
                 action_chunk = self._policy._action_transform(
                     final_latent,
                     prev_action=prev_action,
@@ -678,7 +716,6 @@ class SFPO(Algorithm):
                 actions_buf[chunk_idx] = action_chunk.detach()
                 latents_buf[chunk_idx] = latent_path.detach()
                 old_log_probs_buf[chunk_idx] = step_log_probs.detach()
-                old_cps_mean_buf[chunk_idx] = step_means.detach()
                 old_cps_noise_coeff_buf[chunk_idx] = step_noise_coeffs.detach()
 
             # ---- batched critic evaluation (state-only V at chunk start) ----
@@ -776,7 +813,6 @@ class SFPO(Algorithm):
             "actions": actions_buf,
             "latents": latents_buf,
             "old_log_probs": old_log_probs_buf,
-            "old_cps_mean": old_cps_mean_buf,
             "old_cps_noise_coeff": old_cps_noise_coeff_buf,
             "prev_action": prev_action_buf,
             "train_step_indices": train_step_indices,
@@ -909,7 +945,6 @@ class SFPO(Algorithm):
         critic_obs = rollout["critic_obs"].reshape(raw_batch_size, self.critic_obs_dim)
         latent_path = rollout["latents"].reshape(raw_batch_size, flow_steps + 1, self.chunk_dim)
         old_log_probs = rollout["old_log_probs"].reshape(raw_batch_size, flow_steps, h)
-        old_cps_mean = rollout["old_cps_mean"].reshape(raw_batch_size, flow_steps, h, self.num_act)
         prev_action = rollout["prev_action"].reshape(raw_batch_size, self.num_act)
         chunk_v_targets = rollout["chunk_v_targets"].reshape(raw_batch_size)
         advantages = rollout["advantages"].reshape(raw_batch_size, h)
@@ -993,7 +1028,7 @@ class SFPO(Algorithm):
                     # steps. This keeps the PPO ratio in the same units as the
                     # official MixGRPO CPS objective.
                     old_per_frame_logp = old_log_probs_sub.mean(dim=1)  # [micro, h]
-                    new_log_probs, _, _ = self._recompute_cps_path_stats(
+                    new_log_probs = self._recompute_cps_path_stats(
                         actor_obs[sub],
                         latent_path[sub],
                     )
@@ -1141,17 +1176,39 @@ class SFPO(Algorithm):
                 param_delta_sq = param_delta_sq + torch.sum(delta * delta)
                 param_count += delta.numel()
             param_rms_delta = torch.sqrt(param_delta_sq / max(param_count, 1))
-            cps_eta = torch.sigmoid(self._policy.cps_logit.detach())
-            cps_beta = 0.5 * math.pi * cps_eta
             # Report the train-time CPS noise coefficient averaged across the
             # scheduler. It is step dependent because Action-CPS scales fresh
             # Brownian path noise by sqrt(delta_sigma).
-            sigma_schedule = torch.linspace(1.0, 0.0, flow_steps + 1, device=device, dtype=cps_eta.dtype)
-            sigma = sigma_schedule[:-1].view(flow_steps, 1, 1)
-            sigma_next = sigma_schedule[1:].view(flow_steps, 1, 1)
+            cps_eta = torch.full((flow_steps,), self.cps_noise_level, device=device, dtype=torch.float32)
+            sigma_schedule = torch.linspace(1.0, 0.0, flow_steps + 1, device=device, dtype=torch.float32)
+            sigma = sigma_schedule[:-1]
+            sigma_next = sigma_schedule[1:]
             sqrt_delta = torch.sqrt(torch.clamp(sigma - sigma_next, min=0.0))
-            cps_noise_coeff = torch.sin(cps_beta) * sqrt_delta
+            cps_noise_coeff = torch.sin(0.5 * math.pi * cps_eta) * sqrt_delta
             cps_pred_coeff = torch.sqrt(torch.clamp(1.0 - cps_noise_coeff.square(), min=1.0e-12))
+            cov_traces = []
+            cov_logdets = []
+            cov_diag = []
+            cov_offdiag_abs = []
+            cov_lowrank_energy = []
+            for step_index in range(flow_steps):
+                diag_factor, lowrank, cov, _, log_diag_chol, trace_normalized = self._cps_covariance_factors(
+                    step_index,
+                    device=device,
+                    dtype=torch.float32,
+                )
+                diag = torch.diagonal(cov)
+                offdiag = cov - torch.diag_embed(diag)
+                cov_traces.append(trace_normalized)
+                cov_logdets.append(2.0 * log_diag_chol.sum())
+                cov_diag.append(diag)
+                cov_offdiag_abs.append(offdiag.abs().mean())
+                cov_lowrank_energy.append(lowrank.square().sum() / float(self._cps_flat_dim))
+            cps_cov_trace = torch.stack(cov_traces)
+            cps_cov_logdet = torch.stack(cov_logdets)
+            cps_cov_diag = torch.stack(cov_diag)
+            cps_cov_offdiag_abs = torch.stack(cov_offdiag_abs)
+            cps_cov_lowrank_energy = torch.stack(cov_lowrank_energy)
 
         update_metrics = {
             "sfpo/loss": totals["loss"] / denom,
@@ -1194,6 +1251,7 @@ class SFPO(Algorithm):
             "policy/param_rms_delta": float(param_rms_delta.item()),
             "policy/raw_adv_mean": float(raw_gae_advantages.mean().item()),
             "policy/raw_adv_std": float(raw_gae_advantages.std(unbiased=False).item()),
+            "policy/cps_base_eta": float(self.cps_noise_level),
             "policy/cps_eta_mean": float(cps_eta.mean().item()),
             "policy/cps_eta_min": float(cps_eta.min().item()),
             "policy/cps_eta_max": float(cps_eta.max().item()),
@@ -1202,9 +1260,21 @@ class SFPO(Algorithm):
             "policy/cps_noise_coeff_max": float(cps_noise_coeff.max().item()),
             "policy/cps_pred_coeff_mean": float(cps_pred_coeff.mean().item()),
             "policy/cps_energy_error": float(
-                torch.max(torch.abs(cps_pred_coeff.square() + cps_noise_coeff.square() - 1.0)).item()
+                torch.max(
+                    torch.abs(cps_pred_coeff.square() + cps_noise_coeff.square() * cps_cov_trace - 1.0)
+                ).item()
             ),
-            "policy/cps_params": float(self._policy.cps_logit.numel()),
+            "policy/cps_cov_trace_mean": float(cps_cov_trace.mean().item()),
+            "policy/cps_cov_trace_min": float(cps_cov_trace.min().item()),
+            "policy/cps_cov_trace_max": float(cps_cov_trace.max().item()),
+            "policy/cps_cov_logdet_mean": float(cps_cov_logdet.mean().item()),
+            "policy/cps_cov_diag_mean": float(cps_cov_diag.mean().item()),
+            "policy/cps_cov_diag_min": float(cps_cov_diag.min().item()),
+            "policy/cps_cov_diag_max": float(cps_cov_diag.max().item()),
+            "policy/cps_cov_offdiag_abs": float(cps_cov_offdiag_abs.mean().item()),
+            "policy/cps_cov_lowrank_energy": float(cps_cov_lowrank_energy.mean().item()),
+            "policy/cps_cov_rank": float(self.cps_cov_rank),
+            "policy/cps_params": float(self._policy.cps_diag_raw.numel() + self._policy.cps_lowrank_raw.numel()),
         }
         for k in range(h):
             update_metrics[f"sfpo/kl_frame_{k}"] = float(per_frame_kl_mean[k]) if k < len(per_frame_kl_mean) else float("nan")
@@ -1571,12 +1641,20 @@ class SFPO(Algorithm):
             f"old_logp={metrics.get('sfpo/old_log_prob', float('nan')):.5f} "
             f"new_logp={metrics.get('sfpo/new_log_prob', float('nan')):.5f} "
             f"cps_steps={metrics.get('sfpo/cps_train_steps', float('nan')):.0f} "
-            f"cps_eta={metrics.get('policy/cps_eta_mean', float('nan')):.4f} "
-            f"cps_eta_min={metrics.get('policy/cps_eta_min', float('nan')):.4f} "
-            f"cps_eta_max={metrics.get('policy/cps_eta_max', float('nan')):.4f} "
+            f"base_eta={metrics.get('policy/cps_base_eta', float('nan')):.4f} "
+            f"eta={metrics.get('policy/cps_eta_mean', float('nan')):.4f} "
+            f"[{metrics.get('policy/cps_eta_min', float('nan')):.4f},{metrics.get('policy/cps_eta_max', float('nan')):.4f}] "
             f"cps_noise={metrics.get('policy/cps_noise_coeff_mean', float('nan')):.4f} "
             f"cps_noise_max={metrics.get('policy/cps_noise_coeff_max', float('nan')):.4f} "
             f"cps_energy_err={metrics.get('policy/cps_energy_error', float('nan')):.2e} "
+            f"cov_trace={metrics.get('policy/cps_cov_trace_mean', float('nan')):.4f} "
+            f"[{metrics.get('policy/cps_cov_trace_min', float('nan')):.4f},{metrics.get('policy/cps_cov_trace_max', float('nan')):.4f}] "
+            f"cov_logdet={metrics.get('policy/cps_cov_logdet_mean', float('nan')):.4f} "
+            f"cov_diag={metrics.get('policy/cps_cov_diag_mean', float('nan')):.4f} "
+            f"[{metrics.get('policy/cps_cov_diag_min', float('nan')):.4f},{metrics.get('policy/cps_cov_diag_max', float('nan')):.4f}] "
+            f"cov_offdiag={metrics.get('policy/cps_cov_offdiag_abs', float('nan')):.4f} "
+            f"lowrank_energy={metrics.get('policy/cps_cov_lowrank_energy', float('nan')):.4f} "
+            f"rank={metrics.get('policy/cps_cov_rank', float('nan')):.0f} "
             f"cps_params={metrics.get('policy/cps_params', float('nan')):.0f}",
             flush=True,
         )
@@ -1665,10 +1743,11 @@ class SFPO(Algorithm):
             f"[INFO] critic_unit=flow_chunk_start state_only_critic=True prefix_q=False "
             f"causal_velocity={self._policy.causal_velocity} causal_arch={self._policy.causal_arch} "
             f"action_transform={self.action_transform} action_max_delta=none "
-            f"exploration=mean_preserving_cps_offset cps_trainable={self.cps_trainable} "
-            f"cps_params={self._policy.cps_logit.numel()} "
+            f"exploration=trace_normalized_lowrank_diag_cps_inside_flow cps_trainable={self.cps_trainable} "
+            f"cps_cov_rank={self.cps_cov_rank} "
+            f"cps_params={self._policy.cps_diag_raw.numel() + self._policy.cps_lowrank_raw.numel()} "
             f"terminal_failure_cost=False "
-            f"cps_path_coordinates=True offset_energy_preserving=True brownian_transition_density=True "
+            f"cps_path_coordinates=True offset_energy_preserving=True lowrank_diag_transition_density=True "
             f"per_frame_ratio_ppo=True flat_clip=True "
             f"actor_advantage=gae_chunk "
             f"per_frame_kl_adaptive_lr=True kl_units=1 kl_early_stop_factor={self.kl_early_stop_factor} "

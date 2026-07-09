@@ -122,6 +122,7 @@ class SFPOConfig:
     flow_steps: int
     cps_noise_level: float
     cps_trainable: bool
+    cps_cov_rank: int
     rollout_env_steps: int
     discount_gamma: float
     gae_lambda: float
@@ -286,6 +287,8 @@ def _validate(config: ExperimentConfig) -> None:
             raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
         if not (0.0 < config.parameters.cps_noise_level < 1.0):
             raise ValueError("SFPO requires parameters.cps_noise_level in (0, 1)")
+        if config.parameters.cps_cov_rank < 0:
+            raise ValueError("SFPO requires parameters.cps_cov_rank >= 0")
         norm = str(config.parameters.advantage_normalization).lower()
         if norm not in {"per_prefix", "global", "none"}:
             raise ValueError(

@@ -28,6 +28,7 @@ parameters:
   flow_steps: 4
   cps_noise_level: 0.8
   cps_trainable: true
+  cps_cov_rank: 8
   rollout_env_steps: 24
   discount_gamma: 0.99
   gae_lambda: 0.95
