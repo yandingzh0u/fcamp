@@ -7,7 +7,7 @@ from typing import Any, Literal, TypeAlias
 import yaml
 
 
-AlgorithmName: TypeAlias = Literal["ppo", "fpo", "sfpo"]
+AlgorithmName: TypeAlias = Literal["ppo", "fpo", "sfpo", "sfpo-gaussian", "chunk-ppo"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +144,67 @@ class SFPOConfig:
     advantage_normalization: str
 
 
-AlgorithmConfig: TypeAlias = PPOConfig | FPOConfig | SFPOConfig
+@dataclass(frozen=True, slots=True)
+class SFPOGaussianConfig:
+    """SFPO ablation with final action-space diagonal Gaussian exploration."""
+
+    horizon: int
+    actor_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
+    activation: str
+    action_squash_scale: float
+    flow_steps: int
+    init_noise_std: float
+    rollout_env_steps: int
+    discount_gamma: float
+    gae_lambda: float
+    clip_range: float
+    desired_kl: float
+    policy_epochs: int
+    num_mini_batches: int
+    micro_batch_size: int
+    value_loss_coef: float
+    policy_lr: float
+    value_lr: float
+    weight_decay: float
+    critic_weight_decay: float
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+    max_grad_norm: float
+    # KL controller
+    kl_early_stop_factor: float
+    advantage_normalization: str
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkPPOConfig:
+    """PPO-style policy over fixed-length action chunks."""
+
+    horizon: int
+    actor_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
+    activation: str
+    init_noise_std: float
+    discount_gamma: float
+    num_steps_per_env: int
+    num_learning_epochs: int
+    num_mini_batches: int
+    gae_lambda: float
+    clip_range: float
+    value_clip_range: float
+    entropy_coef: float
+    value_loss_coef: float
+    desired_kl: float
+    actor_learning_rate: float
+    critic_learning_rate: float
+    weight_decay: float
+    critic_weight_decay: float
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+    max_grad_norm: float
+
+
+AlgorithmConfig: TypeAlias = PPOConfig | FPOConfig | SFPOConfig | SFPOGaussianConfig | ChunkPPOConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +241,8 @@ ALGORITHM_CONFIGS = {
     "ppo": PPOConfig,
     "fpo": FPOConfig,
     "sfpo": SFPOConfig,
+    "sfpo-gaussian": SFPOGaussianConfig,
+    "chunk-ppo": ChunkPPOConfig,
 }
 
 
@@ -295,3 +357,29 @@ def _validate(config: ExperimentConfig) -> None:
                 "SFPO parameters.advantage_normalization must be one of "
                 f"'per_prefix', 'global', 'none'; got {config.parameters.advantage_normalization!r}"
             )
+    if isinstance(config.parameters, SFPOGaussianConfig):
+        if config.parameters.horizon < 1:
+            raise ValueError("SFPO-Gaussian requires parameters.horizon >= 1")
+        if config.parameters.flow_steps < 1:
+            raise ValueError("SFPO-Gaussian requires parameters.flow_steps >= 1")
+        if config.parameters.init_noise_std <= 0.0:
+            raise ValueError("SFPO-Gaussian requires parameters.init_noise_std > 0")
+        if config.parameters.rollout_env_steps <= 0:
+            raise ValueError("SFPO-Gaussian requires parameters.rollout_env_steps > 0")
+        if config.parameters.rollout_env_steps % config.parameters.horizon:
+            raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
+        norm = str(config.parameters.advantage_normalization).lower()
+        if norm not in {"per_prefix", "global", "none"}:
+            raise ValueError(
+                "SFPO-Gaussian parameters.advantage_normalization must be one of "
+                f"'per_prefix', 'global', 'none'; got {config.parameters.advantage_normalization!r}"
+            )
+    if isinstance(config.parameters, ChunkPPOConfig):
+        if config.parameters.horizon < 1:
+            raise ValueError("ChunkPPO requires parameters.horizon >= 1")
+        if config.parameters.init_noise_std <= 0.0:
+            raise ValueError("ChunkPPO requires parameters.init_noise_std > 0")
+        if config.parameters.num_steps_per_env <= 0:
+            raise ValueError("ChunkPPO requires parameters.num_steps_per_env > 0")
+        if config.parameters.num_steps_per_env % config.parameters.horizon:
+            raise ValueError("parameters.num_steps_per_env must be divisible by parameters.horizon")

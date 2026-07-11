@@ -3,7 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from core.config import FPOConfig, PPOConfig, SFPOConfig, config_from_dict, load_config
+from core.config import (
+    ChunkPPOConfig,
+    FPOConfig,
+    PPOConfig,
+    SFPOConfig,
+    SFPOGaussianConfig,
+    config_from_dict,
+    load_config,
+)
 from env.tasks import TASKS
 
 
@@ -14,9 +22,13 @@ def test_algorithm_configs_are_disjoint() -> None:
     ppo = load_config(ROOT / "configs" / "ppo.yaml")
     fpo = load_config(ROOT / "configs" / "fpo.yaml")
     sfpo = load_config(ROOT / "configs" / "sfpo.yaml")
+    sfpo_gaussian = load_config(ROOT / "configs" / "sfpo_gaussian.yaml")
+    chunk_ppo = load_config(ROOT / "configs" / "chunk_ppo.yaml")
     assert isinstance(ppo.parameters, PPOConfig)
     assert isinstance(fpo.parameters, FPOConfig)
     assert isinstance(sfpo.parameters, SFPOConfig)
+    assert isinstance(sfpo_gaussian.parameters, SFPOGaussianConfig)
+    assert isinstance(chunk_ppo.parameters, ChunkPPOConfig)
     assert "flow_steps" not in {field.name for field in fields(PPOConfig)}
     assert "entropy_coef" not in {field.name for field in fields(FPOConfig)}
     sfpo_fields = {field.name for field in fields(SFPOConfig)}
@@ -26,32 +38,57 @@ def test_algorithm_configs_are_disjoint() -> None:
     assert "failure_penalty" not in sfpo_fields
 
 
-def test_sfpo_config_is_ppo_aligned_h4() -> None:
+def test_sfpo_config_is_lowrank_cps_h4() -> None:
     sfpo = load_config(ROOT / "configs" / "sfpo.yaml")
     assert sfpo.algorithm == "sfpo"
     assert isinstance(sfpo.parameters, SFPOConfig)
     assert sfpo.observation_group_size == 1
-    # PPO-aligned shell with h=4 chunk policy: 6 chunks/update, chunk-internal
-    # done mask, chunk-end reset, no entropy bonus, no first-life truncation.
     assert sfpo.parameters.horizon == 4
     assert sfpo.parameters.rollout_env_steps == 24
     assert sfpo.parameters.rollout_env_steps % sfpo.parameters.horizon == 0
+    assert sfpo.parameters.flow_steps == 4
+    assert sfpo.parameters.action_squash_scale == 5.0
+    assert sfpo.parameters.cps_noise_level == 0.8
+    assert sfpo.parameters.cps_trainable is True
+    assert sfpo.parameters.cps_cov_rank == 8
     assert sfpo.parameters.desired_kl == 0.01
     assert sfpo.parameters.policy_lr == 0.0003
     assert sfpo.parameters.value_lr == 0.0003
     assert sfpo.parameters.init_at_random_ep_len is True
-    # Failure penalty and final-action density are intentionally removed from
-    # the config surface. SFPO uses action-chunk CPS exploration and zero
-    # hand-written failure penalty.
-    assert sfpo.parameters.cps_noise_level == 0.8
-    assert sfpo.parameters.cps_trainable is True
-    assert sfpo.parameters.cps_cov_rank == 8
+    sfpo_fields = {field.name for field in fields(SFPOConfig)}
+    assert "init_noise_std" not in sfpo_fields
     assert sfpo.parameters.gae_lambda == 0.95
     assert sfpo.parameters.kl_early_stop_factor == 4.0
     assert sfpo.parameters.advantage_normalization == "global"
     assert sfpo.training.max_updates == 1000
-    # SFPO-only flow/CPS head is preserved.
-    assert sfpo.parameters.flow_steps >= 1
+
+
+def test_sfpo_gaussian_config_is_registered_h4() -> None:
+    sfpo_gaussian = load_config(ROOT / "configs" / "sfpo_gaussian.yaml")
+    assert sfpo_gaussian.algorithm == "sfpo-gaussian"
+    assert isinstance(sfpo_gaussian.parameters, SFPOGaussianConfig)
+    assert sfpo_gaussian.parameters.horizon == 4
+    assert sfpo_gaussian.parameters.rollout_env_steps == 24
+    assert sfpo_gaussian.parameters.rollout_env_steps % sfpo_gaussian.parameters.horizon == 0
+    assert sfpo_gaussian.parameters.flow_steps == 4
+    assert sfpo_gaussian.parameters.action_squash_scale == 5.0
+    assert sfpo_gaussian.parameters.init_noise_std == 0.5
+    gaussian_fields = {field.name for field in fields(SFPOGaussianConfig)}
+    assert "cps_noise_level" not in gaussian_fields
+    assert "cps_trainable" not in gaussian_fields
+    assert "cps_cov_rank" not in gaussian_fields
+
+
+def test_chunk_ppo_config_is_registered_h4() -> None:
+    chunk_ppo = load_config(ROOT / "configs" / "chunk_ppo.yaml")
+    assert chunk_ppo.algorithm == "chunk-ppo"
+    assert isinstance(chunk_ppo.parameters, ChunkPPOConfig)
+    assert chunk_ppo.parameters.horizon == 4
+    assert chunk_ppo.parameters.num_steps_per_env == 24
+    assert chunk_ppo.parameters.num_steps_per_env % chunk_ppo.parameters.horizon == 0
+    assert chunk_ppo.parameters.desired_kl == 0.01
+    assert chunk_ppo.parameters.actor_learning_rate == 0.0003
+    assert chunk_ppo.parameters.critic_learning_rate == 0.001
 
 
 def test_desired_kl_is_unified_per_step_budget() -> None:
