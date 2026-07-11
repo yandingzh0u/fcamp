@@ -389,8 +389,7 @@ class PPO(Algorithm):
         desired_kl = float(self.cfg.desired_kl)
         if desired_kl <= 0.0:
             return
-        # kl_units=1 for PPO, so this is behavior-preserving while sharing the
-        # same per-step KL contract as SFPO.
+        # PPO's raw KL is already measured per environment control step.
         new_actor_lr, _ = adaptive_lr_from_kl(
             raw_kl=kl_mean,
             kl_units=self.kl_units,

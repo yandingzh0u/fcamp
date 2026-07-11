@@ -2,12 +2,10 @@ from __future__ import annotations
 
 from .fpo import FPO
 from .ppo import PPO
-from .sfpo import SFPO
 
 _REGISTRY = {
     "ppo": PPO,
     "fpo": FPO,
-    "sfpo": SFPO,
 }
 
 

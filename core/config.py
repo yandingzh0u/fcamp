@@ -7,7 +7,7 @@ from typing import Any, Literal, TypeAlias
 import yaml
 
 
-AlgorithmName: TypeAlias = Literal["ppo", "fpo", "sfpo"]
+AlgorithmName: TypeAlias = Literal["ppo", "fpo"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,46 +105,7 @@ class FPOConfig:
         return 1
 
 
-@dataclass(frozen=True, slots=True)
-class SFPOConfig:
-    """SFPO's single supported training path.
-
-    SFPO uses one actor-density path: a causal residual flow policy with
-    action-chunk coefficients-preserving exploration, a chunk-start flow value critic,
-    and no hand-written failure penalty.
-    """
-
-    horizon: int
-    actor_hidden_dims: tuple[int, ...]
-    critic_hidden_dims: tuple[int, ...]
-    activation: str
-    action_squash_scale: float
-    flow_steps: int
-    cps_noise_level: float
-    cps_trainable: bool
-    cps_cov_rank: int
-    rollout_env_steps: int
-    discount_gamma: float
-    gae_lambda: float
-    clip_range: float
-    desired_kl: float
-    policy_epochs: int
-    num_mini_batches: int
-    micro_batch_size: int
-    value_loss_coef: float
-    policy_lr: float
-    value_lr: float
-    weight_decay: float
-    critic_weight_decay: float
-    empirical_normalization: bool
-    init_at_random_ep_len: bool
-    max_grad_norm: float
-    # KL controller
-    kl_early_stop_factor: float
-    advantage_normalization: str
-
-
-AlgorithmConfig: TypeAlias = PPOConfig | FPOConfig | SFPOConfig
+AlgorithmConfig: TypeAlias = PPOConfig | FPOConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,7 +141,6 @@ class ExperimentConfig:
 ALGORITHM_CONFIGS = {
     "ppo": PPOConfig,
     "fpo": FPOConfig,
-    "sfpo": SFPOConfig,
 }
 
 
@@ -276,22 +236,3 @@ def _validate(config: ExperimentConfig) -> None:
     if train.log_every < 1:
         raise ValueError("training.log_every must be positive")
     resolve_task(env.task)
-    if isinstance(config.parameters, SFPOConfig):
-        if config.parameters.horizon < 1:
-            raise ValueError("SFPO requires parameters.horizon >= 1")
-        if config.parameters.flow_steps < 1:
-            raise ValueError("SFPO requires parameters.flow_steps >= 1")
-        if config.parameters.rollout_env_steps <= 0:
-            raise ValueError("SFPO requires parameters.rollout_env_steps > 0")
-        if config.parameters.rollout_env_steps % config.parameters.horizon:
-            raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
-        if not (0.0 < config.parameters.cps_noise_level < 1.0):
-            raise ValueError("SFPO requires parameters.cps_noise_level in (0, 1)")
-        if config.parameters.cps_cov_rank < 0:
-            raise ValueError("SFPO requires parameters.cps_cov_rank >= 0")
-        norm = str(config.parameters.advantage_normalization).lower()
-        if norm not in {"per_prefix", "global", "none"}:
-            raise ValueError(
-                "SFPO parameters.advantage_normalization must be one of "
-                f"'per_prefix', 'global', 'none'; got {config.parameters.advantage_normalization!r}"
-            )
