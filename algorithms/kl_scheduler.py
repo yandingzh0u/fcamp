@@ -1,29 +1,8 @@
-"""Shared KL-based adaptive learning-rate controller.
+"""KL-based adaptive learning-rate controller used by PPO.
 
-The contract across PPO / SFPO:
-
-* ``desired_kl`` in the config is a **per-env-control-step KL budget**, NOT a
-  per-sample / per-chunk budget. This makes ``desired_kl: 0.01`` mean the same
-  thing regardless of the action-chunk horizon ``h``.
-
-* The raw KL observed during the update is algorithm-specific:
-
-  - **PPO** uses the normal per-control-step KL budget.
-
-  - **SFPO** uses per-frame / per-prefix ratios and the adaptive-LR KL is the
-    masked MEAN per-frame KL (a per-control-step quantity), so ``kl_units=1``
-    and ``desired_kl`` is compared directly.
-
-  Examples (``desired_kl = 0.01``)::
-
-      PPO        h=1  -> kl_units=1  -> raw_target = 0.01 * 1   = 0.01
-      SFPO       h=4  -> kl_units=1  -> raw_target = 0.01 * 1   = 0.01
-
-``flow_steps`` is NOT used as a KL normalizer. It is an internal flow
-integration detail, not an environment control-step length.
-
-FPO is intentionally NOT routed through here: its ``kl`` is a prediction MSE,
-not a log-prob KL, so it cannot share the ``desired_kl`` semantics.
+``desired_kl`` is a per-environment-control-step budget. FPO is intentionally
+not routed through this helper because its reported ``kl`` is a prediction MSE,
+not a log-probability KL.
 """
 from __future__ import annotations
 
