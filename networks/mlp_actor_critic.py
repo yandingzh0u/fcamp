@@ -6,7 +6,13 @@ from torch.distributions import Normal
 
 
 def _activation(name: str) -> nn.Module:
-    return {"elu": nn.ELU, "relu": nn.ReLU, "tanh": nn.Tanh, "silu": nn.SiLU}[name.lower()]()
+    return {
+        "elu": nn.ELU,
+        "relu": nn.ReLU,
+        "tanh": nn.Tanh,
+        "silu": nn.SiLU,
+        "mish": nn.Mish,
+    }[name.lower()]()
 
 
 def _build_mlp(input_dim: int, hidden_dims: tuple[int, ...], output_dim: int, activation: str) -> nn.Sequential:

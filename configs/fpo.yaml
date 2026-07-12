@@ -1,4 +1,4 @@
-algorithm: fpo++
+algorithm: fpo
 environment:
   task: largebox_plane
   device: cuda:0
@@ -34,15 +34,15 @@ parameters:
   discount_gamma: 0.99
   num_steps_per_env: 24
   fpo_num_mc: 16
-  fpo_delta_clip: 3.0
-  fpo_cfm_loss_clamp: 3.0
-  cfm_loss_clamp_neg_adv: true
+  fpo_delta_clip: 0.0
+  fpo_cfm_loss_clamp: 0.0
+  cfm_loss_clamp_neg_adv: false
   cfm_loss_clamp_neg_adv_max: 20.0
   fpo_adv_clamp: 5.0
   clip_range: 0.01
   value_clip_range: 0.2
   use_clipped_value_loss: false
-  schedule: adaptive
+  schedule: fixed
   desired_kl: 0.0001
   num_learning_epochs: 5
   num_mini_batches: 4
@@ -56,10 +56,11 @@ parameters:
   max_grad_norm: 1.0
   empirical_normalization: true
   init_at_random_ep_len: true
+  average_losses_before_exp: true
 training:
   seed: 0
   max_updates: 1000
-  log_every: 1
+  log_every: 10
   save_every: 100
   resume: ""
   reset_optimizer_on_resume: false

@@ -1,4 +1,4 @@
-algorithm: fpo++
+algorithm: flowrl
 environment:
   task: largebox_plane
   device: cuda:0
@@ -25,41 +25,34 @@ parameters:
   critic_hidden_dims: [512, 256, 128]
   activation: elu
   flow_steps: 4
-  actor_scale: 1.0
-  mlp_output_scale: 1.0
-  timestep_embed_dim: 8
-  cfm_loss_reduction: mean
-  action_perturb_std: 0.1
-  cfm_loss_t_inverse_cdf_beta: 1.0
+  action_scale: 1.0
+  rollout_env_steps: 24
   discount_gamma: 0.99
-  num_steps_per_env: 24
-  fpo_num_mc: 16
-  fpo_delta_clip: 3.0
-  fpo_cfm_loss_clamp: 3.0
-  cfm_loss_clamp_neg_adv: true
-  cfm_loss_clamp_neg_adv_max: 20.0
-  fpo_adv_clamp: 5.0
-  clip_range: 0.01
-  value_clip_range: 0.2
-  use_clipped_value_loss: false
-  schedule: adaptive
-  desired_kl: 0.0001
-  num_learning_epochs: 5
-  num_mini_batches: 4
-  num_micro_batches: 8
-  gae_lambda: 0.95
-  value_loss_coef: 1.0
-  policy_lr: 0.0001
-  value_lr: 0.001
-  weight_decay: 0.0001
+  target_tau: 0.95
+  expectile: 0.9
+  w2_lambda: 0.1
+  cfm_weight_min: 0.001
+  cfm_weight_max: 1.0
+  replay_capacity: 1000000
+  replay_batch_size: 8192
+  gradient_steps_per_update: 24
+  policy_delay: 2
+  warmup_env_steps: 24
+  recent_fraction: 0.2
+  recent_window: 2048
+  exploration_noise: 0.0
+  policy_lr: 0.0003
+  critic_lr: 0.0003
+  value_lr: 0.0003
+  weight_decay: 0.0
   critic_weight_decay: 0.0
-  max_grad_norm: 1.0
   empirical_normalization: true
   init_at_random_ep_len: true
+  max_grad_norm: 1.0
 training:
   seed: 0
   max_updates: 1000
-  log_every: 1
+  log_every: 10
   save_every: 100
   resume: ""
   reset_optimizer_on_resume: false

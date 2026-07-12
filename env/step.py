@@ -32,6 +32,7 @@ class MimicStepMixin:
         termination_phase_steps = self.phase_steps.clone()
         reward, reward_terms = self.compute_reward(actions, previous_action)
         done, done_terms, debug_terms = self.compute_termination()
+        terminal_observation = None
         terminal_critic_observation = None
 
 
@@ -40,7 +41,7 @@ class MimicStepMixin:
 
         if auto_reset and bool(done.any()):
 
-
+            terminal_observation = self.get_observation().clone()
             terminal_critic_observation = self.get_critic_observation().clone()
             env_ids = done.nonzero(as_tuple=False).squeeze(-1)
             reset_phases = self.sample_phase_indices(env_ids.numel(), horizon=max(1, reset_horizon))
@@ -67,6 +68,8 @@ class MimicStepMixin:
             "debug_terms": debug_terms,
             "termination_phase_steps": termination_phase_steps,
         }
+        if terminal_observation is not None:
+            info["final_observation"] = terminal_observation
         if terminal_critic_observation is not None:
             info["final_critic_observation"] = terminal_critic_observation
         return observation, reward, done, info

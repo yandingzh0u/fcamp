@@ -1,4 +1,4 @@
-algorithm: fpo++
+algorithm: fql
 environment:
   task: largebox_plane
   device: cuda:0
@@ -23,39 +23,35 @@ parameters:
   horizon: 1
   actor_hidden_dims: [512, 256, 128]
   critic_hidden_dims: [512, 256, 128]
-  activation: elu
+  activation: gelu
+  actor_layer_norm: false
+  critic_layer_norm: true
   flow_steps: 4
-  actor_scale: 1.0
-  mlp_output_scale: 1.0
-  timestep_embed_dim: 8
-  cfm_loss_reduction: mean
-  action_perturb_std: 0.1
-  cfm_loss_t_inverse_cdf_beta: 1.0
+  action_scale: 1.0
+  environment_action_scale: 1.0
+  rollout_env_steps: 24
   discount_gamma: 0.99
-  num_steps_per_env: 24
-  fpo_num_mc: 16
-  fpo_delta_clip: 3.0
-  fpo_cfm_loss_clamp: 3.0
-  cfm_loss_clamp_neg_adv: true
-  cfm_loss_clamp_neg_adv_max: 20.0
-  fpo_adv_clamp: 5.0
-  clip_range: 0.01
-  value_clip_range: 0.2
-  use_clipped_value_loss: false
-  schedule: adaptive
-  desired_kl: 0.0001
-  num_learning_epochs: 5
-  num_mini_batches: 4
-  num_micro_batches: 8
-  gae_lambda: 0.95
-  value_loss_coef: 1.0
-  policy_lr: 0.0001
-  value_lr: 0.001
-  weight_decay: 0.0001
+  target_tau: 0.005
+  q_aggregation: mean
+  alpha: 10.0
+  normalize_q_loss: true
+  offline_dataset_path: ""
+  offline_pretrain_gradient_steps: 0
+  offline_pretrain_log_every: 1000
+  replay_capacity: 1000000
+  replay_batch_size: 8192
+  gradient_steps_per_update: 24
+  warmup_env_steps: 24
+  recent_fraction: 0.0
+  recent_window: 2048
+  flow_lr: 0.0003
+  policy_lr: 0.0003
+  critic_lr: 0.0003
+  weight_decay: 0.0
   critic_weight_decay: 0.0
-  max_grad_norm: 1.0
   empirical_normalization: true
   init_at_random_ep_len: true
+  max_grad_norm: 1.0
 training:
   seed: 0
   max_updates: 1000

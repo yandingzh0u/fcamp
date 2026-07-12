@@ -33,11 +33,13 @@ def aspo_objective(ratio: torch.Tensor, advantage: torch.Tensor, clip: float) ->
     return torch.where(advantage >= 0.0, ppo, spo)
 
 
-class FPO(Algorithm):
+class FPOPlusPlus(Algorithm):
 
     def build(self) -> None:
         cfg = self.cfg
         env = self.env
+        if int(cfg.horizon) != 1:
+            raise ValueError(f"FPO++ follows the official h=1 policy, got horizon={cfg.horizon}")
         self.num_act = env.action_dim
         self.num_steps_per_env = max(1, int(cfg.num_steps_per_env))
         self.actor_obs_dim = env.observation_dim
@@ -116,7 +118,7 @@ class FPO(Algorithm):
 
     @property
     def horizon(self) -> int:
-        return 1
+        return int(self.cfg.horizon)
 
     def extra_checkpoint_state(self) -> dict:
         return {
@@ -373,7 +375,9 @@ class FPO(Algorithm):
         totals = {
             "actor_loss": 0.0, "value_loss": 0.0, "ratio": 0.0, "ratio_min": float("inf"),
             "ratio_max": 0.0, "clip_frac": 0.0, "cfm_new": 0.0, "cfm_old": 0.0, "grad_norm": 0.0,
-            "grad_norm_critic": 0.0, "kl": 0.0,
+            "grad_norm_critic": 0.0, "kl": 0.0, "ratio_mc_std": 0.0,
+            "cfm_log_ratio_mean": 0.0, "cfm_log_ratio_std": 0.0,
+            "positive_adv_frac": 0.0, "aspo_positive": 0.0, "aspo_negative": 0.0,
         }
         num_updates = 0
 
@@ -398,7 +402,11 @@ class FPO(Algorithm):
                 self.actor_optimizer.zero_grad(set_to_none=True)
                 self.critic_optimizer.zero_grad(set_to_none=True)
                 micro_chunks = torch.chunk(torch.arange(mb_size, device=device), self.num_micro_batches)
-                agg = {k: 0.0 for k in ("actor_loss", "value_loss", "ratio", "clip_frac", "cfm_new", "cfm_old", "kl")}
+                agg = {k: 0.0 for k in (
+                    "actor_loss", "value_loss", "ratio", "clip_frac", "cfm_new", "cfm_old", "kl",
+                    "ratio_mc_std", "cfm_log_ratio_mean", "cfm_log_ratio_std",
+                    "positive_adv_frac", "aspo_positive", "aspo_negative",
+                )}
                 agg_ratio_min = float("inf")
                 agg_ratio_max = 0.0
                 for sub in micro_chunks:
@@ -448,6 +456,19 @@ class FPO(Algorithm):
                         agg["clip_frac"] += float((torch.abs(ratio - 1.0) > clip).float().mean().item()) * weight
                         agg["cfm_new"] += float(new_cfm.mean().item()) * weight
                         agg["cfm_old"] += float(mb_old_cfm.mean().item()) * weight
+                        log_ratio = mb_old_cfm - new_cfm
+                        positive = (mb_adv >= 0.0).expand_as(surrogate)
+                        negative = ~positive
+                        agg["ratio_mc_std"] += float(
+                            ratio.std(dim=1, unbiased=False).mean().item()
+                        ) * weight
+                        agg["cfm_log_ratio_mean"] += float(log_ratio.mean().item()) * weight
+                        agg["cfm_log_ratio_std"] += float(log_ratio.std(unbiased=False).item()) * weight
+                        agg["positive_adv_frac"] += float(positive.float().mean().item()) * weight
+                        if bool(positive.any()):
+                            agg["aspo_positive"] += float(surrogate[positive].mean().item()) * weight
+                        if bool(negative.any()):
+                            agg["aspo_negative"] += float(surrogate[negative].mean().item()) * weight
                         agg_ratio_min = min(agg_ratio_min, float(ratio.min().item()))
                         agg_ratio_max = max(agg_ratio_max, float(ratio.max().item()))
 
@@ -459,18 +480,10 @@ class FPO(Algorithm):
                     kl_mean = agg["kl"]
                     if kl_mean > self.desired_kl * 2.0:
                         self.learning_rate = max(self.lr_min, self.learning_rate / 1.5)
-                        self.critic_learning_rate = max(
-                            self.lr_min, self.critic_learning_rate / 1.5
-                        )
                     elif 0.0 < kl_mean < self.desired_kl / 2.0:
                         self.learning_rate = min(self.lr_max, self.learning_rate * 1.5)
-                        self.critic_learning_rate = min(
-                            self.lr_max, self.critic_learning_rate * 1.5
-                        )
                     for group in self.actor_optimizer.param_groups:
                         group["lr"] = self.learning_rate
-                    for group in self.critic_optimizer.param_groups:
-                        group["lr"] = self.critic_learning_rate
 
 
                 grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm)
@@ -487,6 +500,11 @@ class FPO(Algorithm):
                 totals["cfm_new"] += agg["cfm_new"]
                 totals["cfm_old"] += agg["cfm_old"]
                 totals["kl"] += agg["kl"]
+                for key in (
+                    "ratio_mc_std", "cfm_log_ratio_mean", "cfm_log_ratio_std",
+                    "positive_adv_frac", "aspo_positive", "aspo_negative",
+                ):
+                    totals[key] += agg[key]
                 totals["grad_norm"] += float(grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm)
                 totals["grad_norm_critic"] += float(grad_norm_critic.item() if torch.is_tensor(grad_norm_critic) else grad_norm_critic)
                 num_updates += 1
@@ -516,6 +534,12 @@ class FPO(Algorithm):
             "grad_norm": totals["grad_norm"] / denom,
             "grad_norm_critic": totals["grad_norm_critic"] / denom,
             "kl": totals["kl"] / denom,
+            "ratio_mc_std": totals["ratio_mc_std"] / denom,
+            "cfm_log_ratio_mean": totals["cfm_log_ratio_mean"] / denom,
+            "cfm_log_ratio_std": totals["cfm_log_ratio_std"] / denom,
+            "positive_adv_frac": totals["positive_adv_frac"] / denom,
+            "aspo_positive": totals["aspo_positive"] / denom,
+            "aspo_negative": totals["aspo_negative"] / denom,
             "action_delta": action_delta,
             "param_rms_delta": param_rms_delta,
             "mini_batch_size": float(mini_batch_size),
@@ -568,19 +592,28 @@ class FPO(Algorithm):
         rewards = rollout["rewards"]
         dones = rollout["dones"]
         metrics = {
-            "fpo/actor_loss": agg["actor_loss"],
-            "fpo/value_loss": agg["value_loss"],
-            "fpo/ratio": agg["ratio"],
-            "fpo/ratio_min": agg["ratio_min"],
-            "fpo/ratio_max": agg["ratio_max"],
-            "fpo/clip_frac": agg["clip_frac"],
-            "fpo/cfm_new": agg["cfm_new"],
-            "fpo/cfm_old": agg["cfm_old"],
-            "fpo/grad_norm": agg["grad_norm"],
-            "fpo/grad_norm_critic": agg["grad_norm_critic"],
-            "fpo/kl": agg["kl"],
-            "fpo/lr": self.learning_rate,
-            "fpo/critic_lr": self.critic_learning_rate,
+            "fpo_pp/actor_loss": agg["actor_loss"],
+            "fpo_pp/value_loss": agg["value_loss"],
+            "fpo_pp/ratio": agg["ratio"],
+            "fpo_pp/ratio_min": agg["ratio_min"],
+            "fpo_pp/ratio_max": agg["ratio_max"],
+            "fpo_pp/clip_frac": agg["clip_frac"],
+            "fpo_pp/cfm_new": agg["cfm_new"],
+            "fpo_pp/cfm_old": agg["cfm_old"],
+            "fpo_pp/cfm_log_ratio_mean": agg["cfm_log_ratio_mean"],
+            "fpo_pp/cfm_log_ratio_std": agg["cfm_log_ratio_std"],
+            "fpo_pp/ratio_mc_std": agg["ratio_mc_std"],
+            "fpo_pp/positive_adv_frac": agg["positive_adv_frac"],
+            "fpo_pp/aspo_positive": agg["aspo_positive"],
+            "fpo_pp/aspo_negative": agg["aspo_negative"],
+            "fpo_pp/grad_norm_actor": agg["grad_norm"],
+            "fpo_pp/grad_norm_critic": agg["grad_norm_critic"],
+            "fpo_pp/kl_x1_mse": agg["kl"],
+            "fpo_pp/actor_lr": self.learning_rate,
+            "fpo_pp/critic_lr": self.critic_learning_rate,
+            "budget/physical_transitions": float(self.num_steps_per_env * self.env.num_envs),
+            "budget/policy_decisions": float(self.num_steps_per_env * self.env.num_envs),
+            "budget/cfm_mc_terms": float(self.num_steps_per_env * self.env.num_envs * self.num_mc),
             "rollout/reward_step_mean": float(rewards.mean().item()),
             "rollout/done_frac": float(dones.float().mean().item()),
             "act/abs_max_all": float(rollout.get("action_abs_max", 0.0)),
@@ -714,12 +747,33 @@ class FPO(Algorithm):
             flush=True,
         )
         print(
-            f"[FPO++] actor_loss={metrics['fpo/actor_loss']:.5f} value_loss={metrics['fpo/value_loss']:.5f} "
-            f"ratio={metrics['fpo/ratio']:.4f} [{metrics['fpo/ratio_min']:.3f},{metrics['fpo/ratio_max']:.3f}] "
-            f"clip_frac={metrics['fpo/clip_frac']:.4f} cfm_old={metrics['fpo/cfm_old']:.4f} "
-            f"cfm_new={metrics['fpo/cfm_new']:.4f} kl={metrics['fpo/kl']:.6f} "
-            f"grad={metrics['fpo/grad_norm']:.4f} grad_c={metrics.get('fpo/grad_norm_critic', float('nan')):.4f} "
-            f"lr={metrics['fpo/lr']:.6f} critic_lr={metrics.get('fpo/critic_lr', float('nan')):.6f}",
+            f"[FPO++] actor_loss={metrics['fpo_pp/actor_loss']:.5f} "
+            f"value_loss={metrics['fpo_pp/value_loss']:.5f} "
+            f"ratio={metrics['fpo_pp/ratio']:.4f} "
+            f"[{metrics['fpo_pp/ratio_min']:.3f},{metrics['fpo_pp/ratio_max']:.3f}] "
+            f"clip_frac={metrics['fpo_pp/clip_frac']:.4f} "
+            f"kl_x1={metrics['fpo_pp/kl_x1_mse']:.6f} "
+            f"grad_a={metrics['fpo_pp/grad_norm_actor']:.4f} "
+            f"grad_c={metrics['fpo_pp/grad_norm_critic']:.4f} "
+            f"actor_lr={metrics['fpo_pp/actor_lr']:.6f} "
+            f"critic_lr={metrics['fpo_pp/critic_lr']:.6f}",
+            flush=True,
+        )
+        print(
+            f"[FPO++_CORE] cfm_old={metrics['fpo_pp/cfm_old']:.4f} "
+            f"cfm_new={metrics['fpo_pp/cfm_new']:.4f} "
+            f"log_ratio={metrics['fpo_pp/cfm_log_ratio_mean']:.5f}+/-"
+            f"{metrics['fpo_pp/cfm_log_ratio_std']:.5f} "
+            f"mc_ratio_std={metrics['fpo_pp/ratio_mc_std']:.5f} "
+            f"positive_adv_frac={metrics['fpo_pp/positive_adv_frac']:.3f} "
+            f"aspo_pos={metrics['fpo_pp/aspo_positive']:.5f} "
+            f"aspo_neg={metrics['fpo_pp/aspo_negative']:.5f}",
+            flush=True,
+        )
+        print(
+            f"[BUDGET] physical_transitions={metrics['budget/physical_transitions']:.0f} "
+            f"policy_decisions={metrics['budget/policy_decisions']:.0f} "
+            f"cfm_mc_terms={metrics['budget/cfm_mc_terms']:.0f}",
             flush=True,
         )
 
@@ -873,8 +927,8 @@ class FPO(Algorithm):
             flush=True,
         )
         print(
-            f"[INFO] algorithm=fpo actor_obs_dim={self.actor_obs_dim} critic_obs_dim={self.critic_obs_dim} "
-            f"action_dim={self.num_act} horizon=1 "
+            f"[INFO] algorithm=fpo++ actor_obs_dim={self.actor_obs_dim} critic_obs_dim={self.critic_obs_dim} "
+            f"action_dim={self.num_act} horizon={self.horizon} "
             f"chunk_dim={self.chunk_dim} num_envs={env.num_envs} num_steps_per_env={self.num_steps_per_env} "
             f"flow_steps={self.flow_steps} num_mc={self.num_mc} actor_scale={self.actor.actor_scale} "
             f"action_perturb_std={self.actor.action_perturb_std} timestep_embed_dim={self.actor.timestep_embed_dim} "
@@ -885,7 +939,8 @@ class FPO(Algorithm):
             f"num_learning_epochs={cfg.num_learning_epochs} num_mini_batches={cfg.num_mini_batches} "
             f"gamma={cfg.discount_gamma} lam={cfg.gae_lambda} value_loss_coef={cfg.value_loss_coef} "
             f"use_clipped_value_loss={cfg.use_clipped_value_loss} "
-            f"lr={cfg.policy_lr} critic_lr={self.critic_learning_rate} weight_decay={cfg.weight_decay} "
+            f"actor_lr={cfg.policy_lr} critic_lr={self.critic_learning_rate} "
+            f"adaptive_actor_only={self.schedule == 'adaptive'} weight_decay={cfg.weight_decay} "
             f"empirical_normalization={cfg.empirical_normalization} "
             f"actor_hidden_dims={list(cfg.actor_hidden_dims)} activation={cfg.activation}",
             flush=True,

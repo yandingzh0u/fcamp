@@ -26,7 +26,9 @@ def _load_fpo_module():
     sys.modules["algorithms"] = algorithms_pkg
     sys.modules["algorithms.base"] = base_mod
 
-    spec = importlib.util.spec_from_file_location("fpo_standalone", REPO_ROOT / "algorithms" / "fpo.py")
+    spec = importlib.util.spec_from_file_location(
+        "fpo_plus_plus_standalone", REPO_ROOT / "algorithms" / "fpo_plus_plus.py"
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -191,7 +193,7 @@ def test_aspo_spo_penalizes_increasing_ratio_under_negative_adv():
 
 def test_gae_lambda_one_equals_discounted_returns():
     cfg = types.SimpleNamespace(gae_lambda=1.0)
-    algo = fpo.FPO(cfg=cfg, env=None, simulation_app=None)
+    algo = fpo.FPOPlusPlus(cfg=cfg, env=None, simulation_app=None)
     T, N = 5, 2
     gamma = 0.9
     rewards = torch.ones(T, N, 1)
@@ -211,7 +213,7 @@ def test_gae_lambda_one_equals_discounted_returns():
 
 def test_gae_done_blocks_bootstrap():
     cfg = types.SimpleNamespace(gae_lambda=1.0)
-    algo = fpo.FPO(cfg=cfg, env=None, simulation_app=None)
+    algo = fpo.FPOPlusPlus(cfg=cfg, env=None, simulation_app=None)
     T, N = 3, 1
     gamma = 0.9
     rewards = torch.tensor([[[1.0]], [[1.0]], [[1.0]]])

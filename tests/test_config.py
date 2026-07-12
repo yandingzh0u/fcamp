@@ -5,7 +5,11 @@ import pytest
 
 from core.config import (
     ChunkPPOConfig,
-    FPOConfig,
+    FPOPlusPlusConfig,
+    FQLConfig,
+    FlowRLConfig,
+    OriginalFPOConfig,
+    ReinFlowConfig,
     PPOConfig,
     SFPOConfig,
     SFPOGaussianConfig,
@@ -20,22 +24,74 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_algorithm_configs_are_disjoint() -> None:
     ppo = load_config(ROOT / "configs" / "ppo.yaml")
-    fpo = load_config(ROOT / "configs" / "fpo.yaml")
+    fpo = load_config(ROOT / "configs" / "fpo_plus_plus.yaml")
+    original_fpo = load_config(ROOT / "configs" / "fpo.yaml")
+    flowrl = load_config(ROOT / "configs" / "flowrl.yaml")
+    fql = load_config(ROOT / "configs" / "fql.yaml")
+    reinflow = load_config(ROOT / "configs" / "reinflow.yaml")
     sfpo = load_config(ROOT / "configs" / "sfpo.yaml")
     sfpo_gaussian = load_config(ROOT / "configs" / "sfpo_gaussian.yaml")
     chunk_ppo = load_config(ROOT / "configs" / "chunk_ppo.yaml")
     assert isinstance(ppo.parameters, PPOConfig)
-    assert isinstance(fpo.parameters, FPOConfig)
+    assert isinstance(fpo.parameters, FPOPlusPlusConfig)
+    assert isinstance(original_fpo.parameters, OriginalFPOConfig)
+    assert isinstance(flowrl.parameters, FlowRLConfig)
+    assert isinstance(fql.parameters, FQLConfig)
+    assert isinstance(reinflow.parameters, ReinFlowConfig)
     assert isinstance(sfpo.parameters, SFPOConfig)
     assert isinstance(sfpo_gaussian.parameters, SFPOGaussianConfig)
     assert isinstance(chunk_ppo.parameters, ChunkPPOConfig)
     assert "flow_steps" not in {field.name for field in fields(PPOConfig)}
-    assert "entropy_coef" not in {field.name for field in fields(FPOConfig)}
+    assert "entropy_coef" not in {field.name for field in fields(FPOPlusPlusConfig)}
     sfpo_fields = {field.name for field in fields(SFPOConfig)}
     assert "num_generations" not in sfpo_fields
     assert "tail_bootstrap_steps" not in sfpo_fields
     assert "actor_density" not in sfpo_fields
     assert "failure_penalty" not in sfpo_fields
+
+
+def test_flowrl_config_preserves_official_core_and_common_budget() -> None:
+    flowrl = load_config(ROOT / "configs" / "flowrl.yaml")
+    assert flowrl.algorithm == "flowrl"
+    assert isinstance(flowrl.parameters, FlowRLConfig)
+    assert flowrl.parameters.horizon == 1
+    assert flowrl.parameters.rollout_env_steps == 24
+    assert flowrl.parameters.flow_steps == 4
+    assert flowrl.parameters.gradient_steps_per_update == 24
+    assert flowrl.parameters.policy_delay == 2
+    assert flowrl.parameters.expectile == 0.9
+    assert flowrl.parameters.target_tau == 0.95
+
+
+def test_reinflow_config_uses_official_h4_chain_likelihood() -> None:
+    reinflow = load_config(ROOT / "configs" / "reinflow.yaml")
+    assert reinflow.algorithm == "reinflow"
+    assert isinstance(reinflow.parameters, ReinFlowConfig)
+    assert reinflow.parameters.horizon == 4
+    assert reinflow.parameters.rollout_env_steps == 24
+    assert reinflow.parameters.flow_steps == 4
+    assert reinflow.parameters.min_denoising_std == 0.1
+    assert reinflow.parameters.max_denoising_std == 0.24
+    assert reinflow.parameters.normalize_denoising_horizon is True
+    assert reinflow.parameters.normalize_action_dimension is True
+
+
+def test_fql_config_preserves_official_objective_and_common_budget() -> None:
+    fql = load_config(ROOT / "configs" / "fql.yaml")
+    assert fql.algorithm == "fql"
+    assert isinstance(fql.parameters, FQLConfig)
+    assert fql.parameters.horizon == 1
+    assert fql.parameters.rollout_env_steps == 24
+    assert fql.parameters.flow_steps == 4
+    assert fql.parameters.environment_action_scale == 1.0
+    assert fql.parameters.gradient_steps_per_update == 24
+    assert fql.parameters.target_tau == 0.005
+    assert fql.parameters.q_aggregation == "mean"
+    assert fql.parameters.alpha == 10.0
+    assert fql.parameters.normalize_q_loss is True
+    assert fql.parameters.offline_dataset_path == ""
+    assert fql.parameters.offline_pretrain_gradient_steps == 0
+    assert fql.parameters.recent_fraction == 0.0
 
 
 def test_sfpo_config_is_lowrank_cps_h4() -> None:
@@ -119,10 +175,23 @@ def test_override_cannot_create_a_second_config_entry() -> None:
         load_config(ROOT / "configs" / "ppo.yaml", ["environment.terrain=plane"])
 
 
-def test_fpo_legacy_config_defaults_unclipped_value_loss() -> None:
-    fpo = load_config(ROOT / "configs" / "fpo.yaml")
+def test_fpo_plus_plus_defaults_unclipped_value_loss() -> None:
+    fpo = load_config(ROOT / "configs" / "fpo_plus_plus.yaml")
     tree = asdict(fpo)
     del tree["parameters"]["use_clipped_value_loss"]
     rebuilt = config_from_dict(tree)
-    assert isinstance(rebuilt.parameters, FPOConfig)
+    assert isinstance(rebuilt.parameters, FPOPlusPlusConfig)
     assert rebuilt.parameters.use_clipped_value_loss is False
+
+
+def test_original_fpo_is_separate_from_fpo_plus_plus() -> None:
+    original = load_config(ROOT / "configs" / "fpo.yaml")
+    plus_plus = load_config(ROOT / "configs" / "fpo_plus_plus.yaml")
+    assert original.algorithm == "fpo"
+    assert plus_plus.algorithm == "fpo++"
+    assert isinstance(original.parameters, OriginalFPOConfig)
+    assert isinstance(plus_plus.parameters, FPOPlusPlusConfig)
+    assert original.parameters.average_losses_before_exp is True
+    assert original.parameters.flow_steps == plus_plus.parameters.flow_steps == 4
+    assert original.parameters.fpo_num_mc == plus_plus.parameters.fpo_num_mc == 16
+    assert original.parameters.num_steps_per_env == plus_plus.parameters.num_steps_per_env == 24

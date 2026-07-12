@@ -26,7 +26,9 @@ def _load_fpo_module():
     sys.modules["algorithms"] = algorithms_pkg
     sys.modules["algorithms.base"] = base_mod
 
-    spec = importlib.util.spec_from_file_location("fpo_standalone", REPO_ROOT / "algorithms" / "fpo.py")
+    spec = importlib.util.spec_from_file_location(
+        "fpo_plus_plus_standalone", REPO_ROOT / "algorithms" / "fpo_plus_plus.py"
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -134,7 +136,7 @@ def check(name, cond):
 def test_end_to_end():
     torch.manual_seed(0)
     env = FakeEnv()
-    algo = fpo.FPO(cfg=_cfg(), env=env, simulation_app=None)
+    algo = fpo.FPOPlusPlus(cfg=_cfg(), env=env, simulation_app=None)
     algo.build()
     check("chunk_dim == action_dim", algo.chunk_dim == 3)
     check("horizon forced to 1", algo.horizon == 1)
@@ -178,19 +180,26 @@ def test_end_to_end():
     after = list(algo.actor.parameters())
     changed = any(not torch.allclose(b, a) for b, a in zip(before, after))
     check("update changes actor params", changed)
-    check("actor_loss finite", torch.isfinite(torch.tensor(metrics["fpo/actor_loss"])))
-    check("value_loss finite & >=0", metrics["fpo/value_loss"] >= 0)
-    check("ratio reported", "fpo/ratio" in metrics and metrics["fpo/ratio"] > 0)
-    check("kl reported & finite", "fpo/kl" in metrics and torch.isfinite(torch.tensor(metrics["fpo/kl"])))
+    check("actor_loss finite", torch.isfinite(torch.tensor(metrics["fpo_pp/actor_loss"])))
+    check("value_loss finite & >=0", metrics["fpo_pp/value_loss"] >= 0)
+    check("ratio reported", "fpo_pp/ratio" in metrics and metrics["fpo_pp/ratio"] > 0)
+    check(
+        "kl reported & finite",
+        "fpo_pp/kl_x1_mse" in metrics
+        and torch.isfinite(torch.tensor(metrics["fpo_pp/kl_x1_mse"])),
+    )
 
 
-    check("separate critic grad reported", "fpo/grad_norm_critic" in metrics)
+    check("separate critic grad reported", "fpo_pp/grad_norm_critic" in metrics)
     check("actor optimizer is the primary (checkpointed) optimizer", algo.optimizer is algo.actor_optimizer)
     check("actor and critic optimizers are independent objects", algo.actor_optimizer is not algo.critic_optimizer)
     critic_lr = algo.critic_optimizer.param_groups[0]["lr"]
     actor_lr = algo.actor_optimizer.param_groups[0]["lr"]
-    check("reported critic LR matches optimizer", abs(metrics["fpo/critic_lr"] - critic_lr) < 1e-12)
-    check("actor/critic receive the same adaptive multiplier", abs(critic_lr / actor_lr - 10.0) < 1e-6)
+    check("reported critic LR matches optimizer", abs(metrics["fpo_pp/critic_lr"] - critic_lr) < 1e-12)
+    check("adaptive scheduler leaves critic LR fixed", abs(critic_lr - 1.0e-3) < 1e-12)
+    check("actor LR remains independently scheduled", actor_lr != critic_lr)
+    check("FPO++ core diagnostics reported", "fpo_pp/ratio_mc_std" in metrics)
+    check("physical transition budget reported", metrics["budget/physical_transitions"] == 48.0)
     check("metrics has reward terms", any(k.startswith("reward/") for k in metrics))
     check("metrics has done fracs", any(k.startswith("done/") for k in metrics))
     check("first_failure metrics populated (ee_body_frac > 0)",
@@ -214,7 +223,7 @@ def test_microbatch_matches_single_batch():
     def _run(num_micro):
         torch.manual_seed(7)
         env = FakeEnv()
-        algo = fpo.FPO(cfg=_cfg(num_micro_batches=num_micro), env=env, simulation_app=None)
+        algo = fpo.FPOPlusPlus(cfg=_cfg(num_micro_batches=num_micro), env=env, simulation_app=None)
         algo.build()
         obs = algo.initial_reset()
         obs = algo.reset_for_update(1)

@@ -7,7 +7,9 @@ from typing import Any, Literal, TypeAlias
 import yaml
 
 
-AlgorithmName: TypeAlias = Literal["ppo", "fpo", "sfpo", "sfpo-gaussian", "chunk-ppo"]
+AlgorithmName: TypeAlias = Literal[
+    "ppo", "fpo", "fpo++", "flowrl", "reinflow", "fql", "sfpo", "sfpo-gaussian", "chunk-ppo"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +65,8 @@ class PPOConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class FPOConfig:
+class FPOPlusPlusConfig:
+    horizon: int
     actor_hidden_dims: tuple[int, ...]
     critic_hidden_dims: tuple[int, ...]
     activation: str
@@ -100,9 +103,116 @@ class FPOConfig:
     empirical_normalization: bool
     init_at_random_ep_len: bool
 
-    @property
-    def horizon(self) -> int:
-        return 1
+
+@dataclass(frozen=True, slots=True)
+class OriginalFPOConfig(FPOPlusPlusConfig):
+    average_losses_before_exp: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FlowRLConfig:
+    horizon: int
+    actor_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
+    activation: str
+    flow_steps: int
+    action_scale: float
+    rollout_env_steps: int
+    discount_gamma: float
+    target_tau: float
+    expectile: float
+    w2_lambda: float
+    cfm_weight_min: float
+    cfm_weight_max: float
+    replay_capacity: int
+    replay_batch_size: int
+    gradient_steps_per_update: int
+    policy_delay: int
+    warmup_env_steps: int
+    recent_fraction: float
+    recent_window: int
+    exploration_noise: float
+    policy_lr: float
+    critic_lr: float
+    value_lr: float
+    weight_decay: float
+    critic_weight_decay: float
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+    max_grad_norm: float
+
+
+@dataclass(frozen=True, slots=True)
+class ReinFlowConfig:
+    horizon: int
+    actor_hidden_dims: tuple[int, ...]
+    noise_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
+    activation: str
+    flow_steps: int
+    timestep_embed_dim: int
+    action_scale: float
+    min_denoising_std: float
+    max_denoising_std: float
+    randn_clip_value: float
+    logprob_min: float
+    logprob_max: float
+    account_for_initial_stochasticity: bool
+    normalize_denoising_horizon: bool
+    normalize_action_dimension: bool
+    rollout_env_steps: int
+    discount_gamma: float
+    gae_lambda: float
+    clip_range: float
+    target_kl: float
+    policy_epochs: int
+    num_mini_batches: int
+    entropy_coef: float
+    value_loss_coef: float
+    policy_lr: float
+    value_lr: float
+    weight_decay: float
+    critic_weight_decay: float
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+    max_grad_norm: float
+    pretrained_actor_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class FQLConfig:
+    horizon: int
+    actor_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
+    activation: str
+    actor_layer_norm: bool
+    critic_layer_norm: bool
+    flow_steps: int
+    action_scale: float
+    environment_action_scale: float
+    rollout_env_steps: int
+    discount_gamma: float
+    target_tau: float
+    q_aggregation: str
+    alpha: float
+    normalize_q_loss: bool
+    offline_dataset_path: str
+    offline_pretrain_gradient_steps: int
+    offline_pretrain_log_every: int
+    replay_capacity: int
+    replay_batch_size: int
+    gradient_steps_per_update: int
+    warmup_env_steps: int
+    recent_fraction: float
+    recent_window: int
+    flow_lr: float
+    policy_lr: float
+    critic_lr: float
+    weight_decay: float
+    critic_weight_decay: float
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+    max_grad_norm: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +314,17 @@ class ChunkPPOConfig:
     max_grad_norm: float
 
 
-AlgorithmConfig: TypeAlias = PPOConfig | FPOConfig | SFPOConfig | SFPOGaussianConfig | ChunkPPOConfig
+AlgorithmConfig: TypeAlias = (
+    PPOConfig
+    | OriginalFPOConfig
+    | FPOPlusPlusConfig
+    | FlowRLConfig
+    | ReinFlowConfig
+    | FQLConfig
+    | SFPOConfig
+    | SFPOGaussianConfig
+    | ChunkPPOConfig
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +359,11 @@ class ExperimentConfig:
 
 ALGORITHM_CONFIGS = {
     "ppo": PPOConfig,
-    "fpo": FPOConfig,
+    "fpo": OriginalFPOConfig,
+    "fpo++": FPOPlusPlusConfig,
+    "flowrl": FlowRLConfig,
+    "reinflow": ReinFlowConfig,
+    "fql": FQLConfig,
     "sfpo": SFPOConfig,
     "sfpo-gaussian": SFPOGaussianConfig,
     "chunk-ppo": ChunkPPOConfig,
@@ -255,7 +379,7 @@ def _construct(cls, values: dict[str, Any]):
     if unknown:
         raise KeyError(f"{cls.__name__} unknown keys: {sorted(unknown)}")
     converted = dict(values)
-    for name in ("actor_hidden_dims", "critic_hidden_dims"):
+    for name in ("actor_hidden_dims", "critic_hidden_dims", "noise_hidden_dims"):
         if name in converted:
             converted[name] = tuple(int(value) for value in converted[name])
     return cls(**converted)
@@ -301,8 +425,16 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
     training_values = dict(tree["training"])
     training_values["resume"] = _resolve_path(str(training_values["resume"]), source_path)
     parameter_values = dict(tree["parameters"])
-    if algorithm == "fpo":
+    if algorithm in {"fpo", "fpo++"}:
         parameter_values.setdefault("use_clipped_value_loss", False)
+    if algorithm == "reinflow":
+        parameter_values["pretrained_actor_path"] = _resolve_path(
+            str(parameter_values.get("pretrained_actor_path", "")), source_path
+        )
+    if algorithm == "fql":
+        parameter_values["offline_dataset_path"] = _resolve_path(
+            str(parameter_values.get("offline_dataset_path", "")), source_path
+        )
     config = ExperimentConfig(
         algorithm=algorithm,
         environment=_construct(EnvironmentConfig, dict(tree["environment"])),
@@ -338,6 +470,88 @@ def _validate(config: ExperimentConfig) -> None:
     if train.log_every < 1:
         raise ValueError("training.log_every must be positive")
     resolve_task(env.task)
+    if isinstance(config.parameters, FPOPlusPlusConfig):
+        if config.parameters.horizon != 1:
+            raise ValueError("FPO++ currently implements the official action horizon h=1")
+        if config.parameters.flow_steps < 1:
+            raise ValueError("FPO++ requires parameters.flow_steps >= 1")
+        if config.parameters.num_steps_per_env <= 0:
+            raise ValueError("FPO++ requires parameters.num_steps_per_env > 0")
+        if config.parameters.fpo_num_mc < 1:
+            raise ValueError("FPO++ requires parameters.fpo_num_mc >= 1")
+    if isinstance(config.parameters, OriginalFPOConfig):
+        if not config.parameters.average_losses_before_exp:
+            raise ValueError("Original FPO requires average_losses_before_exp=true")
+        if config.parameters.schedule != "fixed":
+            raise ValueError("Original FPO comparison uses its fixed learning-rate schedule")
+    if isinstance(config.parameters, FlowRLConfig):
+        parameters = config.parameters
+        if parameters.horizon != 1:
+            raise ValueError("FlowRL currently implements the official action horizon h=1")
+        if parameters.flow_steps < 1 or parameters.rollout_env_steps < 1:
+            raise ValueError("FlowRL requires positive flow_steps and rollout_env_steps")
+        if not (0.0 < parameters.expectile < 1.0):
+            raise ValueError("FlowRL expectile must be in (0, 1)")
+        if not (0.0 < parameters.target_tau <= 1.0):
+            raise ValueError("FlowRL target_tau must be in (0, 1]")
+        if parameters.replay_capacity < 1 or parameters.replay_batch_size < 1:
+            raise ValueError("FlowRL replay capacity and batch size must be positive")
+        if parameters.gradient_steps_per_update < 1 or parameters.policy_delay < 1:
+            raise ValueError("FlowRL gradient steps and policy delay must be positive")
+        if not (0.0 <= parameters.recent_fraction <= 1.0):
+            raise ValueError("FlowRL recent_fraction must be in [0, 1]")
+    if isinstance(config.parameters, ReinFlowConfig):
+        parameters = config.parameters
+        if parameters.horizon != 4:
+            raise ValueError("ReinFlow comparison requires the official horizon h=4")
+        if parameters.rollout_env_steps < 1 or parameters.rollout_env_steps % parameters.horizon:
+            raise ValueError("ReinFlow rollout_env_steps must be positive and divisible by horizon")
+        if parameters.flow_steps < 1:
+            raise ValueError("ReinFlow flow_steps must be positive")
+        if not (0.0 < parameters.min_denoising_std <= parameters.max_denoising_std):
+            raise ValueError("ReinFlow denoising std range is invalid")
+        if parameters.logprob_min >= parameters.logprob_max:
+            raise ValueError("ReinFlow logprob_min must be below logprob_max")
+        if parameters.policy_epochs < 1 or parameters.num_mini_batches < 1:
+            raise ValueError("ReinFlow policy_epochs and num_mini_batches must be positive")
+        if not (
+            parameters.account_for_initial_stochasticity
+            and parameters.normalize_denoising_horizon
+            and parameters.normalize_action_dimension
+        ):
+            raise ValueError(
+                "ReinFlow comparison fixes official initial-noise accounting and likelihood normalization"
+            )
+    if isinstance(config.parameters, FQLConfig):
+        parameters = config.parameters
+        if parameters.horizon != 1:
+            raise ValueError("FQL comparison uses the official one-step action horizon h=1")
+        if parameters.rollout_env_steps < 1 or parameters.flow_steps < 1:
+            raise ValueError("FQL requires positive rollout_env_steps and flow_steps")
+        if parameters.action_scale != 1.0:
+            raise ValueError("Official FQL clips actions to [-1, 1], so action_scale must be 1.0")
+        if parameters.environment_action_scale <= 0.0:
+            raise ValueError("FQL environment_action_scale must be positive")
+        if not (0.0 < parameters.target_tau <= 1.0):
+            raise ValueError("FQL target_tau must be in (0, 1]")
+        if parameters.q_aggregation not in {"mean", "min"}:
+            raise ValueError("FQL q_aggregation must be 'mean' or 'min'")
+        if parameters.alpha < 0.0:
+            raise ValueError("FQL alpha must be non-negative")
+        if parameters.offline_pretrain_gradient_steps < 0:
+            raise ValueError("FQL offline_pretrain_gradient_steps must be non-negative")
+        if parameters.offline_pretrain_log_every < 1:
+            raise ValueError("FQL offline_pretrain_log_every must be positive")
+        if parameters.offline_pretrain_gradient_steps and not parameters.offline_dataset_path:
+            raise ValueError(
+                "FQL offline pretraining requires parameters.offline_dataset_path"
+            )
+        if parameters.replay_capacity < 1 or parameters.replay_batch_size < 1:
+            raise ValueError("FQL replay capacity and batch size must be positive")
+        if parameters.gradient_steps_per_update < 1 or parameters.warmup_env_steps < 0:
+            raise ValueError("FQL gradient steps must be positive and warmup must be non-negative")
+        if not (0.0 <= parameters.recent_fraction <= 1.0):
+            raise ValueError("FQL recent_fraction must be in [0, 1]")
     if isinstance(config.parameters, SFPOConfig):
         if config.parameters.horizon < 1:
             raise ValueError("SFPO requires parameters.horizon >= 1")

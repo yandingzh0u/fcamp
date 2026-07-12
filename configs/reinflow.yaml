@@ -1,4 +1,4 @@
-algorithm: fpo++
+algorithm: reinflow
 environment:
   task: largebox_plane
   device: cuda:0
@@ -20,46 +20,43 @@ environment:
   adaptive_predecessor_lookback_bins: 1
   action_rate_weight: 0.1
 parameters:
-  horizon: 1
+  horizon: 4
   actor_hidden_dims: [512, 256, 128]
+  noise_hidden_dims: [64, 64]
   critic_hidden_dims: [512, 256, 128]
-  activation: elu
+  activation: mish
   flow_steps: 4
-  actor_scale: 1.0
-  mlp_output_scale: 1.0
   timestep_embed_dim: 8
-  cfm_loss_reduction: mean
-  action_perturb_std: 0.1
-  cfm_loss_t_inverse_cdf_beta: 1.0
+  action_scale: 1.0
+  min_denoising_std: 0.10
+  max_denoising_std: 0.24
+  randn_clip_value: 3.0
+  logprob_min: -1.0
+  logprob_max: 1.0
+  account_for_initial_stochasticity: true
+  normalize_denoising_horizon: true
+  normalize_action_dimension: true
+  rollout_env_steps: 24
   discount_gamma: 0.99
-  num_steps_per_env: 24
-  fpo_num_mc: 16
-  fpo_delta_clip: 3.0
-  fpo_cfm_loss_clamp: 3.0
-  cfm_loss_clamp_neg_adv: true
-  cfm_loss_clamp_neg_adv_max: 20.0
-  fpo_adv_clamp: 5.0
-  clip_range: 0.01
-  value_clip_range: 0.2
-  use_clipped_value_loss: false
-  schedule: adaptive
-  desired_kl: 0.0001
-  num_learning_epochs: 5
-  num_mini_batches: 4
-  num_micro_batches: 8
   gae_lambda: 0.95
+  clip_range: 0.01
+  target_kl: 0.01
+  policy_epochs: 5
+  num_mini_batches: 4
+  entropy_coef: 0.03
   value_loss_coef: 1.0
-  policy_lr: 0.0001
-  value_lr: 0.001
-  weight_decay: 0.0001
-  critic_weight_decay: 0.0
-  max_grad_norm: 1.0
+  policy_lr: 0.000045
+  value_lr: 0.00065
+  weight_decay: 0.0
+  critic_weight_decay: 0.00001
   empirical_normalization: true
   init_at_random_ep_len: true
+  max_grad_norm: 1.0
+  pretrained_actor_path: ""
 training:
   seed: 0
   max_updates: 1000
-  log_every: 1
+  log_every: 10
   save_every: 100
   resume: ""
   reset_optimizer_on_resume: false
