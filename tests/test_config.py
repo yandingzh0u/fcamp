@@ -9,7 +9,10 @@ from core.config import (
     FQLConfig,
     FlowRLConfig,
     OriginalFPOConfig,
+    PolicyFlowConfig,
     ReinFlowConfig,
+    SACFlowConfig,
+    SEARConfig,
     PPOConfig,
     SFPOConfig,
     SFPOGaussianConfig,
@@ -29,6 +32,9 @@ def test_algorithm_configs_are_disjoint() -> None:
     flowrl = load_config(ROOT / "configs" / "flowrl.yaml")
     fql = load_config(ROOT / "configs" / "fql.yaml")
     reinflow = load_config(ROOT / "configs" / "reinflow.yaml")
+    policyflow = load_config(ROOT / "configs" / "policyflow.yaml")
+    sac_flow = load_config(ROOT / "configs" / "sac_flow.yaml")
+    sear = load_config(ROOT / "configs" / "sear.yaml")
     sfpo = load_config(ROOT / "configs" / "sfpo.yaml")
     sfpo_gaussian = load_config(ROOT / "configs" / "sfpo_gaussian.yaml")
     chunk_ppo = load_config(ROOT / "configs" / "chunk_ppo.yaml")
@@ -38,6 +44,9 @@ def test_algorithm_configs_are_disjoint() -> None:
     assert isinstance(flowrl.parameters, FlowRLConfig)
     assert isinstance(fql.parameters, FQLConfig)
     assert isinstance(reinflow.parameters, ReinFlowConfig)
+    assert isinstance(policyflow.parameters, PolicyFlowConfig)
+    assert isinstance(sac_flow.parameters, SACFlowConfig)
+    assert isinstance(sear.parameters, SEARConfig)
     assert isinstance(sfpo.parameters, SFPOConfig)
     assert isinstance(sfpo_gaussian.parameters, SFPOGaussianConfig)
     assert isinstance(chunk_ppo.parameters, ChunkPPOConfig)
@@ -61,6 +70,44 @@ def test_flowrl_config_preserves_official_core_and_common_budget() -> None:
     assert flowrl.parameters.policy_delay == 2
     assert flowrl.parameters.expectile == 0.9
     assert flowrl.parameters.target_tau == 0.95
+
+
+def test_policyflow_config_preserves_official_core_and_common_budget() -> None:
+    policyflow = load_config(ROOT / "configs" / "policyflow.yaml")
+    assert policyflow.algorithm == "policyflow"
+    assert isinstance(policyflow.parameters, PolicyFlowConfig)
+    assert policyflow.parameters.horizon == 1
+    assert policyflow.parameters.rollout_env_steps == 24
+    assert policyflow.parameters.flow_steps == 4
+    assert policyflow.parameters.clip_range == 0.2
+    assert policyflow.parameters.gaussian_entropy_coef == 0.002
+    assert policyflow.parameters.brownian_reg_coef == 0.006
+
+
+def test_sac_flow_config_preserves_official_core_and_common_budget() -> None:
+    sac_flow = load_config(ROOT / "configs" / "sac_flow.yaml")
+    assert sac_flow.algorithm == "sac-flow"
+    assert isinstance(sac_flow.parameters, SACFlowConfig)
+    assert sac_flow.parameters.horizon == 1
+    assert sac_flow.parameters.rollout_env_steps == 24
+    assert sac_flow.parameters.flow_steps == 4
+    assert sac_flow.parameters.gradient_steps_per_update == 24
+    assert sac_flow.parameters.policy_delay == 3
+    assert sac_flow.parameters.target_entropy == 0.0
+    assert sac_flow.parameters.use_batch_renorm is True
+
+
+def test_sear_config_preserves_official_core_and_frame_budget() -> None:
+    sear = load_config(ROOT / "configs" / "sear.yaml")
+    assert sear.algorithm == "sear"
+    assert isinstance(sear.parameters, SEARConfig)
+    assert sear.parameters.horizon == 4
+    assert sear.parameters.rollout_env_steps == 24
+    assert sear.parameters.critic_num_heads == 16
+    assert sear.parameters.critic_num_blocks == 2
+    assert sear.parameters.num_value_bins == 101
+    assert sear.parameters.target_tau == 0.05
+    assert sear.parameters.gradient_steps_per_update == 6
 
 
 def test_reinflow_config_uses_official_h4_chain_likelihood() -> None:

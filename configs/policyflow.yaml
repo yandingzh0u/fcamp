@@ -1,0 +1,62 @@
+algorithm: policyflow
+environment:
+  task: largebox_plane
+  device: cuda:0
+  num_envs: 8192
+  sim_dt: 0.02
+  decimation: 4
+  fix_root_link: false
+  startup_randomization: true
+  max_episode_steps: 500
+  motion_start_phase: 0
+  motion_end_phase: -1
+  reset_noise: true
+  interval_pushes: true
+  observation_noise: true
+  adaptive_motion_sampling: true
+  adaptive_num_bins: 0
+  adaptive_alpha: 0.001
+  adaptive_predecessor_ratio: 0.8
+  adaptive_predecessor_lookback_bins: 1
+  action_rate_weight: 0.1
+parameters:
+  horizon: 1
+  actor_hidden_dims: [512, 256, 128]
+  critic_hidden_dims: [512, 256, 128]
+  activation: elu
+  flow_steps: 4
+  timestep_embed_dim: 64
+  init_noise_std: 1.0
+  rollout_env_steps: 24
+  discount_gamma: 0.99
+  gae_lambda: 0.95
+  num_learning_epochs: 5
+  num_mini_batches: 4
+  clip_range: 0.2
+  value_clip_range: 0.2
+  gaussian_entropy_coef: 0.002
+  brownian_reg_coef: 0.006
+  value_loss_coef: 1.0
+  desired_kl: 0.01
+  actor_learning_rate: 0.001
+  critic_learning_rate: 0.001
+  weight_decay: 0.00001
+  critic_weight_decay: 0.00001
+  empirical_normalization: true
+  init_at_random_ep_len: true
+  max_grad_norm: 1.0
+training:
+  seed: 0
+  max_updates: 1000
+  log_every: 1
+  save_every: 100
+  resume: ""
+  reset_optimizer_on_resume: false
+  reset_sampler_on_resume: false
+  validation_every: 100
+  validation_max_steps: 500
+  validation_start_phase: 0
+  validation_directional_start_phase: -1
+  validation_fixed_seed: -1
+  validation_done_frac_early_stop: 0.98
+  target_validation_steps: 0

@@ -8,7 +8,7 @@ import yaml
 
 
 AlgorithmName: TypeAlias = Literal[
-    "ppo", "fpo", "fpo++", "flowrl", "reinflow", "fql", "sfpo", "sfpo-gaussian", "chunk-ppo"
+    "ppo", "fpo", "fpo++", "flowrl", "reinflow", "fql", "policyflow", "sac-flow", "sear", "sfpo", "sfpo-gaussian", "chunk-ppo"
 ]
 
 
@@ -216,6 +216,93 @@ class FQLConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PolicyFlowConfig:
+    horizon: int
+    actor_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
+    activation: str
+    flow_steps: int
+    timestep_embed_dim: int
+    init_noise_std: float
+    rollout_env_steps: int
+    discount_gamma: float
+    gae_lambda: float
+    num_learning_epochs: int
+    num_mini_batches: int
+    clip_range: float
+    value_clip_range: float
+    gaussian_entropy_coef: float
+    brownian_reg_coef: float
+    value_loss_coef: float
+    desired_kl: float
+    actor_learning_rate: float
+    critic_learning_rate: float
+    weight_decay: float
+    critic_weight_decay: float
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+    max_grad_norm: float
+
+
+@dataclass(frozen=True, slots=True)
+class SACFlowConfig:
+    horizon: int
+    actor_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
+    flow_steps: int
+    timestep_embed_dim: int
+    action_scale: float
+    use_batch_renorm: bool
+    batch_norm_momentum: float
+    rollout_env_steps: int
+    discount_gamma: float
+    replay_capacity: int
+    replay_batch_size: int
+    gradient_steps_per_update: int
+    policy_delay: int
+    warmup_env_steps: int
+    init_alpha: float
+    target_entropy: float
+    policy_lr: float
+    critic_lr: float
+    alpha_lr: float
+    weight_decay: float
+    critic_weight_decay: float
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+    max_grad_norm: float
+
+
+@dataclass(frozen=True, slots=True)
+class SEARConfig:
+    horizon: int
+    actor_hidden_dim: int
+    actor_num_blocks: int
+    critic_hidden_dim: int
+    critic_num_heads: int
+    critic_num_blocks: int
+    num_value_bins: int
+    value_min: float
+    value_max: float
+    action_scale: float
+    rollout_env_steps: int
+    discount_gamma: float
+    target_tau: float
+    replay_capacity: int
+    replay_batch_size: int
+    gradient_steps_per_update: int
+    init_alpha: float
+    target_entropy_scale: float
+    actor_lr: float
+    critic_lr: float
+    alpha_lr: float
+    weight_decay: float
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+    max_grad_norm: float
+
+
+@dataclass(frozen=True, slots=True)
 class SFPOConfig:
     """SFPO's single supported training path.
 
@@ -321,6 +408,9 @@ AlgorithmConfig: TypeAlias = (
     | FlowRLConfig
     | ReinFlowConfig
     | FQLConfig
+    | PolicyFlowConfig
+    | SACFlowConfig
+    | SEARConfig
     | SFPOConfig
     | SFPOGaussianConfig
     | ChunkPPOConfig
@@ -364,6 +454,9 @@ ALGORITHM_CONFIGS = {
     "flowrl": FlowRLConfig,
     "reinflow": ReinFlowConfig,
     "fql": FQLConfig,
+    "policyflow": PolicyFlowConfig,
+    "sac-flow": SACFlowConfig,
+    "sear": SEARConfig,
     "sfpo": SFPOConfig,
     "sfpo-gaussian": SFPOGaussianConfig,
     "chunk-ppo": ChunkPPOConfig,
@@ -552,6 +645,60 @@ def _validate(config: ExperimentConfig) -> None:
             raise ValueError("FQL gradient steps must be positive and warmup must be non-negative")
         if not (0.0 <= parameters.recent_fraction <= 1.0):
             raise ValueError("FQL recent_fraction must be in [0, 1]")
+    if isinstance(config.parameters, PolicyFlowConfig):
+        parameters = config.parameters
+        if parameters.horizon != 1:
+            raise ValueError("PolicyFlow implements the official action horizon h=1")
+        if parameters.flow_steps < 1 or parameters.rollout_env_steps < 1:
+            raise ValueError("PolicyFlow requires positive flow_steps and rollout_env_steps")
+        if parameters.timestep_embed_dim < 8 or parameters.timestep_embed_dim % 8:
+            raise ValueError("PolicyFlow timestep_embed_dim must be divisible by 8")
+        if parameters.init_noise_std <= 0.0:
+            raise ValueError("PolicyFlow init_noise_std must be positive")
+        if parameters.num_learning_epochs < 1 or parameters.num_mini_batches < 1:
+            raise ValueError("PolicyFlow epochs and mini-batches must be positive")
+        if parameters.clip_range <= 0.0 or parameters.value_clip_range <= 0.0:
+            raise ValueError("PolicyFlow clipping ranges must be positive")
+    if isinstance(config.parameters, SACFlowConfig):
+        parameters = config.parameters
+        if parameters.horizon != 1:
+            raise ValueError("From-scratch SAC Flow implements action horizon h=1")
+        if parameters.flow_steps < 1 or parameters.rollout_env_steps < 1:
+            raise ValueError("SAC Flow requires positive flow_steps and rollout_env_steps")
+        if parameters.timestep_embed_dim < 4 or parameters.timestep_embed_dim % 2:
+            raise ValueError("SAC Flow timestep_embed_dim must be even and >= 4")
+        if parameters.action_scale <= 0.0:
+            raise ValueError("SAC Flow action_scale must be positive")
+        if not (0.0 < parameters.batch_norm_momentum < 1.0):
+            raise ValueError("SAC Flow batch_norm_momentum must be in (0, 1)")
+        if parameters.replay_capacity < 1 or parameters.replay_batch_size < 1:
+            raise ValueError("SAC Flow replay capacity and batch size must be positive")
+        if parameters.gradient_steps_per_update < 1 or parameters.policy_delay < 1:
+            raise ValueError("SAC Flow gradient steps and policy delay must be positive")
+        if parameters.warmup_env_steps < 0 or parameters.init_alpha <= 0.0:
+            raise ValueError("SAC Flow warmup must be non-negative and init_alpha positive")
+    if isinstance(config.parameters, SEARConfig):
+        parameters = config.parameters
+        if parameters.horizon < 2:
+            raise ValueError("SEAR comparison requires an action chunk horizon >= 2")
+        if parameters.rollout_env_steps < parameters.horizon:
+            raise ValueError("SEAR rollout must contain at least one full chunk")
+        if parameters.critic_hidden_dim % parameters.critic_num_heads:
+            raise ValueError("SEAR critic_hidden_dim must be divisible by critic_num_heads")
+        if parameters.actor_num_blocks < 1 or parameters.critic_num_blocks < 1:
+            raise ValueError("SEAR actor and critic require at least one block")
+        if parameters.num_value_bins < 2 or parameters.value_min >= parameters.value_max:
+            raise ValueError("SEAR distributional value support is invalid")
+        if parameters.action_scale <= 0.0:
+            raise ValueError("SEAR action_scale must be positive")
+        if not (0.0 < parameters.target_tau <= 1.0):
+            raise ValueError("SEAR target_tau must be in (0, 1]")
+        if parameters.replay_capacity < 1 or parameters.replay_batch_size < 1:
+            raise ValueError("SEAR replay capacity and batch size must be positive")
+        if parameters.gradient_steps_per_update < 1 or parameters.init_alpha <= 0.0:
+            raise ValueError("SEAR gradient steps and init_alpha must be positive")
+        if parameters.target_entropy_scale <= 0.0:
+            raise ValueError("SEAR target_entropy_scale must be positive")
     if isinstance(config.parameters, SFPOConfig):
         if config.parameters.horizon < 1:
             raise ValueError("SFPO requires parameters.horizon >= 1")
