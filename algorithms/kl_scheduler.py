@@ -1,9 +1,4 @@
-"""KL-based adaptive learning-rate controller used by PPO.
-
-``desired_kl`` is a per-environment-control-step budget. FPO is intentionally
-not routed through this helper because its reported ``kl`` is a prediction MSE,
-not a log-probability KL.
-"""
+"""KL-based adaptive learning-rate controller used by PPO and SFPO."""
 from __future__ import annotations
 
 import math

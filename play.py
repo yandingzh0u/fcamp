@@ -59,7 +59,9 @@ def _rebuild_config(payload: dict) -> ExperimentConfig:
         return config_from_dict(raw)
     if not {"algo_name", "env", "algo", "train"}.issubset(raw):
         raise KeyError("Checkpoint has no supported configuration schema")
-    algorithm = "fpo" if raw["algo_name"] == "fpo_pp" else raw["algo_name"]
+    algorithm = raw["algo_name"]
+    if algorithm not in ALGORITHM_CONFIGS:
+        raise ValueError(f"Unsupported checkpoint algorithm {algorithm!r}; available: {sorted(ALGORITHM_CONFIGS)}")
     parameter_cls = ALGORITHM_CONFIGS[algorithm]
     legacy_env = raw["env"]
     environment = _select(EnvironmentConfig, legacy_env)
@@ -70,10 +72,6 @@ def _rebuild_config(payload: dict) -> ExperimentConfig:
         parameters.setdefault("critic_hidden_dims", parameters["actor_hidden_dims"])
         parameters.setdefault("critic_weight_decay", 0.0)
         parameters.setdefault("value_clip_range", parameters["clip_range"])
-    elif algorithm == "fpo":
-        parameters.setdefault("critic_hidden_dims", (512, 256, 128))
-        parameters.setdefault("critic_weight_decay", 0.0)
-        parameters.setdefault("value_clip_range", 0.2)
     tree = {
         "algorithm": algorithm,
         "environment": environment,

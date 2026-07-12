@@ -57,7 +57,6 @@ class FlowMatchingPolicy(nn.Module):
             raise ValueError(f"Unsupported causal_arch: {self.causal_arch}")
         if not self.causal_velocity:
             # Full-chunk MLP: v_k depends on the whole z_0..z_{h-1} (non-causal).
-            # Kept for backward compatibility with non-SFPO algorithms.
             layers: list[nn.Module] = []
             in_dim = self.obs_dim + self.chunk_dim + 1
             for hidden_dim in self.hidden_dims:
