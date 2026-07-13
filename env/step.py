@@ -34,6 +34,12 @@ class MimicStepMixin:
         done, done_terms, debug_terms = self.compute_termination()
         terminal_observation = None
         terminal_critic_observation = None
+        # Capture the true post-action state before any optional reset.  FCAMP
+        # normally disables auto-reset within a chunk, while this also makes the
+        # semantics correct for evaluation code that uses auto_reset=True.
+        amp_frame = self.get_amp_policy_frame()
+        reset_env_ids = torch.empty(0, dtype=torch.long, device=self.device)
+        reset_phase_indices = torch.empty(0, dtype=torch.long, device=self.device)
 
 
         tracking_failure = done_terms["anchor_pos_bad"] | done_terms["anchor_ori_bad"] | done_terms["ee_body_bad"]
@@ -46,13 +52,17 @@ class MimicStepMixin:
             env_ids = done.nonzero(as_tuple=False).squeeze(-1)
             reset_phases = self.sample_phase_indices(env_ids.numel(), horizon=max(1, reset_horizon))
             self.reset_envs(env_ids, phase_indices=reset_phases)
+            reset_env_ids = env_ids
+            reset_phase_indices = reset_phases
 
 
         self.phase_steps += 1
 
 
+        motion_wrap_env_ids = torch.empty(0, dtype=torch.long, device=self.device)
+        motion_wrap_phase_indices = torch.empty(0, dtype=torch.long, device=self.device)
         if not self.terminate_on_motion_end:
-            self._resample_finished_motions()
+            motion_wrap_env_ids, motion_wrap_phase_indices = self._resample_finished_motions()
 
 
         self._fold_adaptive_sampler()
@@ -67,6 +77,11 @@ class MimicStepMixin:
             "done_terms": done_terms,
             "debug_terms": debug_terms,
             "termination_phase_steps": termination_phase_steps,
+            "amp_frame": amp_frame,
+            "reset_env_ids": reset_env_ids,
+            "reset_phase_indices": reset_phase_indices,
+            "motion_wrap_env_ids": motion_wrap_env_ids,
+            "motion_wrap_phase_indices": motion_wrap_phase_indices,
         }
         if terminal_observation is not None:
             info["final_observation"] = terminal_observation

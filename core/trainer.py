@@ -9,6 +9,7 @@ from .checkpoint import Checkpointer
 from .config import ExperimentConfig
 from .validation_logging import log_validation_metrics
 from .validation import run_validation_rollout, validation_max_steps
+from .metrics_logger import MetricsLogger
 from env.mimic import G1MimicEnv
 
 
@@ -28,6 +29,7 @@ class CoreTrainer:
         self.env = G1MimicEnv(cfg.environment, cfg.observation_group_size)
         self.checkpoint_dir = checkpoint_dir.resolve()
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.metrics_logger = MetricsLogger(self.checkpoint_dir.parent / "logs")
 
         self.algo = algo_factory(self.algo_cfg, self.env, simulation_app)
         self.algo.build()
@@ -89,6 +91,10 @@ class CoreTrainer:
                 if update_idx <= 3 or update_idx % tcfg.log_every == 0:
                     log_validation_metrics(self.env, metrics)
 
+            # Structured metrics are written every iteration, after optional
+            # validation has appended its metrics.
+            self.metrics_logger.write(update_idx, metrics)
+
             if (
                 update_idx == tcfg.max_updates or (tcfg.save_every > 0 and update_idx % tcfg.save_every == 0)
             ):
@@ -103,7 +109,10 @@ class CoreTrainer:
                 break
 
         print("[INFO] Training finished.", flush=True)
+        self.metrics_logger.close()
 
     def validate_only(self) -> None:
         metrics = run_validation_rollout(self)
         log_validation_metrics(self.env, metrics)
+        self.metrics_logger.write(self.start_update - 1, metrics)
+        self.metrics_logger.close()

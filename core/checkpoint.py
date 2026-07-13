@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+import os
+import shutil
 
 import torch
 
@@ -45,14 +47,23 @@ class Checkpointer:
         step_path = t.checkpoint_dir / (filename if filename is not None else f"update_{update_idx:04d}.pt")
         torch.save(payload, step_path)
         if filename is None:
-            torch.save(payload, t.checkpoint_dir / "last.pt")
+            # Replay-complete FC-AMP checkpoints can exceed 1 GiB. Keep last.pt
+            # as a hard link instead of serializing the same payload twice.
+            last_path = t.checkpoint_dir / "last.pt"
+            last_path.unlink(missing_ok=True)
+            try:
+                os.link(step_path, last_path)
+            except OSError:
+                shutil.copy2(step_path, last_path)
         print(f"[CHECKPOINT] saved {step_path}", flush=True)
 
     def load(self, checkpoint_path: Path) -> None:
         t = self.t
         if not checkpoint_path.is_file():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-        payload = torch.load(checkpoint_path, map_location=t.env.device)
+        # Load through CPU so a large discriminator replay sidecar does not
+        # transiently consume GPU memory before being copied back to its CPU ring.
+        payload = torch.load(checkpoint_path, map_location="cpu")
         t.algo.policy.load_state_dict(payload["policy"])
         reset_optimizer = bool(t.train_cfg.reset_optimizer_on_resume)
         if reset_optimizer:

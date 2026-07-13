@@ -5,6 +5,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# Training artifacts are local-only. Checkpoints routinely exceed hosting
+# limits; each run already contains its own resolved config/source snapshot.
+runs/
+
 .vscode/
 .idea/
 *.swp

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 import traceback
+import json
+import subprocess
+import tarfile
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +43,55 @@ def main() -> None:
     log_dir = run_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "train.log"
+
+    # Persist the fully-resolved experiment identity before Isaac Sim starts.
+    resolved = asdict(cfg)
+    try:
+        resolved["git_commit"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
+        ).strip()
+    except Exception:
+        resolved["git_commit"] = "unknown"
+    try:
+        git_status = subprocess.check_output(
+            ["git", "status", "--short"], cwd=REPO_ROOT, text=True
+        )
+    except Exception:
+        git_status = "unavailable\n"
+    (run_dir / "git_status.txt").write_text(git_status, encoding="utf-8")
+
+    # A dirty/untracked research tree cannot be reproduced from git_commit.
+    # Archive the actual executable source used by every run, excluding assets
+    # and prior run outputs. This is intentionally small enough to keep beside
+    # the resolved config and metrics.
+    snapshot_path = run_dir / "source_snapshot.tar.gz"
+    source_roots = (
+        "algorithms",
+        "amp",
+        "configs",
+        "core",
+        "env",
+        "networks",
+        "tests",
+    )
+    with tarfile.open(snapshot_path, "w:gz") as archive:
+        for source_root in source_roots:
+            root = REPO_ROOT / source_root
+            if not root.exists():
+                continue
+            for path in sorted(root.rglob("*")):
+                if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+                    continue
+                archive.add(path, arcname=path.relative_to(REPO_ROOT))
+        for path in sorted(REPO_ROOT.iterdir()):
+            if path.is_file() and path.suffix in {".py", ".yaml", ".yml", ".toml"}:
+                archive.add(path, arcname=path.name)
+    snapshot_sha256 = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
+    resolved["git_dirty"] = bool(git_status.strip())
+    resolved["source_snapshot"] = snapshot_path.name
+    resolved["source_snapshot_sha256"] = snapshot_sha256
+    with (run_dir / "resolved_config.json").open("w", encoding="utf-8") as handle:
+        json.dump(resolved, handle, indent=2, sort_keys=True)
 
 
     class _Tee:

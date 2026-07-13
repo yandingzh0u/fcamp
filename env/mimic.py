@@ -6,6 +6,7 @@ from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
 from core.config import EnvironmentConfig
 
 from .adaptive_sampling import AdaptiveTimestepsSampler
+from .amp_data import G1_AMP_FRAME_DIM, G1_AMP_KEY_BODY_NAMES
 from .spec import (
     CRITIC_OBS_DIM,
     OBS_DIM,
@@ -60,6 +61,14 @@ class G1MimicEnv(
         track_body_ids, track_body_names = self.robot.find_bodies(list(MIMIC_BODY_NAMES), preserve_order=True)
         self.track_body_ids = torch.tensor(track_body_ids, dtype=torch.long, device=self.device)
         self.track_body_names = list(track_body_names)
+        missing_amp_bodies = [name for name in G1_AMP_KEY_BODY_NAMES if name not in self.robot.body_names]
+        if missing_amp_bodies:
+            raise ValueError(f"AMP key bodies are missing from the robot asset: {missing_amp_bodies}")
+        self.amp_key_body_ids = torch.tensor(
+            [self.robot.body_names.index(name) for name in G1_AMP_KEY_BODY_NAMES],
+            dtype=torch.long,
+            device=self.device,
+        )
         self.anchor_body_id = self.robot.body_names.index(MIMIC_ANCHOR_BODY_NAME)
         self.ee_body_names = list(MIMIC_EE_BODY_NAMES)
         self.ee_body_indices = [self.track_body_names.index(name) for name in MIMIC_EE_BODY_NAMES]
@@ -126,6 +135,38 @@ class G1MimicEnv(
     @property
     def critic_observation_dim(self) -> int:
         return CRITIC_OBS_DIM
+
+    @property
+    def amp_frame_dim(self) -> int:
+        return G1_AMP_FRAME_DIM
+
+    def get_amp_demo_history(
+        self,
+        phase_indices: torch.Tensor,
+        window_size: int,
+        *,
+        flatten: bool = False,
+    ) -> torch.Tensor:
+        return self.motion.get_amp_demo_history(
+            phase_indices,
+            window_size,
+            flatten=flatten,
+        )
+
+    def sample_amp_demo_windows(
+        self,
+        num_samples: int,
+        window_size: int = 16,
+        *,
+        flatten: bool = True,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        return self.motion.sample_amp_demo_windows(
+            num_samples,
+            window_size,
+            flatten=flatten,
+            generator=generator,
+        )
 
     def _adaptive_phase_range(self, horizon: int) -> tuple[int, int]:
 
@@ -265,7 +306,9 @@ class G1MimicEnv(
         self.record_motion_failures = True
 
 
-        self.terminate_on_motion_end = False
+        # Preserve SFPO's historical default.  FCAMP opts in through its own
+        # environment config without requiring this module to import FCAMP.
+        self.terminate_on_motion_end = bool(getattr(self.config, "terminate_on_motion_end", False))
 
     def _record_adaptive_failures(
         self,
@@ -290,11 +333,11 @@ class G1MimicEnv(
         min_phase, max_phase = self._adaptive_phase_range(horizon=1)
         return self.adaptive_sampler.stats(min_phase, max_phase)
 
-    def _resample_finished_motions(self) -> None:
+    def _resample_finished_motions(self) -> tuple[torch.Tensor, torch.Tensor]:
 
         env_ids = torch.where(self.phase_steps >= self.motion.num_frames)[0]
         if env_ids.numel() == 0:
-            return
+            return env_ids, torch.empty(0, dtype=torch.long, device=self.device)
         phase_indices = self.sample_phase_indices(env_ids.numel(), horizon=1)
         self.phase_steps[env_ids] = phase_indices
         self._failure_recorded[env_ids] = False
@@ -317,3 +360,4 @@ class G1MimicEnv(
             env_ids=env_ids,
         )
         self.scene.update(self.physics_dt)
+        return env_ids, phase_indices

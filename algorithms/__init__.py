@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from .ppo import PPO
 from .sfpo import SFPO
+from .fcamp import FCAMP
 
 _REGISTRY = {
     "ppo": PPO,
     "sfpo": SFPO,
+    "fcamp": FCAMP,
 }
 
 

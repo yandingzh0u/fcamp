@@ -1,0 +1,108 @@
+algorithm: fcamp
+environment:
+  task: largebox_plane
+  device: cuda:0
+  num_envs: 8192
+  sim_dt: 0.02
+  decimation: 4
+  fix_root_link: false
+  startup_randomization: true
+  max_episode_steps: 500
+  motion_start_phase: 0
+  motion_end_phase: -1
+  reset_noise: true
+  interval_pushes: true
+  observation_noise: true
+  adaptive_motion_sampling: true
+  adaptive_num_bins: 0
+  adaptive_alpha: 0.001
+  adaptive_predecessor_ratio: 0.8
+  adaptive_predecessor_lookback_bins: 1
+  action_rate_weight: 0.1
+
+parameters:
+  # Causal Flow-CPS chunk actor (kept aligned with the SFPO baseline).
+  horizon: 4
+  actor_hidden_dims: [512, 256, 128]
+  critic_hidden_dims: [512, 256, 128]
+  activation: elu
+  action_squash_scale: 5.0
+  flow_steps: 4
+  cps_noise_level: 0.8
+  cps_trainable: true
+  cps_cov_rank: 8
+  rollout_env_steps: 24
+  discount_gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  desired_kl: 0.01
+  policy_epochs: 5
+  num_mini_batches: 4
+  micro_batch_size: 4096
+  value_loss_coef: 1.0
+  policy_lr: 0.0003
+  value_lr: 0.0003
+  weight_decay: 0.0
+  critic_weight_decay: 0.0
+  empirical_normalization: true
+  init_at_random_ep_len: true
+  max_grad_norm: 1.0
+  kl_early_stop_factor: 4.0
+  # Retained for inherited SFPO helpers; FC-AMP uses credit.* below.
+  advantage_normalization: global
+
+  amp:
+    enabled: true
+    # 16 states at 50 Hz span 0.30 s (15 transitions).
+    obs_steps: 16
+    hidden_dims: [1024, 512]
+    reward_scale: 2.0
+    reward_epsilon: 0.0001
+    optimizer: sgd
+    learning_rate: 0.00025
+    weight_decay: 0.0001
+    epochs: 2
+    # Absolute batch size; deliberately independent of num_envs for GP memory.
+    batch_size: 1024
+    current_buffer_size: 65536
+    replay_size: 200000
+    replay_samples: 1000
+    replay_dtype: float16
+    replay_device: cpu
+    grad_penalty: 10.0
+    logit_reg: 0.01
+    normalizer_clip: 10.0
+    reward_eval_batch_size: 4096
+    max_updates_per_iteration: 32
+
+  credit:
+    mode: causal_frame
+    task_weight: 1.0
+    amp_weight: 1.0
+    # Current handcrafted task reward is already multiplied by dt.
+    integrate_amp_reward_dt: true
+    advantage_normalization: per_channel_per_offset
+    ratio_mode: factorized
+
+  critics:
+    encoder_hidden_dims: [512, 256, 128]
+    head_hidden_dims: [128, 64]
+    sharing: encoder
+    task_loss_weight: 1.0
+    amp_loss_weight: 1.0
+
+training:
+  seed: 0
+  max_updates: 500
+  log_every: 1
+  save_every: 50
+  resume: ""
+  reset_optimizer_on_resume: false
+  reset_sampler_on_resume: false
+  validation_every: 50
+  validation_max_steps: 500
+  validation_start_phase: 0
+  validation_directional_start_phase: -1
+  validation_fixed_seed: -1
+  validation_done_frac_early_stop: 0.98
+  target_validation_steps: 0

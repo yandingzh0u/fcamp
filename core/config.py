@@ -7,7 +7,7 @@ from typing import Any, Literal, TypeAlias
 import yaml
 
 
-AlgorithmName: TypeAlias = Literal["ppo", "sfpo"]
+AlgorithmName: TypeAlias = Literal["ppo", "sfpo", "fcamp"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +101,71 @@ class SFPOConfig:
     advantage_normalization: str
 
 
-AlgorithmConfig: TypeAlias = PPOConfig | SFPOConfig
+@dataclass(frozen=True, slots=True)
+class AMPConfig:
+    """Standard AMP discriminator and replay configuration.
+
+    ``obs_steps`` counts states, not transitions.  FC-AMP uses 16 states at
+    50 Hz to match the roughly 0.3 s receptive field of MimicKit's 10-state,
+    30 Hz G1 setup.
+    """
+
+    enabled: bool
+    obs_steps: int
+    hidden_dims: tuple[int, ...]
+    reward_scale: float
+    reward_epsilon: float
+    optimizer: str
+    learning_rate: float
+    weight_decay: float
+    epochs: int
+    batch_size: int
+    current_buffer_size: int
+    replay_size: int
+    replay_samples: int
+    replay_dtype: str
+    replay_device: str
+    grad_penalty: float
+    logit_reg: float
+    normalizer_clip: float
+    reward_eval_batch_size: int
+    max_updates_per_iteration: int
+
+
+@dataclass(frozen=True, slots=True)
+class FCAMPCreditConfig:
+    mode: str
+    task_weight: float
+    amp_weight: float
+    integrate_amp_reward_dt: bool
+    advantage_normalization: str
+    ratio_mode: str
+
+
+@dataclass(frozen=True, slots=True)
+class FCAMPCriticConfig:
+    encoder_hidden_dims: tuple[int, ...]
+    head_hidden_dims: tuple[int, ...]
+    sharing: str
+    task_loss_weight: float
+    amp_loss_weight: float
+
+
+@dataclass(frozen=True, slots=True)
+class FCAMPConfig(SFPOConfig):
+    """Full causal Flow-chunk AMP training path.
+
+    The actor/CPS fields are inherited from :class:`SFPOConfig`.  FC-AMP adds
+    a standard independent AMP discriminator, primitive causal credit, and a
+    shared prefix encoder with task/AMP Flow-value heads.
+    """
+
+    amp: AMPConfig
+    credit: FCAMPCreditConfig
+    critics: FCAMPCriticConfig
+
+
+AlgorithmConfig: TypeAlias = PPOConfig | SFPOConfig | FCAMPConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +201,7 @@ class ExperimentConfig:
 ALGORITHM_CONFIGS = {
     "ppo": PPOConfig,
     "sfpo": SFPOConfig,
+    "fcamp": FCAMPConfig,
 }
 
 
@@ -149,10 +214,30 @@ def _construct(cls, values: dict[str, Any]):
     if unknown:
         raise KeyError(f"{cls.__name__} unknown keys: {sorted(unknown)}")
     converted = dict(values)
-    for name in ("actor_hidden_dims", "critic_hidden_dims"):
+    for name in (
+        "actor_hidden_dims",
+        "critic_hidden_dims",
+        "hidden_dims",
+        "encoder_hidden_dims",
+        "head_hidden_dims",
+    ):
         if name in converted:
             converted[name] = tuple(int(value) for value in converted[name])
     return cls(**converted)
+
+
+def _construct_algorithm_config(algorithm: str, values: dict[str, Any]) -> AlgorithmConfig:
+    cls = ALGORITHM_CONFIGS[algorithm]
+    if cls is not FCAMPConfig:
+        return _construct(cls, values)
+    nested = dict(values)
+    try:
+        nested["amp"] = _construct(AMPConfig, dict(nested["amp"]))
+        nested["credit"] = _construct(FCAMPCreditConfig, dict(nested["credit"]))
+        nested["critics"] = _construct(FCAMPCriticConfig, dict(nested["critics"]))
+    except KeyError as exc:
+        raise KeyError(f"FCAMPConfig missing nested section: {exc.args[0]}") from exc
+    return _construct(FCAMPConfig, nested)
 
 
 def _apply_overrides(tree: dict[str, Any], overrides: list[str]) -> None:
@@ -198,7 +283,7 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
     config = ExperimentConfig(
         algorithm=algorithm,
         environment=_construct(EnvironmentConfig, dict(tree["environment"])),
-        parameters=_construct(ALGORITHM_CONFIGS[algorithm], parameter_values),
+        parameters=_construct_algorithm_config(algorithm, parameter_values),
         training=_construct(TrainingConfig, training_values),
     )
     _validate(config)
@@ -249,3 +334,45 @@ def _validate(config: ExperimentConfig) -> None:
                 "SFPO parameters.advantage_normalization must be one of "
                 f"'per_prefix', 'global', 'none'; got {config.parameters.advantage_normalization!r}"
             )
+    if isinstance(config.parameters, FCAMPConfig):
+        amp = config.parameters.amp
+        credit = config.parameters.credit
+        critics = config.parameters.critics
+        if not amp.enabled:
+            raise ValueError("FC-AMP requires parameters.amp.enabled=true")
+        if amp.obs_steps < 2:
+            raise ValueError("FC-AMP requires amp.obs_steps >= 2")
+        if not amp.hidden_dims:
+            raise ValueError("FC-AMP discriminator hidden_dims cannot be empty")
+        if amp.reward_scale <= 0.0 or not (0.0 < amp.reward_epsilon < 1.0):
+            raise ValueError("FC-AMP AMP reward scale/epsilon are invalid")
+        if amp.optimizer.lower() not in {"sgd", "adam", "adamw"}:
+            raise ValueError("FC-AMP amp.optimizer must be sgd, adam, or adamw")
+        if amp.learning_rate <= 0.0 or amp.batch_size < 1 or amp.epochs < 1:
+            raise ValueError("FC-AMP discriminator optimizer/batch/epoch settings are invalid")
+        if amp.max_updates_per_iteration < 1:
+            raise ValueError("FC-AMP max_updates_per_iteration must be positive")
+        if amp.current_buffer_size < amp.batch_size:
+            raise ValueError("FC-AMP amp.current_buffer_size must be >= amp.batch_size")
+        if amp.replay_size < amp.batch_size or amp.replay_samples < 0:
+            raise ValueError("FC-AMP replay settings are invalid")
+        if amp.replay_dtype.lower() not in {"float16", "float32"}:
+            raise ValueError("FC-AMP replay_dtype must be float16 or float32")
+        if amp.replay_device.lower() not in {"cpu", "cuda"}:
+            raise ValueError("FC-AMP replay_device must be cpu or cuda")
+        if credit.mode not in {"causal_frame", "chunk_shared"}:
+            raise ValueError("FC-AMP credit.mode must be causal_frame or chunk_shared")
+        if credit.advantage_normalization not in {
+            "per_channel_per_offset", "per_channel_global", "none"
+        }:
+            raise ValueError("Unsupported FC-AMP advantage normalization")
+        if credit.ratio_mode not in {"factorized", "mean_log", "joint_path"}:
+            raise ValueError("FC-AMP ratio_mode must be factorized, mean_log, or joint_path")
+        if credit.task_weight < 0.0 or credit.amp_weight < 0.0:
+            raise ValueError("FC-AMP reward weights must be non-negative")
+        if credit.task_weight == 0.0 and credit.amp_weight == 0.0:
+            raise ValueError("FC-AMP requires at least one non-zero reward weight")
+        if critics.sharing != "encoder":
+            raise ValueError("Full FC-AMP requires critics.sharing=encoder")
+        if not critics.encoder_hidden_dims or not critics.head_hidden_dims:
+            raise ValueError("FC-AMP critic encoder/head dimensions cannot be empty")

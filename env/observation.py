@@ -12,9 +12,35 @@ from isaaclab.utils.math import (
 )
 
 from .spec import CRITIC_OBS_DIM, OBS_DIM
+from .amp_data import build_g1_amp_frame
 
 
 class MimicObservationMixin:
+    def get_amp_policy_frame(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        """Return clean post-action robot state for AMP, without task reference data."""
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+        if env_ids.ndim != 1:
+            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
+        joint_pos, joint_vel = self.get_action_joint_state()
+        root_pos = self.robot.data.root_pos_w.index_select(0, env_ids)
+        env_origins = self.scene.env_origins.index_select(0, env_ids)
+        key_body_pos = self.robot.data.body_pos_w.index_select(0, env_ids)[..., self.amp_key_body_ids, :]
+        # Scene origins are translations only.  Subtracting them from both root
+        # and key bodies keeps root-relative key features invariant and removes
+        # the vectorized-environment grid from the discriminator input.
+        root_pos_local = root_pos - env_origins
+        key_body_pos_local = key_body_pos - env_origins.unsqueeze(-2)
+        return build_g1_amp_frame(
+            root_pos=root_pos_local,
+            root_quat_wxyz=self.robot.data.root_quat_w.index_select(0, env_ids),
+            joint_pos=joint_pos.index_select(0, env_ids),
+            key_body_pos=key_body_pos_local,
+            root_lin_vel=self.robot.data.root_lin_vel_w.index_select(0, env_ids),
+            root_ang_vel=self.robot.data.root_ang_vel_w.index_select(0, env_ids),
+            joint_vel=joint_vel.index_select(0, env_ids),
+        )
+
     def get_reference_state(self) -> dict[str, torch.Tensor]:
         reference = dict(self.motion.get_frame(self.phase_steps))
         env_origins = self.scene.env_origins
