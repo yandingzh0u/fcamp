@@ -1,0 +1,129 @@
+{
+  "algorithm": "fcamp",
+  "environment": {
+    "action_rate_weight": 0.1,
+    "adaptive_alpha": 0.001,
+    "adaptive_motion_sampling": true,
+    "adaptive_num_bins": 0,
+    "adaptive_predecessor_lookback_bins": 1,
+    "adaptive_predecessor_ratio": 0.8,
+    "decimation": 4,
+    "device": "cuda:0",
+    "fix_root_link": false,
+    "interval_pushes": true,
+    "max_episode_steps": 500,
+    "motion_end_phase": -1,
+    "motion_start_phase": 0,
+    "num_envs": 8192,
+    "observation_noise": true,
+    "reset_noise": true,
+    "sim_dt": 0.02,
+    "startup_randomization": true,
+    "task": "largebox_plane"
+  },
+  "git_commit": "83af2a17229546163b37ea3cbce5e19ccc8159a8",
+  "git_dirty": true,
+  "parameters": {
+    "action_squash_scale": 5.0,
+    "activation": "elu",
+    "actor_hidden_dims": [
+      512,
+      256,
+      128
+    ],
+    "advantage_normalization": "global",
+    "amp": {
+      "batch_size": 1024,
+      "current_buffer_size": 65536,
+      "enabled": true,
+      "epochs": 2,
+      "grad_penalty": 10.0,
+      "hidden_dims": [
+        1024,
+        512
+      ],
+      "learning_rate": 0.00025,
+      "logit_reg": 0.01,
+      "max_updates_per_iteration": 32,
+      "normalizer_clip": 10.0,
+      "obs_steps": 16,
+      "optimizer": "sgd",
+      "replay_device": "cpu",
+      "replay_dtype": "float32",
+      "replay_samples": 1000,
+      "replay_size": 200000,
+      "reward_epsilon": 0.0001,
+      "reward_eval_batch_size": 4096,
+      "reward_scale": 2.0,
+      "weight_decay": 0.0001
+    },
+    "clip_range": 0.2,
+    "cps_cov_rank": 8,
+    "cps_noise_level": 0.8,
+    "cps_trainable": true,
+    "credit": {
+      "advantage_normalization": "per_offset",
+      "amp_weight": 1.0,
+      "integrate_amp_reward_dt": true,
+      "mode": "causal_frame",
+      "ratio_mode": "joint_path",
+      "task_weight": 1.0
+    },
+    "critic_hidden_dims": [
+      512,
+      256,
+      128
+    ],
+    "critic_weight_decay": 0.0,
+    "critics": {
+      "amp_loss_weight": 1.0,
+      "encoder_hidden_dims": [
+        512,
+        256,
+        128
+      ],
+      "head_hidden_dims": [
+        128,
+        64
+      ],
+      "sharing": "encoder",
+      "task_loss_weight": 1.0
+    },
+    "desired_kl": 0.01,
+    "discount_gamma": 0.99,
+    "empirical_normalization": true,
+    "flow_steps": 4,
+    "gae_lambda": 0.95,
+    "horizon": 4,
+    "init_at_random_ep_len": true,
+    "kl_early_stop_factor": 4.0,
+    "max_grad_norm": 1.0,
+    "micro_batch_size": 4096,
+    "num_mini_batches": 4,
+    "policy_epochs": 5,
+    "policy_lr": 0.0003,
+    "rollout_env_steps": 24,
+    "value_loss_coef": 1.0,
+    "value_lr": 0.0003,
+    "weight_decay": 0.0
+  },
+  "resolved_config_sha256": "a09874b54090ad1908de5d97c699703903c4907d448d2ecc53cb8ce1bf2823da",
+  "source_snapshot": "source_snapshot.tar.gz",
+  "source_snapshot_sha256": "dc9f6d30463075d9edcf32887a070220fc04608975e6f81199d2edd19fca4863",
+  "training": {
+    "log_every": 10,
+    "max_updates": 500,
+    "reset_optimizer_on_resume": false,
+    "reset_sampler_on_resume": false,
+    "resume": "",
+    "save_every": 50,
+    "seed": 0,
+    "target_validation_steps": 0,
+    "validation_directional_start_phase": -1,
+    "validation_done_frac_early_stop": 0.98,
+    "validation_every": 50,
+    "validation_fixed_seed": 0,
+    "validation_max_steps": 500,
+    "validation_start_phase": 0
+  }
+}

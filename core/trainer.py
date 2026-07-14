@@ -68,28 +68,37 @@ class CoreTrainer:
                 self.algo.log(update_idx, tcfg.max_updates, metrics)
 
             if tcfg.validation_every > 0 and update_idx % tcfg.validation_every == 0:
-                fixed_seed = tcfg.validation_fixed_seed if tcfg.validation_fixed_seed >= 0 else None
+                fixed_seed = (
+                    tcfg.validation_fixed_seed
+                    if tcfg.validation_fixed_seed >= 0
+                    else tcfg.seed
+                )
+                val_max_steps = validation_max_steps(tcfg, self.env)
                 print(
                     f"[VALIDATION_START] update={update_idx} "
-                    f"max_steps={validation_max_steps(tcfg, self.env)} envs={self.env_cfg.num_envs} "
-                    f"fixed_seed={fixed_seed if fixed_seed is not None else 'disabled'}",
+                    f"max_steps={val_max_steps} envs={self.env_cfg.num_envs} "
+                    f"fixed_seed={fixed_seed}",
                     flush=True,
                 )
                 vt0 = time.perf_counter()
-                metrics.update(run_validation_rollout(self))
+                metrics["validation/fixed_seed"] = float(fixed_seed)
+                metrics["validation/protocol_version"] = 2.0
+                metrics["validation/max_steps"] = float(val_max_steps)
+                metrics.update(run_validation_rollout(self, fixed_seed=fixed_seed))
                 dir_phase = tcfg.validation_directional_start_phase
                 if dir_phase >= 0:
-                    dir_metrics = run_validation_rollout(self, start_phase_override=dir_phase)
+                    dir_metrics = run_validation_rollout(
+                        self,
+                        fixed_seed=fixed_seed,
+                        start_phase_override=dir_phase,
+                    )
                     for key, value in dir_metrics.items():
                         metrics[key.replace("validation/", "validation_directional/")] = value
-                if fixed_seed is not None:
-                    fixed_metrics = run_validation_rollout(self, fixed_seed=fixed_seed)
-                    for key, value in fixed_metrics.items():
-                        metrics[key.replace("validation/", "val_fixed/")] = value
                 metrics["timing/validation_s"] = time.perf_counter() - vt0
                 print(f"[VALIDATION_DONE] update={update_idx} time={metrics['timing/validation_s']:.3f}s", flush=True)
                 if update_idx <= 3 or update_idx % tcfg.log_every == 0:
                     log_validation_metrics(self.env, metrics)
+                self.metrics_logger.write_validation_summary(update_idx, metrics)
 
             # Structured metrics are written every iteration, after optional
             # validation has appended its metrics.
@@ -112,7 +121,16 @@ class CoreTrainer:
         self.metrics_logger.close()
 
     def validate_only(self) -> None:
-        metrics = run_validation_rollout(self)
+        fixed_seed = (
+            self.train_cfg.validation_fixed_seed
+            if self.train_cfg.validation_fixed_seed >= 0
+            else self.train_cfg.seed
+        )
+        metrics = run_validation_rollout(self, fixed_seed=fixed_seed)
+        metrics["validation/fixed_seed"] = float(fixed_seed)
+        metrics["validation/protocol_version"] = 2.0
+        metrics["validation/max_steps"] = float(validation_max_steps(self.train_cfg, self.env))
         log_validation_metrics(self.env, metrics)
+        self.metrics_logger.write_validation_summary(self.start_update - 1, metrics)
         self.metrics_logger.write(self.start_update - 1, metrics)
         self.metrics_logger.close()

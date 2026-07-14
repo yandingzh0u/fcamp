@@ -188,8 +188,9 @@ def run_validation_rollout(
     metrics["validation/died_before_push_frac"] = float((_died & ~_pushed).float().mean().item())
     metrics["validation/pushed_then_died_frac"] = float((_died & _pushed).float().mean().item())
     _pushed_steps = validation_first_push_step[_pushed]
+    metrics["validation/first_push_step_count"] = float(_pushed_steps.numel())
     metrics["validation/first_push_step_mean"] = (
-        float(_pushed_steps.float().mean().item()) if _pushed_steps.numel() > 0 else float("nan")
+        float(_pushed_steps.float().mean().item()) if _pushed_steps.numel() > 0 else -1.0
     )
 
 

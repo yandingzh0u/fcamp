@@ -23,13 +23,19 @@ class MimicStepMixin:
             if self._render_step_index % self.render_every == 0:
                 self.sim.render()
 
+        phase_start_steps = self.phase_steps.clone()
+        next_phase_steps = phase_start_steps + 1
+        reference_phase_steps = torch.clamp(
+            next_phase_steps, max=self.motion.num_frames - 1
+        )
+        # Single time-state machine:
+        #   (s_t, tau_t) --a_t--> (s_{t+1}, tau_{t+1})
+        # Reward, terminal diagnostics and AMP alignment all use tau_{t+1}.
+        self.phase_steps = reference_phase_steps
         self.episode_steps += 1
 
-
-        self._motion_end_mask = self.phase_steps >= (self.motion.num_frames - 1)
-
-
-        termination_phase_steps = self.phase_steps.clone()
+        self._motion_end_mask = next_phase_steps >= (self.motion.num_frames - 1)
+        termination_phase_steps = reference_phase_steps.clone()
         reward, reward_terms = self.compute_reward(actions, previous_action)
         done, done_terms, debug_terms = self.compute_termination()
         terminal_observation = None
@@ -55,13 +61,13 @@ class MimicStepMixin:
             reset_env_ids = env_ids
             reset_phase_indices = reset_phases
 
-
-        self.phase_steps += 1
-
-
         motion_wrap_env_ids = torch.empty(0, dtype=torch.long, device=self.device)
         motion_wrap_phase_indices = torch.empty(0, dtype=torch.long, device=self.device)
         if not self.terminate_on_motion_end:
+            not_reset = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+            if reset_env_ids.numel() > 0:
+                not_reset[reset_env_ids] = False
+            self.phase_steps[not_reset] = next_phase_steps[not_reset]
             motion_wrap_env_ids, motion_wrap_phase_indices = self._resample_finished_motions()
 
 
@@ -76,7 +82,10 @@ class MimicStepMixin:
             "reward_terms": reward_terms,
             "done_terms": done_terms,
             "debug_terms": debug_terms,
+            "phase_start_steps": phase_start_steps,
+            "reference_phase_steps": reference_phase_steps,
             "termination_phase_steps": termination_phase_steps,
+            "amp_frame_phase_steps": reference_phase_steps,
             "amp_frame": amp_frame,
             "reset_env_ids": reset_env_ids,
             "reset_phase_indices": reset_phase_indices,

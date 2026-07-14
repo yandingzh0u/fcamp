@@ -1222,6 +1222,7 @@ class FCAMP(SFPO):
         print(
             f"[INFO] discriminator=standard_mlp hidden={list(self.cfg.amp.hidden_dims)} "
             f"BCE=True GP={self.cfg.amp.grad_penalty} replay={self.cfg.amp.replay_size} "
-            f"EMA=False independent_trunk=True motion_end_terminal=True",
+            f"EMA=False independent_trunk=True motion_end_terminal=True "
+            f"fcamp_schema=1",
             flush=True,
         )

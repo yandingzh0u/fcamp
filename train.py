@@ -90,6 +90,8 @@ def main() -> None:
     resolved["git_dirty"] = bool(git_status.strip())
     resolved["source_snapshot"] = snapshot_path.name
     resolved["source_snapshot_sha256"] = snapshot_sha256
+    config_identity = json.dumps(resolved, sort_keys=True, default=str).encode("utf-8")
+    resolved["resolved_config_sha256"] = hashlib.sha256(config_identity).hexdigest()
     with (run_dir / "resolved_config.json").open("w", encoding="utf-8") as handle:
         json.dump(resolved, handle, indent=2, sort_keys=True)
 
@@ -110,6 +112,8 @@ def main() -> None:
     print(f"[INFO] run_dir={run_dir}", flush=True)
     print(f"[INFO] log_file={log_file}", flush=True)
     print(f"[INFO] algorithm={cfg.algorithm}", flush=True)
+    print(f"[INFO] resolved_config_sha256={resolved['resolved_config_sha256']}", flush=True)
+    print(f"[INFO] source_snapshot_sha256={snapshot_sha256}", flush=True)
 
     trainer = CoreTrainer(simulation_app, cfg, make_algorithm(cfg.algorithm), run_dir / "checkpoints")
     try:

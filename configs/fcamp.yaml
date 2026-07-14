@@ -103,6 +103,6 @@ training:
   validation_max_steps: 500
   validation_start_phase: 0
   validation_directional_start_phase: -1
-  validation_fixed_seed: -1
+  validation_fixed_seed: 0
   validation_done_frac_early_stop: 0.98
   target_validation_steps: 0

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 from pathlib import Path
@@ -27,6 +28,7 @@ class MetricsLogger:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.log_dir / "metrics.jsonl"
+        self.validation_path = self.log_dir / "validation_summary.csv"
         self._handle = self.path.open("a", encoding="utf-8", buffering=1)
         self._tb = None
         try:
@@ -61,8 +63,38 @@ class MetricsLogger:
         if nonfinite:
             print(f"[METRICS_WARN] update={update_idx} nonfinite={nonfinite}", flush=True)
 
+    def write_validation_summary(self, update_idx: int, metrics: dict[str, Any]) -> None:
+        if "validation/steps_mean" not in metrics:
+            return
+        columns = [
+            "update",
+            "validation/fixed_seed",
+            "validation/protocol_version",
+            "validation/steps_mean",
+            "validation/steps_min",
+            "validation/steps_p50",
+            "validation/steps_p95",
+            "validation/steps_max",
+            "validation/return_mean",
+            "validation/done_frac",
+            "validation/motion_complete_frac",
+            "validation/ee_body_bad_frac",
+            "validation/push_applied_frac",
+            "validation/died_before_push_frac",
+            "validation/first_push_step_mean",
+        ]
+        write_header = not self.validation_path.exists() or self.validation_path.stat().st_size == 0
+        with self.validation_path.open("a", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns)
+            if write_header:
+                writer.writeheader()
+            row = {"update": int(update_idx)}
+            for key in columns[1:]:
+                value = _finite_float(metrics.get(key))
+                row[key] = "" if value is None else value
+            writer.writerow(row)
+
     def close(self) -> None:
         if self._tb is not None:
             self._tb.close()
         self._handle.close()
-
