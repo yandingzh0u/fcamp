@@ -67,7 +67,7 @@ parameters:
     current_buffer_size: 65536
     replay_size: 200000
     replay_samples: 1000
-    replay_dtype: float16
+    replay_dtype: float32
     replay_device: cpu
     grad_penalty: 10.0
     logit_reg: 0.01
@@ -81,8 +81,8 @@ parameters:
     amp_weight: 1.0
     # Current handcrafted task reward is already multiplied by dt.
     integrate_amp_reward_dt: true
-    advantage_normalization: per_channel_per_offset
-    ratio_mode: factorized
+    advantage_normalization: per_offset
+    ratio_mode: joint_path
 
   critics:
     encoder_hidden_dims: [512, 256, 128]
@@ -94,7 +94,7 @@ parameters:
 training:
   seed: 0
   max_updates: 500
-  log_every: 1
+  log_every: 10
   save_every: 50
   resume: ""
   reset_optimizer_on_resume: false

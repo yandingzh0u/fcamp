@@ -7,7 +7,7 @@ import torch
 
 
 CHANNELS = ("task", "amp")
-NormalizationMode = Literal["per_channel_per_offset", "global", "none"]
+NormalizationMode = Literal["per_offset", "global", "none"]
 
 
 @dataclass(frozen=True)
@@ -15,14 +15,17 @@ class DualChannelCredit:
     """Outputs of primitive-step, two-channel causal GAE.
 
     All channel tensors use shape ``[time, env, 2]`` in ``[task, amp]`` order.
-    ``actor_advantage`` has shape ``[time, env]`` and is zero at invalid steps.
+    ``mixed_advantage`` is the raw weighted task/AMP mixture. It is normalized
+    exactly once into ``actor_advantage`` so AMP scale/weight changes really
+    change actor credit.
     """
 
     td_errors: torch.Tensor
     advantages: torch.Tensor
     value_targets: torch.Tensor
-    normalized_advantages: torch.Tensor
+    mixed_advantage: torch.Tensor
     actor_advantage: torch.Tensor
+    actor_advantage_components: torch.Tensor
 
 
 def resolve_terminal_masks(
@@ -70,29 +73,42 @@ def _validate_inputs(
         raise ValueError("rewards, values and next_values must be on the same device")
 
 
-def _normalize_masked(
+def _mix_then_normalize_masked(
     advantages: torch.Tensor,
     valid_mask: torch.Tensor,
+    actor_weights: Sequence[float] | torch.Tensor,
     mode: NormalizationMode,
     chunk_horizon: int,
     epsilon: float,
-) -> torch.Tensor:
-    if mode == "none":
-        return advantages * valid_mask.unsqueeze(-1).to(advantages.dtype)
-    if mode not in ("global", "per_channel_per_offset"):
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    weights = torch.as_tensor(
+        actor_weights, device=advantages.device, dtype=advantages.dtype
+    )
+    if weights.numel() != len(CHANNELS):
         raise ValueError(
-            "normalization must be one of "
-            "{'per_channel_per_offset', 'global', 'none'}, "
-            f"got {mode!r}"
+            f"actor_weights must contain {len(CHANNELS)} values in [task, amp] order"
+        )
+    if mode not in ("global", "per_offset", "none"):
+        raise ValueError(
+            "normalization must be one of {'per_offset', 'global', 'none'}, "
+            f"got {mode!r}",
         )
     if chunk_horizon < 1:
         raise ValueError(f"chunk_horizon must be >= 1, got {chunk_horizon}")
     if epsilon <= 0.0:
         raise ValueError(f"epsilon must be positive, got {epsilon}")
 
-    normalized = torch.zeros_like(advantages)
+    valid_bool = valid_mask.unsqueeze(-1).bool()
+    safe_advantages = torch.where(valid_bool, advantages, torch.zeros_like(advantages))
+    weighted = safe_advantages * weights.reshape(1, 1, -1)
+    mixed = weighted.sum(dim=-1)
+    if mode == "none":
+        return mixed, mixed, weighted
+
+    normalized = torch.zeros_like(mixed)
+    components = torch.zeros_like(weighted)
     time_steps = advantages.shape[0]
-    groups = (range(chunk_horizon) if mode == "per_channel_per_offset" else (None,))
+    groups = range(chunk_horizon) if mode == "per_offset" else (None,)
     time_indices = torch.arange(time_steps, device=advantages.device)
 
     for offset in groups:
@@ -102,14 +118,14 @@ def _normalize_masked(
             group_mask = valid_mask & ((time_indices % chunk_horizon) == offset).unsqueeze(1)
         if not bool(group_mask.any()):
             continue
-        for channel_index in range(len(CHANNELS)):
-            selected = advantages[..., channel_index][group_mask]
-            mean = selected.mean()
-            variance = (selected - mean).square().mean()
-            normalized[..., channel_index][group_mask] = (
-                selected - mean
-            ) / torch.sqrt(variance + epsilon)
-    return normalized
+        selected = safe_advantages[group_mask]
+        channel_mean = selected.mean(dim=0)
+        centered_components = (selected - channel_mean) * weights.reshape(1, -1)
+        centered_mixed = centered_components.sum(dim=-1)
+        inv_std = torch.rsqrt(centered_mixed.square().mean() + epsilon)
+        components[group_mask] = centered_components * inv_std
+        normalized[group_mask] = centered_mixed * inv_std
+    return mixed, normalized, components
 
 
 def compute_dual_channel_gae(
@@ -123,7 +139,7 @@ def compute_dual_channel_gae(
     gamma: float,
     gae_lambda: float,
     chunk_horizon: int,
-    normalization: NormalizationMode = "per_channel_per_offset",
+    normalization: NormalizationMode = "per_offset",
     actor_weights: Sequence[float] | torch.Tensor = (1.0, 1.0),
     normalization_epsilon: float = 1e-8,
 ) -> DualChannelCredit:
@@ -170,28 +186,22 @@ def compute_dual_channel_gae(
     # Invalid padded frames must never become accidental critic targets if a
     # caller forgets to apply its minibatch mask a second time.
     value_targets = (values + advantages) * valid
-    normalized = _normalize_masked(
+    mixed_advantage, actor_advantage, actor_components = _mix_then_normalize_masked(
         advantages,
         valid_mask.to(torch.bool),
+        actor_weights,
         normalization,
         int(chunk_horizon),
         float(normalization_epsilon),
     )
 
-    weights = torch.as_tensor(actor_weights, device=rewards.device, dtype=dtype)
-    if weights.numel() != len(CHANNELS):
-        raise ValueError(
-            f"actor_weights must contain {len(CHANNELS)} values in [task, amp] order"
-        )
-    actor_advantage = (normalized * weights.reshape(1, 1, -1)).sum(dim=-1)
-    actor_advantage = actor_advantage * valid_mask.to(dtype)
-
     return DualChannelCredit(
         td_errors=td_errors,
         advantages=advantages,
         value_targets=value_targets,
-        normalized_advantages=normalized,
+        mixed_advantage=mixed_advantage,
         actor_advantage=actor_advantage,
+        actor_advantage_components=actor_components,
     )
 
 
@@ -200,7 +210,7 @@ def with_chunk_shared_actor_credit(
     valid_mask: torch.Tensor,
     *,
     chunk_horizon: int,
-    normalization: NormalizationMode = "per_channel_per_offset",
+    normalization: NormalizationMode = "per_offset",
     actor_weights: Sequence[float] | torch.Tensor = (1.0, 1.0),
     normalization_epsilon: float = 1e-8,
 ) -> DualChannelCredit:
@@ -234,36 +244,38 @@ def with_chunk_shared_actor_credit(
     chunk_norm_mode: NormalizationMode = (
         "none" if normalization == "none" else "global"
     )
-    normalized_chunks = _normalize_masked(
+    mixed_chunks, normalized_chunks, component_chunks = _mix_then_normalize_masked(
         chunk_advantages,
         chunk_valid,
+        actor_weights,
         chunk_norm_mode,
         chunk_horizon=1,
         epsilon=float(normalization_epsilon),
     )
-    shared_normalized = normalized_chunks[:, None].expand(
+    shared_mixed = mixed_chunks[:, None].expand(-1, chunk_horizon, -1).reshape(
+        time_steps, num_envs
+    )
+    actor_advantage = normalized_chunks[:, None].expand(
+        -1, chunk_horizon, -1
+    ).reshape(time_steps, num_envs)
+    shared_components = component_chunks[:, None].expand(
         -1, chunk_horizon, -1, -1
     ).reshape(time_steps, num_envs, len(CHANNELS))
-    shared_normalized = shared_normalized * valid_mask.unsqueeze(-1).to(
-        shared_normalized.dtype
+    shared_mixed = torch.where(valid_mask, shared_mixed, torch.zeros_like(shared_mixed))
+    actor_advantage = torch.where(
+        valid_mask, actor_advantage, torch.zeros_like(actor_advantage)
     )
-
-    weights = torch.as_tensor(
-        actor_weights,
-        device=credit.advantages.device,
-        dtype=credit.advantages.dtype,
+    shared_components = torch.where(
+        valid_mask.unsqueeze(-1),
+        shared_components,
+        torch.zeros_like(shared_components),
     )
-    if weights.numel() != len(CHANNELS):
-        raise ValueError(
-            f"actor_weights must contain {len(CHANNELS)} values in [task, amp] order"
-        )
-    actor_advantage = (shared_normalized * weights.reshape(1, 1, -1)).sum(dim=-1)
-    actor_advantage = actor_advantage * valid_mask.to(actor_advantage.dtype)
 
     return DualChannelCredit(
         td_errors=credit.td_errors,
         advantages=credit.advantages,
         value_targets=credit.value_targets,
-        normalized_advantages=shared_normalized,
+        mixed_advantage=shared_mixed,
         actor_advantage=actor_advantage,
+        actor_advantage_components=shared_components,
     )

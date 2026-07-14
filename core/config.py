@@ -356,18 +356,22 @@ def _validate(config: ExperimentConfig) -> None:
             raise ValueError("FC-AMP amp.current_buffer_size must be >= amp.batch_size")
         if amp.replay_size < amp.batch_size or amp.replay_samples < 0:
             raise ValueError("FC-AMP replay settings are invalid")
-        if amp.replay_dtype.lower() not in {"float16", "float32"}:
-            raise ValueError("FC-AMP replay_dtype must be float16 or float32")
+        if amp.replay_dtype.lower() != "float32":
+            raise ValueError("FC-AMP requires amp.replay_dtype=float32")
         if amp.replay_device.lower() not in {"cpu", "cuda"}:
             raise ValueError("FC-AMP replay_device must be cpu or cuda")
         if credit.mode not in {"causal_frame", "chunk_shared"}:
             raise ValueError("FC-AMP credit.mode must be causal_frame or chunk_shared")
         if credit.advantage_normalization not in {
-            "per_channel_per_offset", "per_channel_global", "none"
+            "per_offset",
+            "global",
+            "per_channel_per_offset",
+            "per_channel_global",
+            "none",
         }:
             raise ValueError("Unsupported FC-AMP advantage normalization")
-        if credit.ratio_mode not in {"factorized", "mean_log", "joint_path"}:
-            raise ValueError("FC-AMP ratio_mode must be factorized, mean_log, or joint_path")
+        if credit.ratio_mode != "joint_path":
+            raise ValueError("FC-AMP requires credit.ratio_mode=joint_path")
         if credit.task_weight < 0.0 or credit.amp_weight < 0.0:
             raise ValueError("FC-AMP reward weights must be non-negative")
         if credit.task_weight == 0.0 and credit.amp_weight == 0.0:

@@ -113,11 +113,9 @@ class FCAMP(SFPO):
             self.amp_frame_dim,
             device=env.device,
         )
-        replay_dtype = {
-            "float16": torch.float16,
-            "float32": torch.float32,
-        }[amp_cfg.replay_dtype.lower()]
-        # Replay is intentionally CPU-backed; 200k x 3728 FP16 is ~1.39 GiB.
+        replay_dtype = torch.float32
+        # Replay is intentionally CPU-backed and kept FP32 so current/replay/demo
+        # discriminator domains do not differ by storage precision.
         self.current_disc_buffer = AMPReplayBuffer(
             int(amp_cfg.current_buffer_size),
             self.amp_window_dim,
@@ -145,7 +143,6 @@ class FCAMP(SFPO):
         else:
             self.disc_optimizer = torch.optim.AdamW(disc_parameters, **optimizer_kwargs)
         self.disc_version = 0
-        self._reward_disc_version = -1
 
         # Everything needed for a training checkpoint is registered, while
         # deployment still calls deterministic_actions() on the actor only.
@@ -254,13 +251,14 @@ class FCAMP(SFPO):
         )
         return all_logits, rewards
 
-    def _reset_amp_history(self, phase_indices: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
-        history = self.env.get_amp_demo_history(
-            phase_indices,
-            self.amp_history_steps,
-            flatten=False,
-        )
-        self.amp_history.reset(history, env_ids=env_ids)
+    def _reset_amp_history(
+        self,
+        phase_indices: torch.Tensor | None = None,
+        env_ids: torch.Tensor | None = None,
+    ) -> None:
+        del phase_indices
+        initial_frame = self.env.get_amp_policy_frame(env_ids)
+        self.amp_history.reset(initial_frame, env_ids=env_ids)
 
     def initial_reset(self) -> torch.Tensor:
         obs = super().initial_reset()
@@ -284,10 +282,9 @@ class FCAMP(SFPO):
         flow_steps = int(self.cfg.flow_steps)
         total_primitive_steps = chunks * h
 
-        # Freeze the reward model and all rollout-time normalizer snapshots.
+        # Rollout only stores legal policy windows. AMP rewards are recomputed
+        # after this same batch has updated the discriminator.
         self.discriminator.eval()
-        self.disc_normalizer.freeze()
-        self._reward_disc_version = int(self.disc_version)
         self.current_disc_buffer.clear()
 
         actor_obs_buf = torch.zeros(chunks, n_envs, self.actor_obs_dim, device=device)
@@ -310,6 +307,12 @@ class FCAMP(SFPO):
         mixed_reward_buf = torch.zeros_like(task_reward_buf)
         amp_logit_buf = torch.zeros_like(task_reward_buf)
         valid_buf = torch.zeros(chunks, n_envs, h, dtype=torch.bool, device=device)
+        amp_valid_buf = torch.zeros_like(valid_buf)
+        amp_age_buf = torch.full(
+            (chunks, n_envs, h), -1, dtype=torch.long, device=device
+        )
+        amp_window_chunks: list[torch.Tensor] = []
+        amp_window_index_chunks: list[torch.Tensor] = []
         done_buf = torch.zeros_like(valid_buf)
         failure_buf = torch.zeros_like(valid_buf)
         timeout_buf = torch.zeros_like(valid_buf)
@@ -369,30 +372,43 @@ class FCAMP(SFPO):
                     next_obs, task_reward, done, info = env.step(action_t, auto_reset=False)
                     next_critic_obs = env.get_critic_observation()
 
-                    # Standard AMP uses the post-action state window. History is
-                    # continuous across chunks and overwritten only on reset.
+                    # Standard AMP uses post-action windows. Reset contributes
+                    # one real frame at age=0; legal D windows start at ages
+                    # 1..W, so early post-reset frames are sample-masked.
                     amp_frame = info.get("amp_frame")
                     if amp_frame is None:
                         amp_frame = env.get_amp_policy_frame()
                     self.amp_history.push(amp_frame)
-                    # Standard MimicKit G1 AMP keeps global rotations and
-                    # velocities but re-anchors root x/y to the latest frame.
-                    raw_windows = self.amp_history.flatten(canonicalize_root=True)
-                    window_view = raw_windows.view(
-                        n_envs, self.amp_history_steps, self.amp_frame_dim
-                    )
-                    window_latest_root_xy_abs_max = torch.maximum(
-                        window_latest_root_xy_abs_max,
-                        window_view[:, -1, :2].abs().max(),
-                    )
-                    window_root_xy_abs_sum += window_view[..., :2].abs().sum()
-                    window_root_xy_count += window_view.shape[0] * window_view.shape[1] * 2
-                    amp_logits, amp_reward_raw = self._evaluate_amp_reward(raw_windows)
                     active_float = alive_before.to(dtype=task_reward.dtype)
+                    ready_mask = self.amp_history.ready & alive_before
+                    raw_windows = None
+                    if bool(ready_mask.any()):
+                        ready_ids = ready_mask.nonzero(as_tuple=False).squeeze(-1)
+                        raw_windows = self.amp_history.flatten(
+                            ready_ids, canonicalize_root=True
+                        )
+                        amp_valid_buf[chunk_idx, ready_ids, frame_idx] = True
+                        flat_indices = (
+                            (chunk_idx * n_envs + ready_ids) * h + frame_idx
+                        ).detach().to(device="cpu", dtype=torch.long)
+                        amp_window_chunks.append(raw_windows.detach().to("cpu", dtype=torch.float32))
+                        amp_window_index_chunks.append(flat_indices)
+                        amp_age_buf[chunk_idx, ready_ids, frame_idx] = self.amp_history.ages[
+                            ready_ids
+                        ]
+                        window_view = raw_windows.view(
+                            ready_ids.numel(), self.amp_history_steps, self.amp_frame_dim
+                        )
+                        window_latest_root_xy_abs_max = torch.maximum(
+                            window_latest_root_xy_abs_max,
+                            window_view[:, -1, :2].abs().max(),
+                        )
+                        window_root_xy_abs_sum += window_view[..., :2].abs().sum()
+                        window_root_xy_count += window_view.shape[0] * window_view.shape[1] * 2
+                    amp_reward_raw = torch.zeros_like(task_reward)
+                    amp_logits = torch.zeros_like(task_reward)
                     amp_reward_credit = amp_reward_raw * amp_dt_scale
-                    mixed_reward = (
-                        task_weight * task_reward + amp_weight * amp_reward_credit
-                    ) * active_float
+                    mixed_reward = task_weight * task_reward * active_float
 
                     task_reward_buf[chunk_idx, :, frame_idx] = task_reward * active_float
                     amp_reward_raw_buf[chunk_idx, :, frame_idx] = amp_reward_raw * active_float
@@ -464,13 +480,15 @@ class FCAMP(SFPO):
                         next_context_raw, update=False
                     )
 
-                    valid_ids = alive_before.nonzero(as_tuple=False).squeeze(-1)
+                    valid_ids = ready_mask.nonzero(as_tuple=False).squeeze(-1)
                     if valid_ids.numel() > 0:
                         keep = min(current_keep_per_step, int(valid_ids.numel()))
-                        select = valid_ids[
+                        select_ids = valid_ids[
                             torch.randperm(valid_ids.numel(), device=device)[:keep]
                         ]
-                        selected_windows = raw_windows.index_select(0, select)
+                        selected_windows = self.amp_history.flatten(
+                            select_ids, canonicalize_root=True
+                        )
                         self.current_disc_buffer.push(
                             selected_windows,
                             step=chunk_idx * h + frame_idx,
@@ -497,7 +515,7 @@ class FCAMP(SFPO):
                     reset_obs = env.reset_envs(reset_ids, phase_indices=reset_phases)
                     obs[reset_ids] = reset_obs
                     critic_obs = env.get_critic_observation()
-                    self._reset_amp_history(reset_phases, env_ids=reset_ids)
+                    self._reset_amp_history(env_ids=reset_ids)
 
             values = self._evaluate_prefix_values(context_buf)
             next_values = self._evaluate_prefix_values(next_context_buf)
@@ -508,52 +526,15 @@ class FCAMP(SFPO):
                 order = [0, 2, 1] + dims[3:]
                 return value.permute(*order).reshape(chunks * h, n_envs, *value.shape[3:])
 
-            rewards_time = torch.stack(
-                [chronological(task_reward_buf), chronological(amp_reward_credit_buf)],
-                dim=-1,
-            )
-            credit_normalization = (
-                "global"
-                if self.cfg.credit.advantage_normalization == "per_channel_global"
-                else self.cfg.credit.advantage_normalization
-            )
-            credit = compute_dual_channel_gae(
-                rewards_time,
-                chronological(values),
-                chronological(next_values),
-                chronological(bootstrap_buf),
-                chronological(trace_buf),
-                chronological(valid_buf),
-                gamma=float(self.cfg.discount_gamma),
-                gae_lambda=float(self.cfg.gae_lambda),
-                chunk_horizon=h,
-                normalization=credit_normalization,
-                actor_weights=(task_weight, amp_weight),
-            )
-            if self.cfg.credit.mode == "chunk_shared":
-                credit = with_chunk_shared_actor_credit(
-                    credit,
-                    chronological(valid_buf),
-                    chunk_horizon=h,
-                    normalization=credit_normalization,
-                    actor_weights=(task_weight, amp_weight),
-                )
-
             def chunk_layout(value: torch.Tensor) -> torch.Tensor:
                 tail = value.shape[2:]
                 return value.reshape(chunks, h, n_envs, *tail).permute(
                     0, 2, 1, *range(3, 3 + len(tail))
                 )
 
-            advantages = chunk_layout(credit.actor_advantage)
-            channel_advantages = chunk_layout(credit.advantages)
-            normalized_channel_advantages = chunk_layout(credit.normalized_advantages)
-            value_targets = chunk_layout(credit.value_targets)
-            td_errors = chunk_layout(credit.td_errors)
-
         self._obs = obs
         self._critic_obs = critic_obs
-        return {
+        rollout = {
             "actor_obs": actor_obs_buf,
             "actor_obs_raw": actor_obs_raw_buf,
             "actions": actions_buf,
@@ -565,12 +546,19 @@ class FCAMP(SFPO):
             "next_contexts_raw": next_context_raw_buf,
             "values": values,
             "next_values": next_values,
-            "value_targets": value_targets,
-            "td_errors": td_errors,
-            "advantages": advantages,
-            "channel_advantages": channel_advantages,
-            "normalized_channel_advantages": normalized_channel_advantages,
             "valid": valid_buf,
+            "amp_valid": amp_valid_buf,
+            "amp_windows": (
+                torch.cat(amp_window_chunks, dim=0)
+                if amp_window_chunks
+                else torch.empty((0, self.amp_window_dim), dtype=torch.float32)
+            ),
+            "amp_window_indices": (
+                torch.cat(amp_window_index_chunks, dim=0)
+                if amp_window_index_chunks
+                else torch.empty((0,), dtype=torch.long)
+            ),
+            "amp_window_age": amp_age_buf,
             "done": done_buf,
             "failure": failure_buf,
             "timeout": timeout_buf,
@@ -594,6 +582,109 @@ class FCAMP(SFPO):
             "next_observation": obs,
             "train_step_indices": self._train_step_indices(device),
         }
+        self._assign_credit(rollout)
+        return rollout
+
+    @torch.no_grad()
+    def _assign_credit(self, rollout: dict) -> None:
+        chunks, n_envs, h = rollout["valid"].shape
+
+        def chronological(value: torch.Tensor) -> torch.Tensor:
+            dims = list(range(value.ndim))
+            order = [0, 2, 1] + dims[3:]
+            return value.permute(*order).reshape(chunks * h, n_envs, *value.shape[3:])
+
+        def chunk_layout(value: torch.Tensor) -> torch.Tensor:
+            tail = value.shape[2:]
+            return value.reshape(chunks, h, n_envs, *tail).permute(
+                0, 2, 1, *range(3, 3 + len(tail))
+            )
+
+        norm_name = str(self.cfg.credit.advantage_normalization)
+        norm_map = {
+            "per_channel_per_offset": "per_offset",
+            "per_channel_global": "global",
+            "per_offset": "per_offset",
+            "global": "global",
+            "none": "none",
+        }
+        credit_normalization = norm_map[norm_name]
+        task_weight = float(self.cfg.credit.task_weight)
+        amp_weight = float(self.cfg.credit.amp_weight)
+        rewards_time = torch.stack(
+            [
+                chronological(rollout["task_reward"]),
+                chronological(rollout["amp_reward_credit"]),
+            ],
+            dim=-1,
+        )
+        credit = compute_dual_channel_gae(
+            rewards_time,
+            chronological(rollout["values"]),
+            chronological(rollout["next_values"]),
+            chronological(rollout["bootstrap_mask"]),
+            chronological(rollout["trace_mask"]),
+            chronological(rollout["valid"]),
+            gamma=float(self.cfg.discount_gamma),
+            gae_lambda=float(self.cfg.gae_lambda),
+            chunk_horizon=h,
+            normalization=credit_normalization,
+            actor_weights=(task_weight, amp_weight),
+        )
+        if self.cfg.credit.mode == "chunk_shared":
+            credit = with_chunk_shared_actor_credit(
+                credit,
+                chronological(rollout["valid"]),
+                chunk_horizon=h,
+                normalization=credit_normalization,
+                actor_weights=(task_weight, amp_weight),
+            )
+        rollout["advantages"] = chunk_layout(credit.actor_advantage)
+        rollout["channel_advantages"] = chunk_layout(credit.advantages)
+        rollout["normalized_channel_advantages"] = chunk_layout(
+            credit.actor_advantage_components
+        )
+        rollout["mixed_advantage"] = chunk_layout(credit.mixed_advantage)
+        rollout["value_targets"] = chunk_layout(credit.value_targets)
+        rollout["td_errors"] = chunk_layout(credit.td_errors)
+
+    @torch.no_grad()
+    def _recompute_amp_rewards(self, rollout: dict) -> dict[str, float]:
+        valid = rollout["amp_valid"]
+        rollout["amp_logits"].zero_()
+        rollout["amp_reward_raw"].zero_()
+        rollout["amp_reward_credit"].zero_()
+        windows_cpu = rollout["amp_windows"]
+        indices_cpu = rollout["amp_window_indices"]
+        if windows_cpu.shape[0] != indices_cpu.shape[0]:
+            raise RuntimeError("AMP rollout windows and indices are misaligned")
+        if windows_cpu.shape[0] > 0:
+            flat_logits = rollout["amp_logits"].reshape(-1)
+            flat_raw = rollout["amp_reward_raw"].reshape(-1)
+            flat_credit = rollout["amp_reward_credit"].reshape(-1)
+            amp_dt_scale = float(self.env.dt) if self.cfg.credit.integrate_amp_reward_dt else 1.0
+            batch_size = max(1, int(self.cfg.amp.reward_eval_batch_size))
+            for start in range(0, windows_cpu.shape[0], batch_size):
+                end = min(start + batch_size, windows_cpu.shape[0])
+                raw = windows_cpu[start:end].to(device=self.env.device, non_blocking=False)
+                logits, rewards = self._evaluate_amp_reward(raw)
+                idx = indices_cpu[start:end].to(device=self.env.device, non_blocking=False)
+                flat_logits.index_copy_(0, idx, logits.to(flat_logits.dtype))
+                flat_raw.index_copy_(0, idx, rewards.to(flat_raw.dtype))
+                flat_credit.index_copy_(0, idx, (rewards * amp_dt_scale).to(flat_credit.dtype))
+        active = rollout["valid"].to(dtype=rollout["task_reward"].dtype)
+        rollout["mixed_reward"] = (
+            float(self.cfg.credit.task_weight) * rollout["task_reward"]
+            + float(self.cfg.credit.amp_weight) * rollout["amp_reward_credit"]
+        ) * active
+        self._assign_credit(rollout)
+        return {
+            "amp/valid_window_fraction": float(valid.float().mean().item()),
+            "amp/valid_window_count": float(valid.sum().item()),
+            "amp/age0_in_reward_count": float(
+                ((rollout["amp_window_age"] == 0) & valid).sum().item()
+            ),
+        }
 
     # ------------------------------------------------------------------ #
     # Optimizers
@@ -615,14 +706,18 @@ class FCAMP(SFPO):
         micro_batch_size = self._policy_micro_batch_size(mini_batch_size)
         clip_low = 1.0 - float(self.cfg.clip_range)
         clip_high = 1.0 + float(self.cfg.clip_range)
-        ratio_mode = self.cfg.credit.ratio_mode
+        if self.cfg.credit.ratio_mode != "joint_path":
+            raise ValueError("FCAMP only supports credit.ratio_mode=joint_path")
 
         totals = {
             "policy_loss": 0.0,
             "kl": 0.0,
+            "per_factor_kl": 0.0,
+            "full_chunk_path_kl": 0.0,
             "ratio": 0.0,
             "clip": 0.0,
             "grad_norm": 0.0,
+            "joint_log_ratio_abs_max": 0.0,
         }
         frame_kl = torch.zeros(h, device=device)
         frame_ratio = torch.zeros(h, device=device)
@@ -651,21 +746,11 @@ class FCAMP(SFPO):
                     delta = new_log_probs - old_log_probs[sub]
                     adv = advantages[sub]
                     mask = valid[sub].to(dtype=delta.dtype)
-                    if ratio_mode == "factorized":
-                        log_ratio = delta
-                        ratio = torch.exp(log_ratio)
-                        objective_adv = adv.unsqueeze(1).expand_as(ratio)
-                        objective_mask = mask.unsqueeze(1).expand_as(ratio)
-                    elif ratio_mode == "mean_log":
-                        log_ratio = delta.mean(dim=1)
-                        ratio = torch.exp(log_ratio)
-                        objective_adv = adv
-                        objective_mask = mask
-                    else:  # joint_path over flow factors for each causal frame
-                        log_ratio = delta.sum(dim=1)
-                        ratio = torch.exp(log_ratio)
-                        objective_adv = adv
-                        objective_mask = mask
+                    frame_joint_log_ratio = delta.sum(dim=1)
+                    log_ratio = frame_joint_log_ratio
+                    ratio = torch.exp(log_ratio)
+                    objective_adv = adv
+                    objective_mask = mask
                     mask_sum = objective_mask.sum().clamp(min=1.0)
                     unclipped = -objective_adv * ratio
                     clipped = -objective_adv * torch.clamp(ratio, clip_low, clip_high)
@@ -677,27 +762,44 @@ class FCAMP(SFPO):
                     with torch.no_grad():
                         kl = 0.5 * log_ratio.square()
                         kl_mean = float((kl * objective_mask).sum().item() / mask_sum.item())
+                        factor_mask = mask.unsqueeze(1).expand_as(delta)
+                        factor_sum = factor_mask.sum().clamp(min=1.0)
+                        per_factor_kl = float(
+                            (0.5 * delta.square() * factor_mask).sum().item()
+                            / factor_sum.item()
+                        )
+                        full_chunk_log_ratio = (frame_joint_log_ratio * mask).sum(dim=1)
+                        chunk_active = (mask.sum(dim=1) > 0).to(delta.dtype)
+                        chunk_count = chunk_active.sum().clamp(min=1.0)
+                        full_chunk_kl = float(
+                            (0.5 * full_chunk_log_ratio.square() * chunk_active).sum().item()
+                            / chunk_count.item()
+                        )
                         clipped_flag = ((ratio < clip_low) | (ratio > clip_high)).to(ratio.dtype)
                         totals["policy_loss"] += float(policy_loss.item()) * weight
                         totals["kl"] += kl_mean * weight
+                        totals["per_factor_kl"] += per_factor_kl * weight
+                        totals["full_chunk_path_kl"] += full_chunk_kl * weight
                         totals["ratio"] += float(
                             (ratio * objective_mask).sum().item() / mask_sum.item()
                         ) * weight
                         totals["clip"] += float(
                             (clipped_flag * objective_mask).sum().item() / mask_sum.item()
                         ) * weight
-                        frame_delta = delta.mean(dim=1)
-                        frame_kl += (0.5 * frame_delta.square() * mask).sum(dim=0)
-                        frame_ratio += (torch.exp(frame_delta) * mask).sum(dim=0)
+                        totals["joint_log_ratio_abs_max"] = max(
+                            totals["joint_log_ratio_abs_max"],
+                            float(frame_joint_log_ratio.abs().max().item()),
+                        )
+                        frame_kl += (0.5 * frame_joint_log_ratio.square() * mask).sum(dim=0)
+                        frame_ratio += (torch.exp(frame_joint_log_ratio) * mask).sum(dim=0)
                         frame_clip += (
-                            ((torch.exp(frame_delta) < clip_low) | (torch.exp(frame_delta) > clip_high))
+                            ((torch.exp(frame_joint_log_ratio) < clip_low) | (torch.exp(frame_joint_log_ratio) > clip_high))
                             .to(mask.dtype)
                             * mask
                         ).sum(dim=0)
                         frame_count += mask.sum(dim=0)
                     mb_kl += kl_mean * weight
                     mb_weight_total += weight
-                self._update_adaptive_learning_rates(mb_kl / max(mb_weight_total, 1e-8))
                 grad_norm = nn.utils.clip_grad_norm_(
                     self._policy.parameters(), float(self.cfg.max_grad_norm)
                 )
@@ -720,15 +822,16 @@ class FCAMP(SFPO):
         metrics = {
             "fcamp/policy_loss": totals["policy_loss"] / denom,
             "fcamp/kl": totals["kl"] / denom,
+            "fcamp/per_factor_kl": totals["per_factor_kl"] / denom,
+            "fcamp/full_chunk_path_kl": totals["full_chunk_path_kl"] / denom,
             "fcamp/ratio": totals["ratio"] / denom,
             "fcamp/clip_fraction": totals["clip"] / denom,
             "fcamp/actor_grad_norm": totals["grad_norm"] / denom,
             "fcamp/actor_lr": float(self.learning_rate),
             "fcamp/actor_optimizer_steps": float(steps),
             "fcamp/actor_early_stop_epoch": float(early_stop_epoch),
-            "fcamp/ratio_mode": float(
-                {"factorized": 0, "mean_log": 1, "joint_path": 2}[ratio_mode]
-            ),
+            "fcamp/joint_log_ratio_abs_max": totals["joint_log_ratio_abs_max"],
+            "fcamp/ratio_mode": 2.0,
         }
         for frame_idx in range(h):
             metrics[f"fcamp/frame_{frame_idx}_kl"] = float(
@@ -819,8 +922,12 @@ class FCAMP(SFPO):
         *,
         expert_normalizer_samples: int,
     ) -> dict[str, float]:
-        if self.disc_version != self._reward_disc_version:
-            raise RuntimeError("Discriminator changed before PPO/critic updates completed")
+        if len(self.current_disc_buffer) == 0:
+            return {
+                "disc/update_steps": 0.0,
+                "disc/version": float(self.disc_version),
+                "disc/skipped_no_current": 1.0,
+            }
         self._store_current_in_replay(update_idx)
         batch_size = int(self.cfg.amp.batch_size)
         possible_steps = math.ceil(len(self.current_disc_buffer) / batch_size) * int(
@@ -828,6 +935,9 @@ class FCAMP(SFPO):
         )
         update_steps = min(possible_steps, int(self.cfg.amp.max_updates_per_iteration))
         self._record_expert_normalizer_samples(expert_normalizer_samples)
+        self.disc_normalizer.unfreeze()
+        committed = self.disc_normalizer.commit()
+        self.disc_normalizer.freeze()
         totals: dict[str, float] = {}
         grad_total = 0.0
         canonical_root_xy_max = {"current": 0.0, "replay": 0.0, "expert": 0.0}
@@ -883,6 +993,7 @@ class FCAMP(SFPO):
                 "disc/lr": float(self.cfg.amp.learning_rate),
                 "disc/update_steps": float(update_steps),
                 "disc/version": float(self.disc_version),
+                "disc_norm/committed_this_update": float(committed),
                 "disc_norm/policy_samples_update": float(expert_normalizer_samples),
                 "disc_norm/expert_samples_update": float(expert_normalizer_samples),
                 "disc_window/current_latest_root_xy_abs_max": canonical_root_xy_max["current"],
@@ -905,12 +1016,6 @@ class FCAMP(SFPO):
 
     def update(self, rollout: dict, collect_time: float) -> dict:
         update_start = time.perf_counter()
-        actor_start = time.perf_counter()
-        actor_metrics = self._actor_update(rollout)
-        actor_time = time.perf_counter() - actor_start
-        critic_start = time.perf_counter()
-        critic_metrics = self._critic_update(rollout)
-        critic_time = time.perf_counter() - critic_start
         disc_start = time.perf_counter()
         # Global primitive steps are used as the replay age clock.
         update_idx = int(getattr(self, "_fcamp_update_idx", 1))
@@ -919,9 +1024,17 @@ class FCAMP(SFPO):
             expert_normalizer_samples=int(rollout["disc_norm_policy_samples"]),
         )
         disc_time = time.perf_counter() - disc_start
+        reward_metrics = self._recompute_amp_rewards(rollout)
 
-        # Commit normalizer statistics only after every model used the frozen
-        # rollout snapshot. New statistics take effect on the next iteration.
+        actor_start = time.perf_counter()
+        actor_metrics = self._actor_update(rollout)
+        actor_time = time.perf_counter() - actor_start
+        critic_start = time.perf_counter()
+        critic_metrics = self._critic_update(rollout)
+        critic_time = time.perf_counter() - critic_start
+
+        # Commit actor/prefix normalizers only after every optimizer has used
+        # the rollout snapshot.
         if self.empirical_normalization:
             with torch.no_grad():
                 self.actor_obs_normalizer(
@@ -929,25 +1042,26 @@ class FCAMP(SFPO):
                     update=True,
                 )
                 context_valid = rollout["valid"].reshape(-1)
-                raw_contexts = torch.cat(
-                    [
-                        rollout["contexts_raw"].reshape(-1, self.prefix_context_dim)[context_valid],
-                        rollout["next_contexts_raw"].reshape(-1, self.prefix_context_dim)[context_valid],
-                    ],
-                    dim=0,
+                self.prefix_context_normalizer(
+                    rollout["contexts_raw"].reshape(-1, self.prefix_context_dim)[context_valid],
+                    update=True,
                 )
-                self.prefix_context_normalizer(raw_contexts, update=True)
+                self.prefix_context_normalizer(
+                    rollout["next_contexts_raw"].reshape(-1, self.prefix_context_dim)[context_valid],
+                    update=True,
+                )
         self.disc_normalizer.unfreeze()
-        self.disc_normalizer.commit()
 
         valid = rollout["valid"]
+        amp_valid = rollout["amp_valid"]
         metrics: dict[str, float] = {}
         metrics.update(actor_metrics)
         metrics.update(critic_metrics)
         metrics.update(disc_metrics)
+        metrics.update(reward_metrics)
         metrics.update(_masked_stats("reward/task", rollout["task_reward"], valid))
-        metrics.update(_masked_stats("reward/amp_raw", rollout["amp_reward_raw"], valid))
-        metrics.update(_masked_stats("reward/amp_credit", rollout["amp_reward_credit"], valid))
+        metrics.update(_masked_stats("reward/amp_raw", rollout["amp_reward_raw"], amp_valid))
+        metrics.update(_masked_stats("reward/amp_credit", rollout["amp_reward_credit"], amp_valid))
         metrics.update(_masked_stats("reward/mixed", rollout["mixed_reward"], valid))
         metrics.update(_masked_stats("credit/task_adv", rollout["channel_advantages"][..., 0], valid))
         metrics.update(_masked_stats("credit/amp_adv", rollout["channel_advantages"][..., 1], valid))
@@ -958,8 +1072,8 @@ class FCAMP(SFPO):
         metrics.update(_masked_stats("critic/amp_target", rollout["value_targets"][..., 1], valid))
         metrics.update(
             amp_reward_statistics(
-                rollout["amp_logits"][valid],
-                rollout["amp_reward_raw"][valid],
+                rollout["amp_logits"][amp_valid],
+                rollout["amp_reward_raw"][amp_valid],
                 scale=float(self.cfg.amp.reward_scale),
                 minimum_one_minus_prob=float(self.cfg.amp.reward_epsilon),
                 prefix="amp_reward",
