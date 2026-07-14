@@ -21,8 +21,9 @@ from algorithms.causal_credit import (
 )
 from algorithms.sfpo import SFPO
 from amp import (
-    AMPReplayBuffer,
+    AMPFrameTrajectoryReplay,
     AMPRunningNormalizer,
+    AMPWindowPipeline,
     CausalAMPHistory,
     amp_reward_from_logits,
     amp_reward_statistics,
@@ -99,6 +100,10 @@ class FCAMP(SFPO):
         self.amp_history_steps = int(amp_cfg.obs_steps)
         self.amp_frame_dim = int(env.amp_frame_dim)
         self.amp_window_dim = self.amp_history_steps * self.amp_frame_dim
+        self.amp_pipeline = AMPWindowPipeline(
+            self.amp_history_steps,
+            self.amp_frame_dim,
+        )
         self.discriminator = AMPDiscriminator(
             self.amp_window_dim, tuple(amp_cfg.hidden_dims)
         ).to(env.device)
@@ -113,18 +118,13 @@ class FCAMP(SFPO):
             self.amp_frame_dim,
             device=env.device,
         )
-        replay_dtype = torch.float32
-        # Replay is intentionally CPU-backed and kept FP32 so current/replay/demo
-        # discriminator domains do not differ by storage precision.
-        self.current_disc_buffer = AMPReplayBuffer(
-            int(amp_cfg.current_buffer_size),
-            self.amp_window_dim,
-            storage_dtype=replay_dtype,
-        )
-        self.disc_replay = AMPReplayBuffer(
+        # Replay is CPU-backed FP32 frame replay: every post-action frame is
+        # stored once, and discriminator windows are reconstructed only through
+        # continuous predecessor chains.
+        self.disc_frame_replay = AMPFrameTrajectoryReplay(
             int(amp_cfg.replay_size),
-            self.amp_window_dim,
-            storage_dtype=replay_dtype,
+            self.amp_frame_dim,
+            num_envs=env.num_envs,
         )
         disc_parameters = [p for p in self.discriminator.parameters() if p.requires_grad]
         optimizer_name = amp_cfg.optimizer.lower()
@@ -166,8 +166,8 @@ class FCAMP(SFPO):
             {
                 "disc_optimizer": self.disc_optimizer.state_dict(),
                 "disc_version": int(self.disc_version),
-                "disc_replay": self.disc_replay.state_dict(),
-                "fcamp_schema_version": 1,
+                "disc_frame_replay": self.disc_frame_replay.state_dict(),
+                "fcamp_schema_version": 2,
                 "amp_history_steps": self.amp_history_steps,
                 "amp_frame_dim": self.amp_frame_dim,
                 "prefix_context_dim": self.prefix_context_dim,
@@ -182,8 +182,8 @@ class FCAMP(SFPO):
         if not reset_optimizer and "disc_optimizer" in payload:
             self.disc_optimizer.load_state_dict(payload["disc_optimizer"])
         self.disc_version = int(payload.get("disc_version", self.disc_version))
-        if not self.disc_replay.load_state_dict(payload.get("disc_replay")):
-            print("[FCAMP] discriminator replay absent/incompatible; starting empty", flush=True)
+        if not self.disc_frame_replay.load_state_dict(payload.get("disc_frame_replay")):
+            print("[FCAMP] discriminator frame replay absent/incompatible; starting empty", flush=True)
 
     # ------------------------------------------------------------------ #
     # Causal prefix contexts and AMP reward
@@ -285,7 +285,6 @@ class FCAMP(SFPO):
         # Rollout only stores legal policy windows. AMP rewards are recomputed
         # after this same batch has updated the discriminator.
         self.discriminator.eval()
-        self.current_disc_buffer.clear()
 
         actor_obs_buf = torch.zeros(chunks, n_envs, self.actor_obs_dim, device=device)
         actor_obs_raw_buf = torch.zeros_like(actor_obs_buf)
@@ -313,6 +312,8 @@ class FCAMP(SFPO):
         )
         amp_window_chunks: list[torch.Tensor] = []
         amp_window_index_chunks: list[torch.Tensor] = []
+        current_disc_window_chunks: list[torch.Tensor] = []
+        current_disc_end_time_chunks: list[torch.Tensor] = []
         done_buf = torch.zeros_like(valid_buf)
         failure_buf = torch.zeros_like(valid_buf)
         timeout_buf = torch.zeros_like(valid_buf)
@@ -379,14 +380,24 @@ class FCAMP(SFPO):
                     if amp_frame is None:
                         amp_frame = env.get_amp_policy_frame()
                     self.amp_history.push(amp_frame)
+                    alive_ids = alive_before.nonzero(as_tuple=False).squeeze(-1)
+                    if alive_ids.numel() > 0:
+                        self.disc_frame_replay.push_frames(
+                            amp_frame.index_select(0, alive_ids),
+                            env_ids=alive_ids,
+                            episode_ids=env.episode_ids.index_select(0, alive_ids),
+                            reference_times=info["amp_frame_phase_steps"].index_select(
+                                0, alive_ids
+                            ),
+                            ages=self.amp_history.ages.index_select(0, alive_ids),
+                            update=int(getattr(self, "_fcamp_update_idx", 0)),
+                        )
                     active_float = alive_before.to(dtype=task_reward.dtype)
                     ready_mask = self.amp_history.ready & alive_before
-                    raw_windows = None
                     if bool(ready_mask.any()):
                         ready_ids = ready_mask.nonzero(as_tuple=False).squeeze(-1)
-                        raw_windows = self.amp_history.flatten(
-                            ready_ids, canonicalize_root=True
-                        )
+                        raw_window_frames = self.amp_history.window(ready_ids)
+                        raw_windows = self.amp_pipeline.flatten(raw_window_frames)
                         amp_valid_buf[chunk_idx, ready_ids, frame_idx] = True
                         flat_indices = (
                             (chunk_idx * n_envs + ready_ids) * h + frame_idx
@@ -486,14 +497,18 @@ class FCAMP(SFPO):
                         select_ids = valid_ids[
                             torch.randperm(valid_ids.numel(), device=device)[:keep]
                         ]
-                        selected_windows = self.amp_history.flatten(
-                            select_ids, canonicalize_root=True
+                        selected_windows = self.amp_pipeline.flatten(
+                            self.amp_history.window(select_ids)
                         )
-                        self.current_disc_buffer.push(
-                            selected_windows,
-                            step=chunk_idx * h + frame_idx,
+                        current_disc_window_chunks.append(
+                            selected_windows.detach().to("cpu", dtype=torch.float32)
                         )
-                        self.disc_normalizer.record(selected_windows)
+                        current_disc_end_time_chunks.append(
+                            info["amp_frame_phase_steps"]
+                            .index_select(0, select_ids)
+                            .detach()
+                            .to("cpu", dtype=torch.long)
+                        )
                         disc_norm_policy_samples += int(selected_windows.shape[0])
 
                     self._record_train_episode_stats(
@@ -556,6 +571,16 @@ class FCAMP(SFPO):
             "amp_window_indices": (
                 torch.cat(amp_window_index_chunks, dim=0)
                 if amp_window_index_chunks
+                else torch.empty((0,), dtype=torch.long)
+            ),
+            "current_disc_windows": (
+                torch.cat(current_disc_window_chunks, dim=0)
+                if current_disc_window_chunks
+                else torch.empty((0, self.amp_window_dim), dtype=torch.float32)
+            ),
+            "current_disc_end_times": (
+                torch.cat(current_disc_end_time_chunks, dim=0)
+                if current_disc_end_time_chunks
                 else torch.empty((0,), dtype=torch.long)
             ),
             "amp_window_age": amp_age_buf,
@@ -893,64 +918,120 @@ class FCAMP(SFPO):
             "critic/optimizer_steps": float(steps),
         }
 
-    def _store_current_in_replay(self, update_idx: int) -> None:
-        if len(self.current_disc_buffer) == 0:
-            return
-        if self.disc_replay.is_full:
-            count = min(int(self.cfg.amp.replay_samples), len(self.current_disc_buffer))
-            windows = self.current_disc_buffer.sample(count)
-        else:
-            windows = self.current_disc_buffer.get_all(dtype=torch.float32)
-        self.disc_replay.push(windows, step=update_idx)
+    def _sample_cpu_flat_with_end_times(
+        self,
+        windows_cpu: torch.Tensor,
+        end_times_cpu: torch.Tensor,
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if windows_cpu.ndim != 2 or windows_cpu.shape[1] != self.amp_window_dim:
+            raise ValueError("current discriminator windows are malformed")
+        if windows_cpu.shape[0] != end_times_cpu.shape[0]:
+            raise RuntimeError("current discriminator windows/end-times are misaligned")
+        if windows_cpu.shape[0] == 0:
+            raise RuntimeError("cannot sample empty current discriminator windows")
+        indices = torch.randint(windows_cpu.shape[0], (int(batch_size),), device="cpu")
+        raw = windows_cpu.index_select(0, indices).to(
+            device=self.env.device,
+            dtype=torch.float32,
+            non_blocking=False,
+        )
+        ends = end_times_cpu.index_select(0, indices)
+        return raw, ends
 
-    def _record_expert_normalizer_samples(self, num_samples: int) -> None:
-        """Record a demo count exactly matched to rollout policy windows."""
+    def _expert_flat_at_end_times(self, end_times_cpu: torch.Tensor) -> torch.Tensor:
+        raw = self.env.get_amp_demo_windows_at_end_indices(
+            end_times_cpu.to(device=self.env.device, dtype=torch.long),
+            self.amp_history_steps,
+            flatten=False,
+        )
+        return self.amp_pipeline.flatten(raw)
 
-        remaining = int(num_samples)
-        batch_size = int(self.cfg.amp.batch_size)
-        while remaining > 0:
-            count = min(remaining, batch_size)
-            expert_raw = self.env.sample_amp_demo_windows(
-                count, self.amp_history_steps, flatten=True
-            )
-            self.disc_normalizer.record(expert_raw)
-            remaining -= count
+    @torch.no_grad()
+    def _record_matched_disc_normalizer(
+        self,
+        current_windows_cpu: torch.Tensor,
+        current_end_times_cpu: torch.Tensor,
+    ) -> int:
+        """Record current and endpoint-matched expert windows through one path."""
+
+        if current_windows_cpu.shape[0] == 0:
+            return 0
+        self.disc_normalizer.clear_pending()
+        batch_size = max(1, int(self.cfg.amp.batch_size))
+        recorded = 0
+        for start in range(0, current_windows_cpu.shape[0], batch_size):
+            end = min(start + batch_size, current_windows_cpu.shape[0])
+            current = current_windows_cpu[start:end]
+            expert = self._expert_flat_at_end_times(current_end_times_cpu[start:end])
+            self.disc_normalizer.record(current)
+            self.disc_normalizer.record(expert)
+            recorded += int(end - start)
+        return recorded
 
     def _discriminator_update(
         self,
         update_idx: int,
         *,
-        expert_normalizer_samples: int,
+        rollout: dict,
     ) -> dict[str, float]:
-        if len(self.current_disc_buffer) == 0:
+        current_windows_cpu = rollout["current_disc_windows"]
+        current_end_times_cpu = rollout["current_disc_end_times"]
+        current_count = int(current_windows_cpu.shape[0])
+        if current_count == 0:
             return {
                 "disc/update_steps": 0.0,
                 "disc/version": float(self.disc_version),
                 "disc/skipped_no_current": 1.0,
+                "disc/current_count": 0.0,
             }
-        self._store_current_in_replay(update_idx)
         batch_size = int(self.cfg.amp.batch_size)
-        possible_steps = math.ceil(len(self.current_disc_buffer) / batch_size) * int(
+        possible_steps = math.ceil(current_count / batch_size) * int(
             self.cfg.amp.epochs
         )
         update_steps = min(possible_steps, int(self.cfg.amp.max_updates_per_iteration))
-        self._record_expert_normalizer_samples(expert_normalizer_samples)
+        normalizer_samples = self._record_matched_disc_normalizer(
+            current_windows_cpu,
+            current_end_times_cpu,
+        )
         self.disc_normalizer.unfreeze()
         committed = self.disc_normalizer.commit()
         self.disc_normalizer.freeze()
         totals: dict[str, float] = {}
         grad_total = 0.0
         canonical_root_xy_max = {"current": 0.0, "replay": 0.0, "expert": 0.0}
+        endpoint_abs_diff_total = 0.0
+        replay_fallback_count = 0
         self.discriminator.train()
         for disc_step in range(update_steps):
-            current_raw = self.current_disc_buffer.sample(
-                batch_size, device=self.env.device, dtype=torch.float32
+            current_raw, current_ends = self._sample_cpu_flat_with_end_times(
+                current_windows_cpu,
+                current_end_times_cpu,
+                batch_size,
             )
-            replay_raw = self.disc_replay.sample(
-                batch_size, device=self.env.device, dtype=torch.float32
+            replay_window_frames, replay_ends = self.disc_frame_replay.sample_windows(
+                batch_size,
+                self.amp_history_steps,
             )
-            expert_raw = self.env.sample_amp_demo_windows(
-                batch_size, self.amp_history_steps, flatten=True
+            if replay_window_frames.shape[0] == 0:
+                replay_raw = current_raw
+                replay_ends = current_ends
+                replay_fallback_count += 1
+            else:
+                replay_raw = self.amp_pipeline.flatten(replay_window_frames).to(
+                    device=self.env.device,
+                    dtype=torch.float32,
+                    non_blocking=False,
+                )
+            fake_ends = torch.cat((current_ends, replay_ends.to(dtype=torch.long)), dim=0)
+            expert_indices = torch.randint(fake_ends.shape[0], (batch_size,), device="cpu")
+            expert_end_times = fake_ends.index_select(0, expert_indices)
+            expert_raw = self._expert_flat_at_end_times(expert_end_times).to(
+                device=self.env.device,
+                dtype=torch.float32,
+            )
+            endpoint_abs_diff_total += float(
+                (expert_end_times.float() - current_ends.float()).abs().mean().item()
             )
             if disc_step == 0:
                 for name, raw in (
@@ -962,9 +1043,9 @@ class FCAMP(SFPO):
                     canonical_root_xy_max[name] = float(
                         window[:, -1, :2].abs().max().item()
                     )
-            current = self.disc_normalizer.normalize(current_raw)
-            replay = self.disc_normalizer.normalize(replay_raw)
-            expert = self.disc_normalizer.normalize(expert_raw)
+            current = self.amp_pipeline.normalize_flat(current_raw, self.disc_normalizer)
+            replay = self.amp_pipeline.normalize_flat(replay_raw, self.disc_normalizer)
+            expert = self.amp_pipeline.normalize_flat(expert_raw, self.disc_normalizer)
             output = compute_amp_discriminator_loss(
                 self.discriminator,
                 expert_observations=expert,
@@ -994,22 +1075,23 @@ class FCAMP(SFPO):
                 "disc/update_steps": float(update_steps),
                 "disc/version": float(self.disc_version),
                 "disc_norm/committed_this_update": float(committed),
-                "disc_norm/policy_samples_update": float(expert_normalizer_samples),
-                "disc_norm/expert_samples_update": float(expert_normalizer_samples),
+                "disc_norm/policy_samples_update": float(normalizer_samples),
+                "disc_norm/expert_samples_update": float(normalizer_samples),
+                "disc/current_count": float(current_count),
+                "disc/current_unique_endpoint_count": float(
+                    torch.unique(current_end_times_cpu).numel()
+                ),
+                "disc/replay_fallback_current_count": float(replay_fallback_count),
+                "disc/expert_endpoint_abs_diff_mean": endpoint_abs_diff_total / denom,
                 "disc_window/current_latest_root_xy_abs_max": canonical_root_xy_max["current"],
                 "disc_window/replay_latest_root_xy_abs_max": canonical_root_xy_max["replay"],
                 "disc_window/expert_latest_root_xy_abs_max": canonical_root_xy_max["expert"],
             }
         )
-        current_metrics = {
-            key.replace("replay/", "disc_current/"): value
-            for key, value in self.current_disc_buffer.statistics().items()
-        }
-        metrics.update(current_metrics)
         metrics.update(
             {
                 key.replace("replay/", "disc_replay/"): value
-                for key, value in self.disc_replay.statistics(current_step=update_idx).items()
+                for key, value in self.disc_frame_replay.statistics(current_step=update_idx).items()
             }
         )
         return metrics
@@ -1021,35 +1103,52 @@ class FCAMP(SFPO):
         update_idx = int(getattr(self, "_fcamp_update_idx", 1))
         disc_metrics = self._discriminator_update(
             update_idx,
-            expert_normalizer_samples=int(rollout["disc_norm_policy_samples"]),
+            rollout=rollout,
         )
         disc_time = time.perf_counter() - disc_start
-        reward_metrics = self._recompute_amp_rewards(rollout)
+        if float(disc_metrics.get("disc/update_steps", 0.0)) <= 0.0:
+            reward_metrics = {
+                "amp/valid_window_fraction": float(rollout["amp_valid"].float().mean().item()),
+                "amp/valid_window_count": float(rollout["amp_valid"].sum().item()),
+                "amp/age0_in_reward_count": float(
+                    ((rollout["amp_window_age"] == 0) & rollout["amp_valid"]).sum().item()
+                ),
+                "amp/reward_recompute_skipped_no_disc": 1.0,
+            }
+            actor_metrics = {
+                "fcamp/actor_optimizer_steps": 0.0,
+                "fcamp/skipped_no_disc_update": 1.0,
+            }
+            critic_metrics = {"critic/optimizer_steps": 0.0}
+            actor_time = 0.0
+            critic_time = 0.0
+        else:
+            reward_metrics = self._recompute_amp_rewards(rollout)
 
-        actor_start = time.perf_counter()
-        actor_metrics = self._actor_update(rollout)
-        actor_time = time.perf_counter() - actor_start
-        critic_start = time.perf_counter()
-        critic_metrics = self._critic_update(rollout)
-        critic_time = time.perf_counter() - critic_start
+            actor_start = time.perf_counter()
+            actor_metrics = self._actor_update(rollout)
+            actor_time = time.perf_counter() - actor_start
+            critic_start = time.perf_counter()
+            critic_metrics = self._critic_update(rollout)
+            critic_time = time.perf_counter() - critic_start
 
-        # Commit actor/prefix normalizers only after every optimizer has used
-        # the rollout snapshot.
-        if self.empirical_normalization:
-            with torch.no_grad():
-                self.actor_obs_normalizer(
-                    rollout["actor_obs_raw"].reshape(-1, self.actor_obs_dim),
-                    update=True,
-                )
-                context_valid = rollout["valid"].reshape(-1)
-                self.prefix_context_normalizer(
-                    rollout["contexts_raw"].reshape(-1, self.prefix_context_dim)[context_valid],
-                    update=True,
-                )
-                self.prefix_context_normalizer(
-                    rollout["next_contexts_raw"].reshape(-1, self.prefix_context_dim)[context_valid],
-                    update=True,
-                )
+            # Commit actor/prefix normalizers only after every optimizer has used
+            # the rollout snapshot.
+            if self.empirical_normalization:
+                with torch.no_grad():
+                    self.actor_obs_normalizer(
+                        rollout["actor_obs_raw"].reshape(-1, self.actor_obs_dim),
+                        update=True,
+                    )
+                    context_valid = rollout["valid"].reshape(-1)
+                    self.prefix_context_normalizer(
+                        rollout["contexts_raw"].reshape(-1, self.prefix_context_dim)[context_valid],
+                        update=True,
+                    )
+                    self.prefix_context_normalizer(
+                        rollout["next_contexts_raw"].reshape(-1, self.prefix_context_dim)[context_valid],
+                        update=True,
+                    )
         self.disc_normalizer.unfreeze()
 
         valid = rollout["valid"]
@@ -1223,6 +1322,6 @@ class FCAMP(SFPO):
             f"[INFO] discriminator=standard_mlp hidden={list(self.cfg.amp.hidden_dims)} "
             f"BCE=True GP={self.cfg.amp.grad_penalty} replay={self.cfg.amp.replay_size} "
             f"EMA=False independent_trunk=True motion_end_terminal=True "
-            f"fcamp_schema=1",
+            f"replay_mode=frame_trajectory fcamp_schema=2",
             flush=True,
         )

@@ -120,6 +120,10 @@ class G1MimicEnv(
         self.last_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self.phase_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.episode_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.episode_ids = torch.full(
+            (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
+        self._next_episode_id = 0
         self.motion_start_phase = max(0, min(int(cfg.motion_start_phase), self.motion.num_frames - 1))
         if cfg.motion_end_phase < 0:
             self.motion_end_phase = self.motion.num_frames - 1
@@ -168,6 +172,19 @@ class G1MimicEnv(
             generator=generator,
         )
 
+    def get_amp_demo_windows_at_end_indices(
+        self,
+        end_indices: torch.Tensor,
+        window_size: int = 16,
+        *,
+        flatten: bool = True,
+    ) -> torch.Tensor:
+        return self.motion.get_amp_demo_windows_at_end_indices(
+            end_indices,
+            window_size,
+            flatten=flatten,
+        )
+
     def _adaptive_phase_range(self, horizon: int) -> tuple[int, int]:
 
         horizon = max(1, int(horizon))
@@ -211,6 +228,14 @@ class G1MimicEnv(
         phase_indices = self.motion.clamp_time_steps(phase_indices)
         self.phase_steps[env_ids] = phase_indices
         self.episode_steps[env_ids] = 0
+        new_episode_ids = torch.arange(
+            self._next_episode_id,
+            self._next_episode_id + int(env_ids.numel()),
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.episode_ids[env_ids] = new_episode_ids
+        self._next_episode_id += int(env_ids.numel())
         self.last_action[env_ids] = 0.0
 
 

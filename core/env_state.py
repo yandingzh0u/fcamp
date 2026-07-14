@@ -11,6 +11,10 @@ def snapshot_env_state(env) -> dict[str, torch.Tensor]:
         "joint_vel": robot.data.joint_vel.clone(),
         "phase_steps": env.phase_steps.clone(),
         "episode_steps": env.episode_steps.clone(),
+        "episode_ids": env.episode_ids.clone(),
+        "next_episode_id": torch.tensor(
+            int(env._next_episode_id), dtype=torch.long, device=env.device
+        ),
         "last_action": env.last_action.clone(),
         "next_push_step": env.next_push_step.clone(),
         "first_push_step": env.first_push_step.clone(),
@@ -36,6 +40,12 @@ def restore_env_state(env, snapshot: dict[str, torch.Tensor]) -> None:
     )
     env.phase_steps = snapshot["phase_steps"].clone()
     env.episode_steps = snapshot["episode_steps"].clone()
+    if "episode_ids" in snapshot:
+        env.episode_ids = snapshot["episode_ids"].clone()
+        env._next_episode_id = int(snapshot["next_episode_id"].item())
+    else:
+        env.episode_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+        env._next_episode_id = int(env.num_envs)
     env.last_action = snapshot["last_action"].clone()
     env.next_push_step = snapshot["next_push_step"].clone()
     env.first_push_step = snapshot["first_push_step"].clone()

@@ -261,6 +261,22 @@ class MimicMotionReference:
             device=self.device,
             generator=generator,
         )
+        return self.get_amp_demo_windows_at_end_indices(
+            end_indices,
+            window_size,
+            flatten=flatten,
+        )
+
+    def get_amp_demo_windows_at_end_indices(
+        self,
+        end_indices: torch.Tensor,
+        window_size: int,
+        *,
+        flatten: bool = True,
+    ) -> torch.Tensor:
+        """Build expert AMP windows with caller-specified endpoint frames."""
+
+        end_indices = end_indices.to(device=self.device, dtype=torch.long)
         indices = history_indices(
             end_indices,
             window_size,
