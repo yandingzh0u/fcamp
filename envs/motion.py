@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 from components.imitation.motion_features import canonicalize_imitation_window
 
@@ -172,21 +173,47 @@ class MimicMotionReference:
     def clamp_time_steps(self, time_steps: torch.Tensor) -> torch.Tensor:
         return torch.clamp(time_steps, min=0, max=self.num_frames - 1)
 
+    def _interpolate(self, values: torch.Tensor, time_steps: torch.Tensor) -> torch.Tensor:
+        if not torch.is_floating_point(time_steps):
+            return values[time_steps]
+        t = self.clamp_time_steps(time_steps.to(device=self.device, dtype=torch.float32))
+        lo = torch.floor(t).to(dtype=torch.long)
+        hi = torch.clamp(lo + 1, max=self.num_frames - 1)
+        weight = (t - lo.to(dtype=t.dtype)).view(-1, *([1] * (values.ndim - 1)))
+        return values.index_select(0, lo) * (1.0 - weight) + values.index_select(0, hi) * weight
+
+    def _interpolate_quat(self, values: torch.Tensor, time_steps: torch.Tensor) -> torch.Tensor:
+        if not torch.is_floating_point(time_steps):
+            return values[time_steps]
+        t = self.clamp_time_steps(time_steps.to(device=self.device, dtype=torch.float32))
+        lo = torch.floor(t).to(dtype=torch.long)
+        hi = torch.clamp(lo + 1, max=self.num_frames - 1)
+        q0 = values.index_select(0, lo)
+        q1 = values.index_select(0, hi)
+        sign = torch.where((q0 * q1).sum(dim=-1, keepdim=True) < 0.0, -1.0, 1.0)
+        q1 = q1 * sign
+        weight = (t - lo.to(dtype=t.dtype)).view(-1, *([1] * (values.ndim - 1)))
+        return F.normalize(q0 * (1.0 - weight) + q1 * weight, dim=-1)
+
     def get_frame(self, time_steps: torch.Tensor) -> dict[str, torch.Tensor]:
-        time_steps = self.clamp_time_steps(time_steps)
+        time_steps = self.clamp_time_steps(time_steps.to(device=self.device))
+        body_pos = self._interpolate(self.body_pos_full_w, time_steps)
+        body_quat = self._interpolate_quat(self.body_quat_full_w, time_steps)
+        body_lin_vel = self._interpolate(self.body_lin_vel_full_w, time_steps)
+        body_ang_vel = self._interpolate(self.body_ang_vel_full_w, time_steps)
         return {
-            "joint_pos": self.joint_pos[time_steps],
-            "joint_vel": self.joint_vel[time_steps],
-            "body_pos_w": self.body_pos_full_w[time_steps][:, self.track_body_ids],
-            "body_quat_w": self.body_quat_full_w[time_steps][:, self.track_body_ids],
-            "body_lin_vel_w": self.body_lin_vel_full_w[time_steps][:, self.track_body_ids],
-            "body_ang_vel_w": self.body_ang_vel_full_w[time_steps][:, self.track_body_ids],
-            "anchor_pos_w": self.body_pos_full_w[time_steps, self.anchor_body_id],
-            "anchor_quat_w": self.body_quat_full_w[time_steps, self.anchor_body_id],
-            "root_pos_w": self.body_pos_full_w[time_steps, self.root_body_id],
-            "root_quat_w": self.body_quat_full_w[time_steps, self.root_body_id],
-            "root_lin_vel_w": self.body_lin_vel_full_w[time_steps, self.root_body_id],
-            "root_ang_vel_w": self.body_ang_vel_full_w[time_steps, self.root_body_id],
+            "joint_pos": self._interpolate(self.joint_pos, time_steps),
+            "joint_vel": self._interpolate(self.joint_vel, time_steps),
+            "body_pos_w": body_pos[:, self.track_body_ids],
+            "body_quat_w": body_quat[:, self.track_body_ids],
+            "body_lin_vel_w": body_lin_vel[:, self.track_body_ids],
+            "body_ang_vel_w": body_ang_vel[:, self.track_body_ids],
+            "anchor_pos_w": body_pos[:, self.anchor_body_id],
+            "anchor_quat_w": body_quat[:, self.anchor_body_id],
+            "root_pos_w": body_pos[:, self.root_body_id],
+            "root_quat_w": body_quat[:, self.root_body_id],
+            "root_lin_vel_w": body_lin_vel[:, self.root_body_id],
+            "root_ang_vel_w": body_ang_vel[:, self.root_body_id],
         }
 
     @property

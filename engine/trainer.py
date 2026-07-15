@@ -64,7 +64,7 @@ class CoreTrainer:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            if update_idx <= 3 or update_idx % tcfg.log_every == 0:
+            if update_idx % tcfg.log_every == 0:
                 self.algo.log(update_idx, tcfg.max_updates, metrics)
 
             if tcfg.validation_every > 0 and update_idx % tcfg.validation_every == 0:
@@ -96,7 +96,7 @@ class CoreTrainer:
                         metrics[key.replace("validation/", "validation_directional/")] = value
                 metrics["timing/validation_s"] = time.perf_counter() - vt0
                 print(f"[VALIDATION_DONE] update={update_idx} time={metrics['timing/validation_s']:.3f}s", flush=True)
-                if update_idx <= 3 or update_idx % tcfg.log_every == 0:
+                if update_idx % tcfg.log_every == 0:
                     log_validation_metrics(self.env, metrics)
                 self.metrics_logger.write_validation_summary(update_idx, metrics)
 

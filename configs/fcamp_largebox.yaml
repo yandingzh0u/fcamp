@@ -13,6 +13,8 @@ environment:
   reset_noise: true
   interval_pushes: true
   observation_noise: true
+  reset_phase_sampling: adaptive
+  rsi_keyframe_count: 21
   adaptive_motion_sampling: true
   adaptive_num_bins: 0
   adaptive_alpha: 0.001

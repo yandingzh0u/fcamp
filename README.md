@@ -1,13 +1,14 @@
 # G1 Mimic Lab
 
-Research code for G1 whole-body imitation. The current in-repo method is
-FCAMP: a causal Flow-CPS chunk actor trained with a temporal discriminator
-prior, causal frame credit, and shared dual Flow critics.
+Research code for G1 whole-body imitation. The main method is FCAMP: a causal
+Flow-CPS chunk actor trained with a temporal discriminator prior, causal frame
+credit, and shared dual Flow critics. AdaMimic is also available as a native
+comparison method.
 
 ## Layout
 
 ```text
-configs/      FCAMP experiment configs.
+configs/      Method experiment configs.
 method/       Research methods. Add new algorithms here.
 models/       Neural network modules.
 components/   Method-neutral utilities: imitation features, replay, credit,
@@ -20,10 +21,20 @@ runs/         Local-only training outputs; ignored by git.
 
 ## Train
 
+Experiment configs carry the default run schedule. Normal runs should not need
+manual `--set` overrides for update count, validation cadence, checkpoint
+cadence, logging cadence, or environment count.
+
 ```bash
 /home/y/miniconda3/envs/env_isaaclab/bin/python train.py \
   --config configs/fcamp_largebox.yaml \
   --run_name fcamp_largebox_s0
+```
+
+```bash
+/home/y/miniconda3/envs/env_isaaclab/bin/python train.py \
+  --config configs/adamimic_stage1_largebox.yaml \
+  --run_name adamimic_stage1_largebox_s1
 ```
 
 ## Add A Method

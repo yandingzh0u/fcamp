@@ -64,3 +64,7 @@ class Algorithm(ABC):
     @abstractmethod
     def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
         ...
+
+    def deployment_actions(self, obs: torch.Tensor) -> torch.Tensor:
+        """Deterministic action payload used by validation and playback."""
+        return self.deterministic_actions(obs)

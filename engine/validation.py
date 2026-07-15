@@ -28,6 +28,27 @@ def validation_max_steps(train_cfg, env) -> int:
     return max(1, steps)
 
 
+def _deployment_action_chunk(algo, obs: torch.Tensor) -> torch.Tensor:
+    payload = algo.deployment_actions(obs)
+    if payload.dim() == 2:
+        return payload.unsqueeze(1)
+    if payload.dim() == 3:
+        return payload
+    raise ValueError(f"deployment_actions must return [N,D] or [N,H,D], got shape={tuple(payload.shape)}")
+
+
+def _split_reference_action(algo, env, payload: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if not bool(getattr(algo, "uses_reference_dt", False)):
+        return payload, None
+    expected_dim = int(env.action_dim) + 1
+    if payload.shape[-1] != expected_dim:
+        raise ValueError(
+            f"{algo.__class__.__name__} uses reference_dt but returned action dim "
+            f"{payload.shape[-1]}, expected {expected_dim}"
+        )
+    return payload[..., : env.action_dim], payload[..., -1]
+
+
 def run_validation_rollout(
     trainer, fixed_seed: int | None = None, start_phase_override: int | None = None
 ) -> dict[str, float]:
@@ -115,21 +136,28 @@ def run_validation_rollout(
             for step_idx in range(max_steps):
                 if not trainer.simulation_app.is_running():
                     break
-                if cached_chunk is None or chunk_index >= horizon:
-                    cached_chunk = algo.deterministic_actions(current_obs)
+                if cached_chunk is None or chunk_index >= cached_chunk.shape[1]:
+                    cached_chunk = _deployment_action_chunk(algo, current_obs)
                     chunk_index = 0
-                action = cached_chunk[:, chunk_index, :]
+                action_payload = cached_chunk[:, chunk_index, :]
+                action, reference_dt = _split_reference_action(algo, env, action_payload)
                 if bool(done.any()):
                     action = torch.where(done.unsqueeze(-1), torch.zeros_like(action), action)
+                    if reference_dt is not None:
+                        reference_dt = torch.where(done, torch.full_like(reference_dt, float(env.dt)), reference_dt)
                 chunk_index += 1
 
-                current_obs, reward, step_done, info = env.step(action, auto_reset=False)
+                current_obs, reward, step_done, info = env.step(
+                    action,
+                    auto_reset=False,
+                    reference_dt=reference_dt,
+                )
                 active_mask = ~done
                 new_done = active_mask & step_done
                 if bool(new_done.any()):
                     done_terms = info["done_terms"]
                     debug_terms = info["debug_terms"]
-                    death_phase_record[new_done] = info["termination_phase_steps"][new_done]
+                    death_phase_record[new_done] = info["termination_phase_steps"].long()[new_done]
                     for name in done_term_record:
                         done_term_record[name][new_done] = done_terms[name][new_done]
                     for name in done_debug_record:

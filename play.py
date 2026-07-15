@@ -49,6 +49,27 @@ from envs.g1_mimic import G1MimicEnv
 from method import load_method_class
 
 
+def _deployment_action_chunk(algo, obs: torch.Tensor) -> torch.Tensor:
+    payload = algo.deployment_actions(obs)
+    if payload.dim() == 2:
+        return payload.unsqueeze(1)
+    if payload.dim() == 3:
+        return payload
+    raise ValueError(f"deployment_actions must return [N,D] or [N,H,D], got shape={tuple(payload.shape)}")
+
+
+def _split_reference_action(algo, env, payload: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if not bool(getattr(algo, "uses_reference_dt", False)):
+        return payload, None
+    expected_dim = int(env.action_dim) + 1
+    if payload.shape[-1] != expected_dim:
+        raise ValueError(
+            f"{algo.__class__.__name__} uses reference_dt but returned action dim "
+            f"{payload.shape[-1]}, expected {expected_dim}"
+        )
+    return payload[..., : env.action_dim], payload[..., -1]
+
+
 def _select(cls, values: dict) -> dict:
     return {field.name: values[field.name] for field in fields(cls) if field.name in values}
 
@@ -145,13 +166,14 @@ def main() -> None:
     )
 
     while simulation_app.is_running():
-        if cached_chunk is None or chunk_index >= horizon:
+        if cached_chunk is None or chunk_index >= cached_chunk.shape[1]:
             with torch.inference_mode():
-                cached_chunk = algo.deterministic_actions(current_obs)
+                cached_chunk = _deployment_action_chunk(algo, current_obs)
             chunk_index = 0
-        action = cached_chunk[:, chunk_index, :]
+        action_payload = cached_chunk[:, chunk_index, :]
+        action, reference_dt = _split_reference_action(algo, env, action_payload)
         chunk_index += 1
-        current_obs, reward, done, info = env.step(action, auto_reset=False)
+        current_obs, reward, done, info = env.step(action, auto_reset=False, reference_dt=reference_dt)
         total_steps += 1
 
         if use_real_time:
@@ -163,8 +185,13 @@ def main() -> None:
                 next_frame_time = time.perf_counter()
 
         if args_cli.log_every > 0 and total_steps % args_cli.log_every == 0:
+            frame_delta = info.get("reference_frame_delta")
+            frame_delta_mean = float(frame_delta.mean().item()) if torch.is_tensor(frame_delta) else 1.0
+            reference_dt_mean = float(reference_dt.mean().item()) if torch.is_tensor(reference_dt) else float(env.dt)
             print(
-                f"[PLAY] step={total_steps} phase={int(env.phase_steps[0].item())} "
+                f"[PLAY] step={total_steps} phase={float(env.phase_steps[0].item()):.2f} "
+                f"reference_dt={reference_dt_mean:.5f} "
+                f"frame_delta={frame_delta_mean:.3f} "
                 f"action_abs={float(action.abs().mean().item()):.5f} "
                 f"reward={float(reward.mean().item()):.5f} "
                 f"done={float(done.float().mean().item()):.5f} "
@@ -188,7 +215,7 @@ def main() -> None:
         if args_cli.loop_motion and bool(torch.any(env.phase_steps >= env.motion.num_frames - 1)):
             need_reset, reason = True, "motion_end"
         if need_reset:
-            print(f"[INFO] Reset at step {total_steps} ({reason}). phase={int(env.phase_steps[0].item())}", flush=True)
+            print(f"[INFO] Reset at step {total_steps} ({reason}). phase={float(env.phase_steps[0].item()):.2f}", flush=True)
             current_obs = env.reset(phase_indices=reset_phases)
             cached_chunk = None
             chunk_index = horizon

@@ -118,7 +118,7 @@ class G1MimicEnv(
         )
 
         self.last_action = torch.zeros(self.num_envs, self.action_dim, device=self.device)
-        self.phase_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.phase_steps = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.episode_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.episode_ids = torch.full(
             (self.num_envs,), -1, dtype=torch.long, device=self.device
@@ -203,11 +203,27 @@ class G1MimicEnv(
         min_phase, max_phase = self._adaptive_phase_range(horizon)
         if max_phase < min_phase:
             return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
-        if not self.adaptive_motion_sampling:
+        if self.reset_phase_sampling == "zero":
+            return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
+        if self.reset_phase_sampling == "rsi":
+            keyframes = self._rsi_keyframe_phases(min_phase, max_phase)
+            indices = torch.randint(0, keyframes.numel(), (num_samples,), device=self.device)
+            return keyframes.index_select(0, indices)
+        if self.reset_phase_sampling == "uniform" or not self.adaptive_motion_sampling:
             return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
-
-
         return self.adaptive_sampler.sample_frames(num_samples, min_phase, max_phase)
+
+    def _rsi_keyframe_phases(self, min_phase: int, max_phase: int) -> torch.Tensor:
+        count = min(int(self.rsi_keyframe_count), max_phase - min_phase + 1)
+        if count <= 1:
+            return torch.full((1,), min_phase, dtype=torch.long, device=self.device)
+        phases = torch.linspace(
+            float(min_phase),
+            float(max_phase),
+            steps=count,
+            device=self.device,
+        ).round().to(dtype=torch.long)
+        return torch.unique_consecutive(phases)
 
     def reset(self, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
@@ -226,7 +242,7 @@ class G1MimicEnv(
             )
 
         phase_indices = self.motion.clamp_time_steps(phase_indices)
-        self.phase_steps[env_ids] = phase_indices
+        self.phase_steps[env_ids] = phase_indices.to(dtype=self.phase_steps.dtype)
         self.episode_steps[env_ids] = 0
         new_episode_ids = torch.arange(
             self._next_episode_id,
@@ -314,7 +330,11 @@ class G1MimicEnv(
         self.robot.set_joint_position_target(action_targets, joint_ids=self.action_joint_ids)
 
     def _init_adaptive_motion_sampling(self) -> None:
-        self.adaptive_motion_sampling = bool(self.config.adaptive_motion_sampling)
+        self.reset_phase_sampling = str(self.config.reset_phase_sampling)
+        self.rsi_keyframe_count = int(self.config.rsi_keyframe_count)
+        self.adaptive_motion_sampling = bool(
+            self.config.adaptive_motion_sampling and self.reset_phase_sampling == "adaptive"
+        )
         self.adaptive_sampler = AdaptiveTimestepsSampler(
             motion_time_step_total=int(self.motion.num_frames),
             device=self.device,
@@ -324,13 +344,8 @@ class G1MimicEnv(
             adaptive_predecessor_ratio=float(self.config.adaptive_predecessor_ratio),
             adaptive_predecessor_lookback_bins=int(self.config.adaptive_predecessor_lookback_bins),
         )
-
-
         self._failure_recorded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-
         self.record_motion_failures = True
-
-
         # Preserve Flow-CPS's historical default.  FCAMP opts in through its own
         # environment config without requiring this module to import FCAMP.
         self.terminate_on_motion_end = bool(getattr(self.config, "terminate_on_motion_end", False))
@@ -356,7 +371,41 @@ class G1MimicEnv(
 
     def adaptive_sampling_stats(self) -> dict[str, float]:
         min_phase, max_phase = self._adaptive_phase_range(horizon=1)
-        return self.adaptive_sampler.stats(min_phase, max_phase)
+        if self.reset_phase_sampling == "adaptive":
+            stats = self.adaptive_sampler.stats(min_phase, max_phase)
+            stats["mode"] = 0.0
+            return stats
+        if self.reset_phase_sampling == "rsi":
+            keyframes = self._rsi_keyframe_phases(min_phase, max_phase)
+            count = max(1, int(keyframes.numel()))
+            return {
+                "mode": 1.0,
+                "top_bin": -1.0,
+                "top_prob": 1.0 / float(count),
+                "failed_sum": 0.0,
+                "entropy": 1.0 if count > 1 else 0.0,
+                "peak_bin": -1.0,
+                "rsi_keyframe_count": float(count),
+            }
+        if self.reset_phase_sampling == "zero":
+            return {
+                "mode": 2.0,
+                "top_bin": 0.0,
+                "top_prob": 1.0,
+                "failed_sum": 0.0,
+                "entropy": 0.0,
+                "peak_bin": 0.0,
+                "rsi_keyframe_count": 1.0,
+            }
+        total = max(1, max_phase - min_phase + 1)
+        return {
+            "mode": 3.0,
+            "top_bin": -1.0,
+            "top_prob": 1.0 / float(total),
+            "failed_sum": 0.0,
+            "entropy": 1.0 if total > 1 else 0.0,
+            "peak_bin": -1.0,
+        }
 
     def _resample_finished_motions(self) -> tuple[torch.Tensor, torch.Tensor]:
 
@@ -364,7 +413,7 @@ class G1MimicEnv(
         if env_ids.numel() == 0:
             return env_ids, torch.empty(0, dtype=torch.long, device=self.device)
         phase_indices = self.sample_phase_indices(env_ids.numel(), horizon=1)
-        self.phase_steps[env_ids] = phase_indices
+        self.phase_steps[env_ids] = phase_indices.to(dtype=self.phase_steps.dtype)
         self._failure_recorded[env_ids] = False
         reference = self.motion.get_frame(phase_indices)
         root_pos = reference["root_pos_w"].clone()

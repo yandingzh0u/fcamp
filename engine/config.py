@@ -25,6 +25,8 @@ class EnvironmentConfig:
     reset_noise: bool
     interval_pushes: bool
     observation_noise: bool
+    reset_phase_sampling: str
+    rsi_keyframe_count: int
     adaptive_motion_sampling: bool
     adaptive_num_bins: int
     adaptive_alpha: float
@@ -125,7 +127,50 @@ class FCAMPConfig(FlowCPSConfig):
         return self.style_prior
 
 
-MethodConfig: TypeAlias = FCAMPConfig
+@dataclass(frozen=True, slots=True)
+class AdaMimicConfig:
+    """AdaMimic two-level adaptive-time PPO configuration."""
+
+    stage: str
+    actor_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
+    activation: str
+    rollout_env_steps: int
+    discount_gamma: float
+    time_discount_gamma: float
+    gae_lambda: float
+    clip_range: float
+    desired_kl: float
+    policy_epochs: int
+    num_mini_batches: int
+    micro_batch_size: int
+    value_loss_coef: float
+    entropy_coef: float
+    policy_lr: float
+    weight_decay: float
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+    max_grad_norm: float
+    use_clipped_value_loss: bool
+    infer_keyframe_time: bool
+    actor_time_scale_range: tuple[float, float]
+    fixed_dt: float
+    time_min_std: float
+    init_noise_std: float
+    train_time: bool
+    time_reward_scale: float
+    use_timeout_bootstrap: bool
+    use_smooth: bool
+    smoothness_upper_bound: float
+    smoothness_lower_bound: float
+    value_smoothness_coef: float
+    residual_delta: bool
+    checkpoint_path: str
+    freeze_base: bool
+    residual_time_threshold: float
+
+
+MethodConfig: TypeAlias = FCAMPConfig | AdaMimicConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +210,7 @@ class ExperimentConfig:
 
 METHOD_CONFIGS = {
     "fcamp": FCAMPConfig,
+    "adamimic": AdaMimicConfig,
 }
 
 
@@ -186,14 +232,18 @@ def _construct(cls, values: dict[str, Any]):
     ):
         if name in converted:
             converted[name] = tuple(int(value) for value in converted[name])
+    if "actor_time_scale_range" in converted:
+        converted["actor_time_scale_range"] = tuple(float(value) for value in converted["actor_time_scale_range"])
     return cls(**converted)
 
 
-def _construct_method_config(method: str, values: dict[str, Any]) -> MethodConfig:
+def _construct_method_config(method: str, values: dict[str, Any], source_path: Path) -> MethodConfig:
+    if method == "adamimic":
+        nested = dict(values)
+        nested["checkpoint_path"] = _resolve_path(str(nested.get("checkpoint_path", "")), source_path)
+        return _construct(AdaMimicConfig, nested)
     if method != "fcamp":
-        raise ValueError(
-            f"Unknown method {method!r}. Add method/{method}.py and register its config schema."
-        )
+        raise ValueError(f"Unknown method {method!r}. Add method/{method}.py and register its config schema.")
     nested = dict(values)
     if "style_prior" not in nested and "amp" in nested:
         nested["style_prior"] = nested.pop("amp")
@@ -251,7 +301,7 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
     config = ExperimentConfig(
         method=method,
         environment=_construct(EnvironmentConfig, dict(normalized["environment"])),
-        parameters=_construct_method_config(method, dict(normalized["parameters"])),
+        parameters=_construct_method_config(method, dict(normalized["parameters"]), source_path),
         training=_construct(TrainingConfig, training_values),
     )
     _validate(config)
@@ -272,18 +322,36 @@ def _validate(config: ExperimentConfig) -> None:
 
     env = config.environment
     train = config.training
-    params = config.parameters
     if env.num_envs < 1:
         raise ValueError("environment.num_envs must be positive")
     if env.sim_dt <= 0.0:
         raise ValueError("environment.sim_dt must be positive")
     if env.decimation < 1:
         raise ValueError("environment.decimation must be positive")
+    if env.reset_phase_sampling not in {"adaptive", "uniform", "rsi", "zero"}:
+        raise ValueError("environment.reset_phase_sampling must be one of adaptive/uniform/rsi/zero")
+    if env.rsi_keyframe_count < 1:
+        raise ValueError("environment.rsi_keyframe_count must be positive")
+    if env.adaptive_motion_sampling != (env.reset_phase_sampling == "adaptive"):
+        raise ValueError("environment.adaptive_motion_sampling must match reset_phase_sampling=adaptive")
     if train.max_updates < 1:
         raise ValueError("training.max_updates must be positive")
     if train.log_every < 1:
         raise ValueError("training.log_every must be positive")
     resolve_task(env.task)
+    if config.method == "fcamp":
+        _validate_fcamp(config.parameters)
+    elif config.method == "adamimic":
+        if config.parameters.stage == "stage1" and env.reset_phase_sampling != "rsi":
+            raise ValueError("AdaMimic stage1 follows official RSI reset sampling")
+        if config.parameters.stage == "stage2" and env.reset_phase_sampling != "zero":
+            raise ValueError("AdaMimic stage2 follows official rsi=false zero reset sampling")
+        _validate_adamimic(config.parameters)
+    else:
+        raise ValueError(f"Unsupported method {config.method!r}")
+
+
+def _validate_fcamp(params: FCAMPConfig) -> None:
     if params.horizon < 1:
         raise ValueError("Flow-CPS requires parameters.horizon >= 1")
     if params.flow_steps < 1:
@@ -348,3 +416,60 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError("Full FCAMP requires critics.sharing=encoder")
     if not critics.encoder_hidden_dims or not critics.head_hidden_dims:
         raise ValueError("FCAMP critic encoder/head dimensions cannot be empty")
+
+
+def _validate_adamimic(params: AdaMimicConfig) -> None:
+    if params.stage not in {"stage1", "stage2"}:
+        raise ValueError("AdaMimic parameters.stage must be 'stage1' or 'stage2'")
+    if not params.actor_hidden_dims or not params.critic_hidden_dims:
+        raise ValueError("AdaMimic actor/critic hidden dims cannot be empty")
+    if params.rollout_env_steps <= 1:
+        raise ValueError("AdaMimic requires parameters.rollout_env_steps > 1")
+    if not (0.0 < params.discount_gamma <= 1.0):
+        raise ValueError("AdaMimic discount_gamma must be in (0, 1]")
+    if not (0.0 < params.time_discount_gamma <= 1.0):
+        raise ValueError("AdaMimic time_discount_gamma must be in (0, 1]")
+    if not (0.0 <= params.gae_lambda <= 1.0):
+        raise ValueError("AdaMimic gae_lambda must be in [0, 1]")
+    if not (0.0 < params.clip_range < 1.0):
+        raise ValueError("AdaMimic clip_range must be in (0, 1)")
+    if params.policy_epochs < 1 or params.num_mini_batches < 1:
+        raise ValueError("AdaMimic policy_epochs/num_mini_batches must be positive")
+    if params.policy_lr <= 0.0 or params.max_grad_norm <= 0.0:
+        raise ValueError("AdaMimic policy_lr/max_grad_norm must be positive")
+    if params.value_loss_coef < 0.0 or params.entropy_coef < 0.0:
+        raise ValueError("AdaMimic loss coefficients must be non-negative")
+    if len(params.actor_time_scale_range) != 2:
+        raise ValueError("AdaMimic actor_time_scale_range must have two values")
+    low, high = params.actor_time_scale_range
+    if high < low:
+        raise ValueError("AdaMimic actor_time_scale_range must be [low, high]")
+    if params.fixed_dt <= 0.0 or params.time_min_std <= 0.0 or params.init_noise_std <= 0.0:
+        raise ValueError("AdaMimic fixed_dt/time_min_std/init_noise_std must be positive")
+    if params.time_reward_scale < 0.0:
+        raise ValueError("AdaMimic time_reward_scale must be non-negative")
+    if params.smoothness_upper_bound <= params.smoothness_lower_bound or params.smoothness_lower_bound <= 0.0:
+        raise ValueError("AdaMimic smoothness bounds must satisfy upper > lower > 0")
+    if params.value_smoothness_coef < 0.0:
+        raise ValueError("AdaMimic smoothness coefficients must be non-negative")
+    is_fixed_time = low == 0.0 and high == 0.0
+    if params.stage == "stage1":
+        if params.train_time:
+            raise ValueError("AdaMimic stage1 follows official train_high=false; set parameters.train_time=false")
+        if not is_fixed_time:
+            raise ValueError("AdaMimic stage1 follows official fixed time; set actor_time_scale_range=[0.0, 0.0]")
+        if params.residual_delta or params.freeze_base:
+            raise ValueError("AdaMimic stage1 must not enable residual_delta/freeze_base")
+    if params.stage == "stage2" and not params.residual_delta:
+        raise ValueError("AdaMimic stage2 requires residual_delta=true")
+    if params.residual_delta and not params.checkpoint_path:
+        raise ValueError("AdaMimic residual_delta requires checkpoint_path")
+    if params.stage == "stage2":
+        if not params.train_time:
+            raise ValueError("AdaMimic stage2 follows official train_high=true; set parameters.train_time=true")
+        if is_fixed_time:
+            raise ValueError("AdaMimic stage2 requires a non-zero actor_time_scale_range")
+        if not params.freeze_base:
+            raise ValueError("AdaMimic stage2 follows official freeze=true; set parameters.freeze_base=true")
+        if params.use_smooth:
+            raise ValueError("AdaMimic stage2 follows official use_smooth=false")

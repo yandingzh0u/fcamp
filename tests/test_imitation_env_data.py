@@ -126,6 +126,8 @@ def _fake_motion(num_frames: int = 24) -> MimicMotionReference:
     motion.device = torch.device("cpu")
     motion.num_frames = num_frames
     motion.root_body_id = 0
+    motion.anchor_body_id = 0
+    motion.track_body_ids = torch.arange(6)
     motion.imitation_key_body_ids = torch.tensor([1, 2, 3, 4, 5])
     motion.joint_pos = torch.arange(num_frames, dtype=torch.float32)[:, None].repeat(1, 29)
     motion.joint_vel = torch.ones(num_frames, 29)
@@ -137,6 +139,20 @@ def _fake_motion(num_frames: int = 24) -> MimicMotionReference:
     motion.body_lin_vel_full_w = torch.zeros(num_frames, 6, 3)
     motion.body_ang_vel_full_w = torch.zeros(num_frames, 6, 3)
     return motion
+
+
+def test_motion_reference_interpolates_fractional_frames() -> None:
+    motion = _fake_motion(num_frames=5)
+    frame = motion.get_frame(torch.tensor([1.5, 3.25]))
+
+    torch.testing.assert_close(frame["joint_pos"][0], torch.full((29,), 1.5))
+    torch.testing.assert_close(frame["joint_pos"][1], torch.full((29,), 3.25))
+    torch.testing.assert_close(frame["root_pos_w"][0, 0], torch.tensor(1.5))
+    torch.testing.assert_close(frame["root_pos_w"][1, 0], torch.tensor(3.25))
+    torch.testing.assert_close(
+        torch.linalg.norm(frame["root_quat_w"], dim=-1),
+        torch.ones(2),
+    )
 
 
 def _write_minimal_holosoma_motion(path: Path) -> None:

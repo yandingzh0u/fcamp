@@ -11,6 +11,7 @@ class MimicStepMixin:
         actions: torch.Tensor,
         auto_reset: bool = False,
         reset_horizon: int = 1,
+        reference_dt: torch.Tensor | float | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         previous_action = self.last_action.clone()
         self._apply_action_targets(actions)
@@ -24,7 +25,16 @@ class MimicStepMixin:
                 self.sim.render()
 
         phase_start_steps = self.phase_steps.clone()
-        next_phase_steps = phase_start_steps + 1
+        if reference_dt is None:
+            reference_frame_delta = torch.ones_like(phase_start_steps, dtype=torch.float32)
+            reference_dt_tensor = torch.full_like(reference_frame_delta, float(self.dt))
+        else:
+            reference_dt_tensor = torch.as_tensor(reference_dt, dtype=torch.float32, device=self.device)
+            if reference_dt_tensor.ndim == 0:
+                reference_dt_tensor = reference_dt_tensor.expand(self.num_envs)
+            reference_dt_tensor = reference_dt_tensor.reshape(self.num_envs).clamp(min=1.0e-6)
+            reference_frame_delta = reference_dt_tensor / float(self.dt)
+        next_phase_steps = phase_start_steps + reference_frame_delta.to(dtype=phase_start_steps.dtype)
         reference_phase_steps = torch.clamp(
             next_phase_steps, max=self.motion.num_frames - 1
         )
@@ -37,6 +47,13 @@ class MimicStepMixin:
         self._motion_end_mask = next_phase_steps >= (self.motion.num_frames - 1)
         termination_phase_steps = reference_phase_steps.clone()
         reward, reward_terms = self.compute_reward(actions, previous_action)
+        if reference_dt is not None:
+            reward = reward * reference_frame_delta.to(dtype=reward.dtype)
+            reward_terms = {
+                **reward_terms,
+                "reference_dt": reference_dt_tensor,
+                "reference_frame_delta": reference_frame_delta,
+            }
         done, done_terms, debug_terms = self.compute_termination()
         terminal_observation = None
         terminal_critic_observation = None
@@ -86,6 +103,8 @@ class MimicStepMixin:
             "reference_phase_steps": reference_phase_steps,
             "termination_phase_steps": termination_phase_steps,
             "imitation_frame_phase_steps": reference_phase_steps,
+            "reference_dt": reference_dt_tensor,
+            "reference_frame_delta": reference_frame_delta,
             "imitation_frame": imitation_frame,
             "reset_env_ids": reset_env_ids,
             "reset_phase_indices": reset_phase_indices,
