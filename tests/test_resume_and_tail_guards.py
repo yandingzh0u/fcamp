@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from core.checkpoint import Checkpointer
+from engine.checkpoint import Checkpointer
 
 
 class _FakeSampler:

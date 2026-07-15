@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from algorithms.kl_scheduler import adaptive_lr_from_kl, normalized_kl
+from components.optim.kl_scheduler import adaptive_lr_from_kl, normalized_kl
 
 
 def test_normalized_kl_divides_by_units() -> None:

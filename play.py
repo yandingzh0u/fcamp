@@ -38,15 +38,15 @@ simulation_app = app_launcher.app
 
 import torch
 
-from core.config import (
-    ALGORITHM_CONFIGS,
+from engine.config import (
     EnvironmentConfig,
     ExperimentConfig,
     TrainingConfig,
     config_from_dict,
+    METHOD_CONFIGS,
 )
-from env.mimic import G1MimicEnv
-from algorithms import make_algorithm
+from envs.g1_mimic import G1MimicEnv
+from method import load_method_class
 
 
 def _select(cls, values: dict) -> dict:
@@ -55,25 +55,20 @@ def _select(cls, values: dict) -> dict:
 
 def _rebuild_config(payload: dict) -> ExperimentConfig:
     raw = payload.get("config", {})
-    if "algorithm" in raw:
+    if "method" in raw or "algorithm" in raw:
         return config_from_dict(raw)
     if not {"algo_name", "env", "algo", "train"}.issubset(raw):
         raise KeyError("Checkpoint has no supported configuration schema")
-    algorithm = raw["algo_name"]
-    if algorithm not in ALGORITHM_CONFIGS:
-        raise ValueError(f"Unsupported checkpoint algorithm {algorithm!r}; available: {sorted(ALGORITHM_CONFIGS)}")
-    parameter_cls = ALGORITHM_CONFIGS[algorithm]
+    method = raw["algo_name"]
+    if method != "fcamp":
+        raise ValueError(f"Unsupported legacy checkpoint method {method!r}; available: {sorted(METHOD_CONFIGS)}")
     legacy_env = raw["env"]
     environment = _select(EnvironmentConfig, legacy_env)
     environment["task"] = "largebox_plane" if legacy_env.get("terrain_type") == "plane" else "crawl_slope"
     environment["decimation"] = 4
-    parameters = _select(parameter_cls, raw["algo"])
-    if algorithm == "ppo":
-        parameters.setdefault("critic_hidden_dims", parameters["actor_hidden_dims"])
-        parameters.setdefault("critic_weight_decay", 0.0)
-        parameters.setdefault("value_clip_range", parameters["clip_range"])
+    parameters = dict(raw["algo"])
     tree = {
-        "algorithm": algorithm,
+        "method": method,
         "environment": environment,
         "parameters": parameters,
         "training": _select(TrainingConfig, raw["train"]),
@@ -119,7 +114,7 @@ def main() -> None:
         render=not args_cli.headless,
         render_every=args_cli.render_every,
     )
-    algo = make_algorithm(cfg.algorithm)(cfg.parameters, env, simulation_app)
+    algo = load_method_class(cfg.method)(cfg.parameters, env, simulation_app)
     algo.build()
     algo.policy.load_state_dict(payload["policy"])
     algo.policy.eval()
@@ -138,7 +133,7 @@ def main() -> None:
     print("[INFO] Playing trained checkpoint", flush=True)
     print(f"[INFO] checkpoint={checkpoint_path}", flush=True)
     print(
-        f"[INFO] algorithm={cfg.algorithm} task={env.task.name} terrain={env.task.terrain} "
+        f"[INFO] method={cfg.method} task={env.task.name} terrain={env.task.terrain} "
         f"motion_file={env.task.motion_file}",
         flush=True,
     )

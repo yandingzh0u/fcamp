@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import torch
 
-from algorithms.causal_credit import (
+from components.credit.temporal_credit import (
     compute_dual_channel_gae,
     resolve_terminal_masks,
     with_chunk_shared_actor_credit,
 )
-from networks.prefix_flow_critic import SharedEncoderDualFlowCritic
+from models.dual_flow_critic import SharedEncoderDualFlowCritic
 
 
 def _credit(
@@ -160,7 +160,8 @@ def test_chunk_shared_ablation_broadcasts_start_credit_only_to_actor() -> None:
     expected_channels = torch.tensor(
         [[[10.0, 100.0]], [[10.0, 100.0]], [[7.0, 70.0]], [[7.0, 70.0]]]
     )
-    torch.testing.assert_close(shared.normalized_advantages, expected_channels)
+    expected_components = expected_channels * torch.tensor([2.0, 3.0])
+    torch.testing.assert_close(shared.normalized_advantages, expected_components)
     torch.testing.assert_close(
         shared.actor_advantage,
         2.0 * expected_channels[..., 0] + 3.0 * expected_channels[..., 1],

@@ -17,9 +17,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from isaaclab.app import AppLauncher
-from core.config import load_config
+from engine.config import load_config
 
-parser = argparse.ArgumentParser(description="Train a humanoid imitation policy (multi-algorithm).")
+parser = argparse.ArgumentParser(description="Train a humanoid imitation method.")
 parser.add_argument("--config", type=str, required=True, help="Path to the YAML config (the single source of defaults).")
 parser.add_argument("--set", dest="overrides", action="append", default=[], help="Override an existing config leaf, e.g. --set parameters.horizon=1. Repeatable.")
 parser.add_argument("--run_name", type=str, default="", help="Run name; sets checkpoint/log dirs under runs/.")
@@ -35,10 +35,10 @@ simulation_app = app_launcher.app
 
 
 def main() -> None:
-    from core.trainer import CoreTrainer
-    from algorithms import make_algorithm
+    from engine.trainer import CoreTrainer
+    from method import load_method_class
 
-    run_name = args_cli.run_name or f"{cfg.algorithm}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_name = args_cli.run_name or f"{cfg.method}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir = REPO_ROOT / "runs" / run_name
     log_dir = run_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -66,12 +66,12 @@ def main() -> None:
     # the resolved config and metrics.
     snapshot_path = run_dir / "source_snapshot.tar.gz"
     source_roots = (
-        "algorithms",
-        "amp",
+        "components",
         "configs",
-        "core",
-        "env",
-        "networks",
+        "engine",
+        "envs",
+        "method",
+        "models",
         "tests",
     )
     with tarfile.open(snapshot_path, "w:gz") as archive:
@@ -109,13 +109,13 @@ def main() -> None:
     log_handle = open(log_file, "a", buffering=1)
     sys.stdout = _Tee(sys.__stdout__, log_handle)
     sys.stderr = _Tee(sys.__stderr__, log_handle)
-    print(f"[INFO] run_dir={run_dir}", flush=True)
-    print(f"[INFO] log_file={log_file}", flush=True)
-    print(f"[INFO] algorithm={cfg.algorithm}", flush=True)
-    print(f"[INFO] resolved_config_sha256={resolved['resolved_config_sha256']}", flush=True)
-    print(f"[INFO] source_snapshot_sha256={snapshot_sha256}", flush=True)
+    print(f"[RUN] dir={run_dir}", flush=True)
+    print(f"[RUN] log_file={log_file}", flush=True)
+    print(f"[RUN] method={cfg.method} task={cfg.environment.task} seed={cfg.training.seed}", flush=True)
+    print(f"[RUN] resolved_config_sha256={resolved['resolved_config_sha256']}", flush=True)
+    print(f"[RUN] source_snapshot_sha256={snapshot_sha256}", flush=True)
 
-    trainer = CoreTrainer(simulation_app, cfg, make_algorithm(cfg.algorithm), run_dir / "checkpoints")
+    trainer = CoreTrainer(simulation_app, cfg, load_method_class(cfg.method), run_dir / "checkpoints")
     try:
         if args_cli.validate_only:
             trainer.validate_only()
