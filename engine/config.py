@@ -170,7 +170,50 @@ class AdaMimicConfig:
     residual_time_threshold: float
 
 
-MethodConfig: TypeAlias = FCAMPConfig | AdaMimicConfig
+@dataclass(frozen=True, slots=True)
+class AMPConfig:
+    """MimicKit-style AMP PPO configuration."""
+
+    actor_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
+    disc_hidden_dims: tuple[int, ...]
+    activation: str
+    rollout_env_steps: int
+    discount_gamma: float
+    gae_lambda: float
+    clip_range: float
+    norm_adv_clip: float
+    actor_epochs: int
+    actor_batch_size: int
+    critic_epochs: int
+    critic_batch_size: int
+    disc_epochs: int
+    disc_batch_size: int
+    actor_lr: float
+    critic_lr: float
+    disc_lr: float
+    disc_weight_decay: float
+    actor_init_output_scale: float
+    action_std: float
+    action_bound_weight: float
+    action_entropy_weight: float
+    action_reg_weight: float
+    task_reward_weight: float
+    disc_reward_weight: float
+    disc_reward_scale: float
+    disc_reward_epsilon: float
+    disc_buffer_size: int
+    disc_replay_samples: int
+    disc_logit_reg: float
+    disc_grad_penalty: float
+    disc_obs_steps: int
+    disc_normalizer_clip: float
+    disc_eval_batch_size: int
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+
+
+MethodConfig: TypeAlias = FCAMPConfig | AdaMimicConfig | AMPConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +254,7 @@ class ExperimentConfig:
 METHOD_CONFIGS = {
     "fcamp": FCAMPConfig,
     "adamimic": AdaMimicConfig,
+    "amp": AMPConfig,
 }
 
 
@@ -226,6 +270,7 @@ def _construct(cls, values: dict[str, Any]):
     for name in (
         "actor_hidden_dims",
         "critic_hidden_dims",
+        "disc_hidden_dims",
         "hidden_dims",
         "encoder_hidden_dims",
         "head_hidden_dims",
@@ -238,6 +283,8 @@ def _construct(cls, values: dict[str, Any]):
 
 
 def _construct_method_config(method: str, values: dict[str, Any], source_path: Path) -> MethodConfig:
+    if method == "amp":
+        return _construct(AMPConfig, dict(values))
     if method == "adamimic":
         nested = dict(values)
         nested["checkpoint_path"] = _resolve_path(str(nested.get("checkpoint_path", "")), source_path)
@@ -347,6 +394,8 @@ def _validate(config: ExperimentConfig) -> None:
         if config.parameters.stage == "stage2" and env.reset_phase_sampling != "zero":
             raise ValueError("AdaMimic stage2 follows official rsi=false zero reset sampling")
         _validate_adamimic(config.parameters)
+    elif config.method == "amp":
+        _validate_amp(config.parameters)
     else:
         raise ValueError(f"Unsupported method {config.method!r}")
 
@@ -473,3 +522,47 @@ def _validate_adamimic(params: AdaMimicConfig) -> None:
             raise ValueError("AdaMimic stage2 follows official freeze=true; set parameters.freeze_base=true")
         if params.use_smooth:
             raise ValueError("AdaMimic stage2 follows official use_smooth=false")
+
+
+def _validate_amp(params: AMPConfig) -> None:
+    if not params.actor_hidden_dims or not params.critic_hidden_dims or not params.disc_hidden_dims:
+        raise ValueError("AMP actor/critic/discriminator hidden dims cannot be empty")
+    if params.rollout_env_steps < 1:
+        raise ValueError("AMP rollout_env_steps must be positive")
+    if not (0.0 < params.discount_gamma <= 1.0):
+        raise ValueError("AMP discount_gamma must be in (0, 1]")
+    if not (0.0 <= params.gae_lambda <= 1.0):
+        raise ValueError("AMP gae_lambda must be in [0, 1]")
+    if not (0.0 < params.clip_range < 1.0):
+        raise ValueError("AMP clip_range must be in (0, 1)")
+    for name in (
+        "actor_epochs",
+        "actor_batch_size",
+        "critic_epochs",
+        "critic_batch_size",
+        "disc_epochs",
+        "disc_batch_size",
+    ):
+        if int(getattr(params, name)) < 1:
+            raise ValueError(f"AMP {name} must be positive")
+    for name in ("actor_lr", "critic_lr", "disc_lr", "action_std", "actor_init_output_scale"):
+        if float(getattr(params, name)) <= 0.0:
+            raise ValueError(f"AMP {name} must be positive")
+    if params.disc_weight_decay < 0.0:
+        raise ValueError("AMP disc_weight_decay must be non-negative")
+    if params.action_bound_weight < 0.0 or params.action_entropy_weight < 0.0 or params.action_reg_weight < 0.0:
+        raise ValueError("AMP action regularization weights must be non-negative")
+    if params.task_reward_weight < 0.0 or params.disc_reward_weight < 0.0:
+        raise ValueError("AMP reward weights must be non-negative")
+    if params.task_reward_weight == 0.0 and params.disc_reward_weight == 0.0:
+        raise ValueError("AMP requires at least one non-zero reward weight")
+    if params.disc_reward_scale <= 0.0 or not (0.0 < params.disc_reward_epsilon < 1.0):
+        raise ValueError("AMP discriminator reward scale/epsilon are invalid")
+    if params.disc_buffer_size < 1 or params.disc_replay_samples < 0:
+        raise ValueError("AMP discriminator replay settings are invalid")
+    if params.disc_logit_reg < 0.0 or params.disc_grad_penalty < 0.0:
+        raise ValueError("AMP discriminator regularization weights must be non-negative")
+    if params.disc_obs_steps < 2:
+        raise ValueError("AMP disc_obs_steps must be at least 2")
+    if params.disc_normalizer_clip <= 0.0 or params.disc_eval_batch_size < 1:
+        raise ValueError("AMP discriminator normalizer/eval batch settings are invalid")

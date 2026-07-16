@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import numpy as np
 import torch
+from gymnasium import spaces
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, AssetBaseCfg
@@ -89,6 +91,7 @@ class G1Env:
             dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)
+        self._action_space = self._build_action_space()
         min_push, max_push = PUSH_INTERVAL_STEP_RANGE
         self.next_push_step = torch.randint(
             min_push,
@@ -121,6 +124,18 @@ class G1Env:
     @property
     def observation_dim(self) -> int:
         return int(self.action_dim * 2)
+
+    def get_action_space(self) -> spaces.Box:
+        return self._action_space
+
+    def _build_action_space(self) -> spaces.Box:
+        joint_limits = self.robot.data.joint_pos_limits[0].index_select(0, self.action_joint_ids)
+        target_bound = 1.4 * torch.maximum(joint_limits[:, 0].abs(), joint_limits[:, 1].abs())
+        default = self.default_action_joint_pos[0]
+        scale = self.action_scale[0]
+        low = ((-target_bound - default) / scale).detach().cpu().numpy().astype(np.float32)
+        high = ((target_bound - default) / scale).detach().cpu().numpy().astype(np.float32)
+        return spaces.Box(low=low, high=high, dtype=np.float32)
 
     def get_action_joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         joint_pos = self.robot.data.joint_pos.index_select(1, self.action_joint_ids)

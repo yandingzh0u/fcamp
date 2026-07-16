@@ -160,6 +160,8 @@ def _write_minimal_holosoma_motion(path: Path) -> None:
     body_pos = np.zeros((num_frames, 2, 3), dtype=np.float32)
     body_pos[:, 1] = np.array([[1.0, 2.0, 0.9], [1.5, 2.2, 0.95]], dtype=np.float32)
     body_quat = np.zeros((num_frames, 2, 4), dtype=np.float32)
+    # Holosoma motion .npz stores raw rigid-body quaternions as wxyz.  Holosoma
+    # converts to xyzw only at its simulator boundary.
     body_quat[..., 0] = 1.0
     body_lin = np.zeros((num_frames, 2, 3), dtype=np.float32)
     body_lin[:, 1] = np.array([0.5, -0.2, 0.1], dtype=np.float32)
@@ -193,6 +195,10 @@ def test_holosoma_loader_reconstructs_fixed_head_body(tmp_path: Path) -> None:
     )
 
     offset = torch.tensor([0.0039635, 0.0, -0.044])
+    torch.testing.assert_close(
+        motion.body_quat_full_w[:, :2],
+        torch.tensor([1.0, 0.0, 0.0, 0.0]).expand(2, 2, 4),
+    )
     torso_pos = motion.body_pos_full_w[:, 1]
     torch.testing.assert_close(motion.body_pos_full_w[:, 2], torso_pos + offset)
     torch.testing.assert_close(motion.body_quat_full_w[:, 2], motion.body_quat_full_w[:, 1])

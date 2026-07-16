@@ -75,6 +75,14 @@ class G1MimicEnv(
         termination_names = MIMIC_TERMINATION_BODY_NAMES
         self.termination_body_indices = [self.track_body_names.index(name) for name in termination_names]
         self.contact_sensor = self.scene["contact_forces"]
+        self.contact_robot_body_ids = torch.tensor(
+            [
+                self.robot.body_names.index(body_name) if body_name in self.robot.body_names else -1
+                for body_name in self.contact_sensor.body_names
+            ],
+            dtype=torch.long,
+            device=self.device,
+        )
 
         def _contact_allowed(body_name: str) -> bool:
             return any(token in body_name for token in CONTACT_ALLOWED_SUBSTRINGS)
@@ -84,6 +92,28 @@ class G1MimicEnv(
                 self.contact_sensor.body_names.index(body_name)
                 for body_name in self.contact_sensor.body_names
                 if not _contact_allowed(body_name)
+            ],
+            dtype=torch.long,
+            device=self.device,
+        )
+        amp_contact_allowed = (
+            "knee_link",
+            "ankle_pitch_link",
+            "ankle_roll_link",
+            "hip_roll_link",
+            "elbow_link",
+            "wrist_roll_link",
+            "wrist_pitch_link",
+            "wrist_yaw_link",
+            "rubber_hand",
+            "_FOOT",
+            *CONTACT_ALLOWED_SUBSTRINGS,
+        )
+        self.amp_undesired_contact_body_ids = torch.tensor(
+            [
+                self.contact_sensor.body_names.index(body_name)
+                for body_name in self.contact_sensor.body_names
+                if not any(token in body_name for token in amp_contact_allowed)
             ],
             dtype=torch.long,
             device=self.device,

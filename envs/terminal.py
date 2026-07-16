@@ -12,6 +12,30 @@ from .spec import (
 
 
 class MimicTerminationMixin:
+    def _amp_ground_contact_forces_w(self) -> torch.Tensor:
+        """MimicKit AMP uses ground-filtered contact forces for early termination."""
+        force_matrix_w = getattr(self.contact_sensor.data, "force_matrix_w", None)
+        if torch.is_tensor(force_matrix_w) and force_matrix_w.numel() > 0:
+            return force_matrix_w.sum(dim=-2)
+        net_forces_w = getattr(self.contact_sensor.data, "net_forces_w", None)
+        if not torch.is_tensor(net_forces_w):
+            net_forces_w = self.contact_sensor.data.net_forces_w_history[:, -1]
+        ground_forces = net_forces_w.clone()
+        contact_robot_body_ids = getattr(self, "contact_robot_body_ids", None)
+        if torch.is_tensor(contact_robot_body_ids):
+            body_height = torch.full(
+                ground_forces.shape[:2],
+                float("inf"),
+                dtype=ground_forces.dtype,
+                device=ground_forces.device,
+            )
+            known = contact_robot_body_ids >= 0
+            if bool(known.any()):
+                robot_body_ids = contact_robot_body_ids[known]
+                body_height[:, known] = self.robot.data.body_pos_w[:, robot_body_ids, 2]
+            ground_forces[body_height > 0.3] = 0.0
+        return ground_forces
+
     def compute_termination(self) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         context = self.get_tracking_context()
         reference = context["reference"]
@@ -40,6 +64,49 @@ class MimicTerminationMixin:
         ee_z_error_mean = ee_z_error.mean(dim=-1)
         time_out = self.episode_steps >= self.max_episode_steps
 
+        if getattr(self, "termination_mode", "tracking") == "amp":
+            ground_contact_forces = self._amp_ground_contact_forces_w()
+            amp_undesired_contact_body_ids = getattr(
+                self,
+                "amp_undesired_contact_body_ids",
+                self.undesired_contact_body_ids,
+            )
+            amp_contact_force_by_body = torch.zeros(
+                self.num_envs,
+                int(amp_undesired_contact_body_ids.numel()),
+                device=self.device,
+            )
+            if amp_undesired_contact_body_ids.numel() > 0:
+                amp_contact_force_by_body = torch.norm(
+                    ground_contact_forces[:, amp_undesired_contact_body_ids],
+                    dim=-1,
+                )
+                fall_contact = torch.any(amp_contact_force_by_body > 0.1, dim=-1)
+            else:
+                fall_contact = torch.zeros_like(time_out)
+            fall_contact = fall_contact & (self.episode_steps > 0)
+            motion_complete = torch.zeros_like(time_out)
+            if self.terminate_on_motion_end:
+                motion_complete = self._motion_end_mask
+            done = time_out | fall_contact | motion_complete
+            zeros = torch.zeros_like(time_out)
+            return done, {
+                "time_out": time_out,
+                "motion_complete": motion_complete,
+                "anchor_pos_bad": zeros,
+                "anchor_ori_bad": zeros,
+                "ee_body_bad": fall_contact,
+                "fall_contact": fall_contact,
+            }, {
+                "anchor_z_error": anchor_z_error,
+                "anchor_gravity_z_error": anchor_gravity_z_error,
+                "robot_anchor_height": robot_anchor_height,
+                "robot_anchor_tilt": robot_anchor_tilt,
+                "ee_z_error_max": ee_z_error_max,
+                "ee_z_error_mean": ee_z_error_mean,
+                "ee_z_error_by_body": ee_z_error,
+                "amp_undesired_contact_force_by_body": amp_contact_force_by_body,
+            }
 
         motion_complete = torch.zeros_like(time_out)
         if self.terminate_on_motion_end:

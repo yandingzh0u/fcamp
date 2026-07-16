@@ -127,6 +127,9 @@ class MimicMotionReference:
 
 
         body_pos_raw = np.asarray(data["body_pos_w"], dtype=np.float32)
+        # Holosoma motion ``.npz`` files store raw body quaternions as wxyz.
+        # Holosoma converts them to xyzw only at its simulator boundary; IsaacLab
+        # and MimicKit-facing features here both stay in wxyz.
         body_quat_raw = np.asarray(data["body_quat_w"], dtype=np.float32)
         body_lin_raw = np.asarray(data["body_lin_vel_w"], dtype=np.float32)
         body_ang_raw = np.asarray(data["body_ang_vel_w"], dtype=np.float32)

@@ -61,6 +61,7 @@ class MimicStepMixin:
         # normally disables auto-reset within a chunk, while this also makes the
         # semantics correct for evaluation code that uses auto_reset=True.
         imitation_frame = self.get_imitation_policy_frame()
+        amp_policy_observation = self.get_amp_policy_observation()
         reset_env_ids = torch.empty(0, dtype=torch.long, device=self.device)
         reset_phase_indices = torch.empty(0, dtype=torch.long, device=self.device)
 
@@ -84,8 +85,9 @@ class MimicStepMixin:
             not_reset = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
             if reset_env_ids.numel() > 0:
                 not_reset[reset_env_ids] = False
+            # MimicKit AMP disables motion-end termination without silently
+            # reinitializing the character; reference queries clamp at the end.
             self.phase_steps[not_reset] = next_phase_steps[not_reset]
-            motion_wrap_env_ids, motion_wrap_phase_indices = self._resample_finished_motions()
 
 
         self._fold_adaptive_sampler()
@@ -106,6 +108,7 @@ class MimicStepMixin:
             "reference_dt": reference_dt_tensor,
             "reference_frame_delta": reference_frame_delta,
             "imitation_frame": imitation_frame,
+            "amp_policy_observation": amp_policy_observation,
             "reset_env_ids": reset_env_ids,
             "reset_phase_indices": reset_phase_indices,
             "motion_wrap_env_ids": motion_wrap_env_ids,

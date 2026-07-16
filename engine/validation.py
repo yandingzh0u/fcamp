@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 import torch
+from isaaclab.utils.math import quat_error_magnitude
 
 from envs.spec import EE_Z_TERMINATION_THRESHOLD
 from .env_state import restore_env_state, snapshot_env_state
@@ -49,6 +50,50 @@ def _split_reference_action(algo, env, payload: torch.Tensor) -> tuple[torch.Ten
     return payload[..., : env.action_dim], payload[..., -1]
 
 
+def _reset_alignment_metrics(env, prefix: str) -> dict[str, float]:
+    reference = env.get_reference_state()
+    robot_body_pos = env.robot.data.body_pos_w[:, env.track_body_ids]
+    robot_body_quat = env.robot.data.body_quat_w[:, env.track_body_ids]
+    body_pos_err = torch.linalg.norm(robot_body_pos - reference["body_pos_w"], dim=-1)
+    body_ori_deg = (
+        quat_error_magnitude(reference["body_quat_w"], robot_body_quat)
+        * (180.0 / 3.141592653589793)
+    )
+    body_pos_err_mean_by_body = body_pos_err.mean(dim=0)
+    body_ori_deg_mean_by_body = body_ori_deg.mean(dim=0)
+    body_pos_top_idx = int(torch.argmax(body_pos_err_mean_by_body).item())
+    body_ori_top_idx = int(torch.argmax(body_ori_deg_mean_by_body).item())
+    joint_pos, joint_vel = env.get_action_joint_state()
+    root_ori_deg = (
+        quat_error_magnitude(reference["root_quat_w"], env.robot.data.root_quat_w)
+        * (180.0 / 3.141592653589793)
+    )
+    anchor_ori_deg = (
+        quat_error_magnitude(reference["anchor_quat_w"], env.robot.data.body_quat_w[:, env.anchor_body_id])
+        * (180.0 / 3.141592653589793)
+    )
+    return {
+        f"{prefix}/reset_root_pos_err": float(
+            torch.linalg.norm(env.robot.data.root_pos_w - reference["root_pos_w"], dim=-1).mean().item()
+        ),
+        f"{prefix}/reset_root_ori_deg": float(root_ori_deg.mean().item()),
+        f"{prefix}/reset_anchor_pos_err": float(
+            torch.linalg.norm(env.robot.data.body_pos_w[:, env.anchor_body_id] - reference["anchor_pos_w"], dim=-1)
+            .mean()
+            .item()
+        ),
+        f"{prefix}/reset_anchor_ori_deg": float(anchor_ori_deg.mean().item()),
+        f"{prefix}/reset_joint_pos_err": float(torch.abs(joint_pos - reference["joint_pos"]).mean().item()),
+        f"{prefix}/reset_joint_vel_err": float(torch.abs(joint_vel - reference["joint_vel"]).mean().item()),
+        f"{prefix}/reset_body_pos_err": float(body_pos_err.mean().item()),
+        f"{prefix}/reset_body_pos_max": float(body_pos_err_mean_by_body[body_pos_top_idx].item()),
+        f"{prefix}/reset_body_pos_top_index": float(body_pos_top_idx),
+        f"{prefix}/reset_body_ori_deg": float(body_ori_deg.mean().item()),
+        f"{prefix}/reset_body_ori_max": float(body_ori_deg_mean_by_body[body_ori_top_idx].item()),
+        f"{prefix}/reset_body_ori_top_index": float(body_ori_top_idx),
+    }
+
+
 def run_validation_rollout(
     trainer, fixed_seed: int | None = None, start_phase_override: int | None = None
 ) -> dict[str, float]:
@@ -74,7 +119,7 @@ def run_validation_rollout(
 
 
     original_terminate_on_motion_end = env.terminate_on_motion_end
-    env.terminate_on_motion_end = True
+    env.terminate_on_motion_end = getattr(env, "termination_mode", "tracking") != "amp"
 
 
     original_max_episode_steps = env.max_episode_steps
@@ -98,6 +143,7 @@ def run_validation_rollout(
     print("[VALIDATION_RESET_START]", flush=True)
     current_obs = env.reset(phase_indices=validation_phase)
     print(f"[VALIDATION_RESET_DONE] time={time.perf_counter() - reset_t0:.3f}s", flush=True)
+    reset_metrics = _reset_alignment_metrics(env, "validation")
 
     cached_chunk: torch.Tensor | None = None
     chunk_index = horizon
@@ -118,6 +164,28 @@ def run_validation_rollout(
     ee_body_count = len(env.ee_body_names)
     done_ee_z_error_record = torch.zeros(num_envs, ee_body_count, device=env.device)
     done_ee_bad_record = torch.zeros(num_envs, ee_body_count, dtype=torch.bool, device=env.device)
+    amp_contact_body_ids = getattr(
+        env,
+        "amp_undesired_contact_body_ids",
+        torch.empty(0, dtype=torch.long, device=env.device),
+    )
+    amp_contact_body_ids = amp_contact_body_ids.to(device=env.device, dtype=torch.long)
+    done_amp_contact_force_record = torch.zeros(
+        num_envs,
+        int(amp_contact_body_ids.numel()),
+        device=env.device,
+    )
+    track_body_count = len(env.track_body_names)
+    done_action_abs_record = torch.zeros(num_envs, device=env.device)
+    done_action_max_record = torch.zeros(num_envs, device=env.device)
+    done_root_pos_err_record = torch.zeros(num_envs, device=env.device)
+    done_root_ori_deg_record = torch.zeros(num_envs, device=env.device)
+    done_anchor_pos_err_record = torch.zeros(num_envs, device=env.device)
+    done_anchor_ori_deg_record = torch.zeros(num_envs, device=env.device)
+    done_joint_pos_err_record = torch.zeros(num_envs, device=env.device)
+    done_joint_vel_err_record = torch.zeros(num_envs, device=env.device)
+    done_body_pos_err_record = torch.zeros(num_envs, track_body_count, device=env.device)
+    done_body_z_err_record = torch.zeros(num_envs, track_body_count, device=env.device)
     diag_keys = [
         "diag_torso_ori_deg", "diag_left_wrist_ori_deg", "diag_right_wrist_ori_deg",
         "diag_left_elbow_ori_deg", "diag_right_elbow_ori_deg",
@@ -165,6 +233,47 @@ def run_validation_rollout(
                     ee_z_error_by_body = debug_terms["ee_z_error_by_body"][new_done]
                     done_ee_z_error_record[new_done] = ee_z_error_by_body
                     done_ee_bad_record[new_done] = ee_z_error_by_body > EE_Z_TERMINATION_THRESHOLD
+                    amp_contact_force = debug_terms.get("amp_undesired_contact_force_by_body")
+                    if torch.is_tensor(amp_contact_force) and amp_contact_force.shape[1:] == done_amp_contact_force_record.shape[1:]:
+                        done_amp_contact_force_record[new_done] = amp_contact_force[new_done]
+                    reference = env.get_reference_state()
+                    robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
+                    robot_body_pos = env.robot.data.body_pos_w[:, env.track_body_ids]
+                    robot_body_quat = env.robot.data.body_quat_w[:, env.track_body_ids]
+                    root_ori_deg = (
+                        quat_error_magnitude(reference["root_quat_w"], env.robot.data.root_quat_w)
+                        * (180.0 / 3.141592653589793)
+                    )
+                    anchor_ori_deg = (
+                        quat_error_magnitude(
+                            reference["anchor_quat_w"],
+                            env.robot.data.body_quat_w[:, env.anchor_body_id],
+                        )
+                        * (180.0 / 3.141592653589793)
+                    )
+                    body_pos_err = torch.linalg.norm(robot_body_pos - reference["body_pos_w"], dim=-1)
+                    body_z_err = torch.abs(robot_body_pos[..., 2] - reference["body_pos_w"][..., 2])
+                    done_action_abs_record[new_done] = action[new_done].abs().mean(dim=-1)
+                    done_action_max_record[new_done] = action[new_done].abs().max(dim=-1).values
+                    done_root_pos_err_record[new_done] = torch.linalg.norm(
+                        env.robot.data.root_pos_w[new_done] - reference["root_pos_w"][new_done],
+                        dim=-1,
+                    )
+                    done_root_ori_deg_record[new_done] = root_ori_deg[new_done]
+                    done_anchor_pos_err_record[new_done] = torch.linalg.norm(
+                        env.robot.data.body_pos_w[new_done, env.anchor_body_id]
+                        - reference["anchor_pos_w"][new_done],
+                        dim=-1,
+                    )
+                    done_anchor_ori_deg_record[new_done] = anchor_ori_deg[new_done]
+                    done_joint_pos_err_record[new_done] = torch.abs(
+                        robot_joint_pos[new_done] - reference["joint_pos"][new_done]
+                    ).mean(dim=-1)
+                    done_joint_vel_err_record[new_done] = torch.abs(
+                        robot_joint_vel[new_done] - reference["joint_vel"][new_done]
+                    ).mean(dim=-1)
+                    done_body_pos_err_record[new_done] = body_pos_err[new_done]
+                    done_body_z_err_record[new_done] = body_z_err[new_done]
                 survived_steps += active_mask.to(dtype=torch.long)
                 cumulative_reward += active_mask.float() * reward
                 reward_terms = info.get("reward_terms", {})
@@ -210,6 +319,7 @@ def run_validation_rollout(
         "validation/return_mean": float(cumulative_reward.mean().item()),
         "validation/done_frac": float(done.float().mean().item()),
     }
+    metrics.update(reset_metrics)
     _pushed = validation_first_push_step >= 0
     _died = done & (~done_term_record["motion_complete"])
     metrics["validation/push_applied_frac"] = float(_pushed.float().mean().item())
@@ -252,11 +362,41 @@ def run_validation_rollout(
             "validation/ee_z_mean": float(done_debug_record["ee_z_error_mean"][done].mean().item()),
             "validation/anchor_z": float(done_debug_record["anchor_z_error"][done].mean().item()),
             "validation/anchor_gravity": float(done_debug_record["anchor_gravity_z_error"][done].mean().item()),
+            "validation/fail_action_abs": float(done_action_abs_record[done].mean().item()),
+            "validation/fail_action_max": float(done_action_max_record[done].mean().item()),
+            "validation/fail_root_pos_err": float(done_root_pos_err_record[done].mean().item()),
+            "validation/fail_root_ori_deg": float(done_root_ori_deg_record[done].mean().item()),
+            "validation/fail_anchor_pos_err": float(done_anchor_pos_err_record[done].mean().item()),
+            "validation/fail_anchor_ori_deg": float(done_anchor_ori_deg_record[done].mean().item()),
+            "validation/fail_joint_pos_err": float(done_joint_pos_err_record[done].mean().item()),
+            "validation/fail_joint_vel_err": float(done_joint_vel_err_record[done].mean().item()),
+            "validation/fail_body_pos_err": float(done_body_pos_err_record[done].mean().item()),
+            "validation/fail_body_z_err": float(done_body_z_err_record[done].mean().item()),
         })
+        body_pos_mean = done_body_pos_err_record[done].mean(dim=0)
+        body_z_mean = done_body_z_err_record[done].mean(dim=0)
+        body_pos_top_idx = int(torch.argmax(body_pos_mean).item())
+        body_z_top_idx = int(torch.argmax(body_z_mean).item())
+        metrics["validation/fail_body_pos_top_index"] = float(body_pos_top_idx)
+        metrics["validation/fail_body_pos_top_err"] = float(body_pos_mean[body_pos_top_idx].item())
+        metrics["validation/fail_body_z_top_index"] = float(body_z_top_idx)
+        metrics["validation/fail_body_z_top_err"] = float(body_z_mean[body_z_top_idx].item())
         for index, body_name in enumerate(env.ee_body_names):
             sname = short_body_name(body_name)
             metrics[f"validation/ee_{sname}_bad_frac"] = float(done_ee_bad_record[done, index].float().mean().item())
             metrics[f"validation/ee_{sname}_z_error"] = float(done_ee_z_error_record[done, index].mean().item())
+        if amp_contact_body_ids.numel() > 0:
+            failed_contact = done_amp_contact_force_record[done]
+            contact_frac = (failed_contact > 0.1).float().mean(dim=0)
+            contact_force = failed_contact.mean(dim=0)
+            score = contact_frac * 1000.0 + contact_force
+            top_count = min(3, int(amp_contact_body_ids.numel()))
+            top_indices = torch.argsort(score, descending=True)[:top_count]
+            for rank, contact_index in enumerate(top_indices, start=1):
+                idx = int(contact_index.item())
+                metrics[f"validation/contact_top{rank}_index"] = float(idx)
+                metrics[f"validation/contact_top{rank}_frac"] = float(contact_frac[idx].item())
+                metrics[f"validation/contact_top{rank}_force"] = float(contact_force[idx].item())
 
     safe_steps = diag_steps.clamp(min=1.0)
     for key in diag_keys:

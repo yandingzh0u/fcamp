@@ -12,10 +12,63 @@ from isaaclab.utils.math import (
 )
 
 from .spec import CRITIC_OBS_DIM, OBS_DIM
-from .imitation_data import build_g1_imitation_frame
+from .imitation_data import (
+    G1_IMITATION_NUM_KEY_BODIES,
+    build_g1_imitation_frame,
+    joint_positions_to_tan_norm,
+    quat_wxyz_to_tan_norm,
+)
 
 
 class MimicObservationMixin:
+    def get_amp_policy_observation(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        """MimicKit AMP actor/critic observation: character state, not disc state."""
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+        if env_ids.ndim != 1:
+            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
+        joint_pos, joint_vel = self.get_action_joint_state()
+        root_pos = self.robot.data.root_pos_w.index_select(0, env_ids)
+        env_origins = self.scene.env_origins.index_select(0, env_ids)
+        root_pos_local = root_pos - env_origins
+        key_body_pos = self.robot.data.body_pos_w.index_select(0, env_ids)[
+            ..., self.imitation_key_body_ids, :
+        ]
+        key_body_pos_local = key_body_pos - env_origins.unsqueeze(-2)
+        key_pos = key_body_pos_local - root_pos_local.unsqueeze(-2)
+        if key_pos.shape[-2:] != (G1_IMITATION_NUM_KEY_BODIES, 3):
+            raise RuntimeError(
+                f"Expected AMP key bodies {(G1_IMITATION_NUM_KEY_BODIES, 3)}, "
+                f"got {tuple(key_pos.shape[-2:])}"
+            )
+        joint_rot_obs = joint_positions_to_tan_norm(joint_pos.index_select(0, env_ids))
+        observation = torch.cat(
+            [
+                root_pos_local[:, 2:3],
+                quat_wxyz_to_tan_norm(self.robot.data.root_quat_w.index_select(0, env_ids)),
+                self.robot.data.root_lin_vel_w.index_select(0, env_ids),
+                self.robot.data.root_ang_vel_w.index_select(0, env_ids),
+                joint_rot_obs.reshape(env_ids.numel(), -1),
+                joint_vel.index_select(0, env_ids),
+                key_pos.reshape(env_ids.numel(), -1),
+            ],
+            dim=-1,
+        )
+        expected_dim = (
+            1
+            + 6
+            + 3
+            + 3
+            + 6 * joint_pos.shape[-1]
+            + joint_vel.shape[-1]
+            + 3 * G1_IMITATION_NUM_KEY_BODIES
+        )
+        if observation.shape[-1] != expected_dim:
+            raise RuntimeError(
+                f"Expected AMP policy observation dim {expected_dim}, got {observation.shape[-1]}"
+            )
+        return observation
+
     def get_imitation_policy_frame(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         """Return clean post-action robot state for imitation, without task reference data."""
         if env_ids is None:

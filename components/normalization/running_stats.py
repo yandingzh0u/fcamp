@@ -99,19 +99,19 @@ class RunningNormalizer(nn.Module):
         return torch.clamp(normalized, -self.clip, self.clip)
 
     @torch.no_grad()
-    def statistics(self, samples: torch.Tensor | None = None) -> dict[str, float]:
+    def statistics(self, samples: torch.Tensor | None = None, prefix: str = "disc_norm") -> dict[str, float]:
         metrics = {
-            "disc_norm/count": float(self.count.item()),
-            "disc_norm/pending_count": float(self.pending_count.item()),
-            "disc_norm/frozen": float(self.frozen.item()),
-            "disc_norm/mean_abs": float(self.mean.abs().mean().item()),
-            "disc_norm/std_mean": float(self.std.mean().item()),
-            "disc_norm/std_min": float(self.std.min().item()),
-            "disc_norm/std_max": float(self.std.max().item()),
+            f"{prefix}/count": float(self.count.item()),
+            f"{prefix}/pending_count": float(self.pending_count.item()),
+            f"{prefix}/frozen": float(self.frozen.item()),
+            f"{prefix}/mean_abs": float(self.mean.abs().mean().item()),
+            f"{prefix}/std_mean": float(self.std.mean().item()),
+            f"{prefix}/std_min": float(self.std.min().item()),
+            f"{prefix}/std_max": float(self.std.max().item()),
         }
         if samples is not None:
             normalized_unclipped = (samples - self.mean.to(samples)) / self.std.to(samples)
-            metrics["disc_norm/clip_fraction"] = float(
+            metrics[f"{prefix}/clip_fraction"] = float(
                 (normalized_unclipped.abs() > self.clip).float().mean().item()
             )
         return metrics
