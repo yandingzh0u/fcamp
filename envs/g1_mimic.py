@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 
 from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
@@ -91,7 +93,7 @@ class G1MimicEnv(
         termination_names = MIMIC_TERMINATION_BODY_NAMES
         self.termination_body_indices = [self.track_body_names.index(name) for name in termination_names]
         self.contact_sensor = self.scene["contact_forces"]
-        if self.uses_mimickit_motion_reference:
+        if self.uses_ground_contact_filter:
             force_matrix = self.contact_sensor.data.force_matrix_w
             expected_shape = (self.num_envs, len(self.contact_sensor.body_names), 1, 3)
             if not torch.is_tensor(force_matrix) or tuple(force_matrix.shape) != expected_shape:
@@ -224,11 +226,9 @@ class G1MimicEnv(
 
     @property
     def motion_frame_delta(self) -> float:
-        return mimickit_frame_delta(self.motion.fps, self.dt) if self.uses_mimickit_motion_reference else 1.0
+        return mimickit_frame_delta(self.motion.fps, self.dt)
 
     def full_motion_control_steps(self) -> int:
-        if not self.uses_mimickit_motion_reference:
-            return max(1, self.motion_end_phase - self.motion_start_phase)
         return mimickit_full_motion_steps(
             self.motion_start_phase,
             self.motion_end_phase,
@@ -279,7 +279,7 @@ class G1MimicEnv(
 
     def _adaptive_phase_range(self, horizon: int) -> tuple[int, int]:
 
-        horizon = max(1, int(horizon))
+        horizon = max(1, int(math.ceil(float(horizon) * self.motion_frame_delta)))
         min_phase = self.motion_start_phase
         max_phase = min(
             self.motion_end_phase,
@@ -291,9 +291,9 @@ class G1MimicEnv(
         if num_samples < 0:
             raise ValueError(f"num_samples must be >= 0, got {num_samples}")
         if num_samples == 0:
-            dtype = torch.float32 if self.uses_mimickit_motion_reference else torch.long
+            dtype = torch.float32 if self.reset_phase_sampling == "continuous_uniform" else torch.long
             return torch.empty(0, dtype=dtype, device=self.device)
-        if self.uses_mimickit_motion_reference:
+        if self.reset_phase_sampling == "continuous_uniform":
             return sample_mimickit_phase(
                 num_samples,
                 self.motion_start_phase,
@@ -374,7 +374,7 @@ class G1MimicEnv(
         root_ang_vel = reference["root_ang_vel_w"].clone()
         joint_pos = reference["joint_pos"].clone()
         joint_vel = reference["joint_vel"].clone()
-        if self.config.reset_noise:
+        if self.reset_noise:
             self._apply_official_reset_noise(env_ids, root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos)
         self._write_robot_state(
             root_pos=root_pos,
@@ -448,6 +448,8 @@ class G1MimicEnv(
         self.record_motion_failures = True
         self.termination_mode = str(self.config.termination_mode)
         self.terminate_on_motion_end = bool(self.config.terminate_on_motion_end)
+        self.reset_noise = bool(self.config.reset_noise)
+        self.interval_pushes = bool(self.config.interval_pushes)
 
     def _record_adaptive_failures(
         self,
@@ -521,7 +523,7 @@ class G1MimicEnv(
         root_ang_vel = reference["root_ang_vel_w"].clone()
         joint_pos = reference["joint_pos"].clone()
         joint_vel = reference["joint_vel"].clone()
-        if self.config.reset_noise:
+        if self.reset_noise:
             self._apply_official_reset_noise(env_ids, root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos)
         self._write_robot_state(
             root_pos=root_pos,

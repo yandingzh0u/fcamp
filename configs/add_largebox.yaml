@@ -1,19 +1,20 @@
 method: add
 environment:
+  platform_profile: g1_largebox_50hz
   task: largebox_plane
   device: cuda:0
   num_envs: 4096
-  sim_dt: 0.03333333333333333
+  sim_dt: 0.02
   decimation: 4
   fix_root_link: false
   startup_randomization: false
-  max_episode_steps: 300
+  max_episode_steps: 500
   motion_start_phase: 0
   motion_end_phase: -1
   reset_noise: false
   interval_pushes: false
   observation_noise: false
-  reset_phase_sampling: uniform
+  reset_phase_sampling: continuous_uniform
   rsi_keyframe_count: 21
   adaptive_motion_sampling: false
   adaptive_num_bins: 0
@@ -21,11 +22,12 @@ environment:
   adaptive_predecessor_ratio: 0.8
   adaptive_predecessor_lookback_bins: 1
   action_rate_weight: 0.1
-  # ADD is the official algorithm; termination remains the largebox task's
-  # ground-contact semantics and ends cleanly at the motion boundary.
+  # Termination belongs to the shared largebox task, not to MimicKit's walking
+  # asset. ADD's actor, discriminator, reward and optimizer remain official.
   termination_mode: amp
   terminate_on_motion_end: true
   motion_reference_mode: mimickit_add
+  root_velocity_mode: link
 
 parameters:
   # Mirrors MimicKit data/agents/add_g1_agent.yaml while keeping this repo's
@@ -35,6 +37,7 @@ parameters:
   disc_hidden_dims: [1024, 512]
   activation: relu
   rollout_env_steps: 32
+  # MimicKit applies these values per control transition.
   discount_gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
@@ -87,5 +90,5 @@ training:
   validation_start_phase: 0
   validation_directional_start_phase: -1
   validation_fixed_seed: 1
-  validation_done_frac_early_stop: 0.98
+  validation_done_frac_early_stop: 1.0
   target_validation_steps: 0

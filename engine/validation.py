@@ -153,16 +153,22 @@ def run_validation_rollout(
     cuda_rng_state = None
     original_obs_noise = env.observation_noise
     env.observation_noise = False
+    original_reset_noise = env.reset_noise
+    original_interval_pushes = env.interval_pushes
+    env.reset_noise = False
+    env.interval_pushes = False
 
     original_record_failures = env.record_motion_failures
     env.record_motion_failures = False
 
 
+    # The leaderboard evaluator is method-agnostic. Training recipes may use
+    # their paper-native termination, noise and push curricula, but validation
+    # always uses the clean largebox task protocol and ends at motion completion.
+    original_termination_mode = env.termination_mode
     original_terminate_on_motion_end = env.terminate_on_motion_end
-    if trainer.cfg.method == "amp":
-        env.terminate_on_motion_end = False
-    else:
-        env.terminate_on_motion_end = original_terminate_on_motion_end
+    env.termination_mode = "amp"
+    env.terminate_on_motion_end = True
 
 
     original_max_episode_steps = env.max_episode_steps
@@ -188,6 +194,7 @@ def run_validation_rollout(
     chunk_index = horizon
     done = torch.zeros(num_envs, dtype=torch.bool, device=env.device)
     survived_steps = torch.zeros(num_envs, dtype=torch.long, device=env.device)
+    latest_phase_steps = validation_phase.float().clone()
 
 
     death_phase_record = torch.zeros(num_envs, dtype=torch.float32, device=env.device)
@@ -295,6 +302,7 @@ def run_validation_rollout(
                     auto_reset=False,
                     reference_dt=reference_dt,
                 )
+                latest_phase_steps = info["termination_phase_steps"].float().clone()
                 ref_now = env.motion.get_frame(info["phase_start_steps"])["joint_pos"]
                 ref_next = env.motion.get_frame(info["reference_phase_steps"])["joint_pos"]
                 action_ref_now_by_joint = torch.abs(action_target - ref_now)
@@ -402,9 +410,13 @@ def run_validation_rollout(
                 if bool(done.all()):
                     break
         validation_first_push_step = env.first_push_step.clone()
+        final_phase_record = torch.where(done, death_phase_record, latest_phase_steps)
     finally:
         env.observation_noise = original_obs_noise
+        env.reset_noise = original_reset_noise
+        env.interval_pushes = original_interval_pushes
         env.record_motion_failures = original_record_failures
+        env.termination_mode = original_termination_mode
         env.terminate_on_motion_end = original_terminate_on_motion_end
         env.max_episode_steps = original_max_episode_steps
         restore_env_state(env, training_snapshot)
@@ -415,6 +427,12 @@ def run_validation_rollout(
         if was_training:
             policy.train()
 
+    motion_span = max(1.0, float(env.motion_end_phase - max(0, int(start_phase))))
+    reference_progress = torch.clamp(
+        (final_phase_record - float(max(0, int(start_phase)))) / motion_span,
+        min=0.0,
+        max=1.0,
+    )
     metrics: dict[str, float] = {
         "validation/steps_mean": float(survived_steps.float().mean().item()),
         "validation/steps_min": float(survived_steps.min().item()),
@@ -427,6 +445,12 @@ def run_validation_rollout(
         "validation/survival_seconds_p50": float(
             torch.quantile(survived_steps.float(), 0.50).item() * env.dt
         ),
+        "validation/survival_seconds_p95": float(
+            torch.quantile(survived_steps.float(), 0.95).item() * env.dt
+        ),
+        "validation/reference_progress_mean": float(reference_progress.mean().item()),
+        "validation/reference_progress_p50": float(torch.quantile(reference_progress, 0.50).item()),
+        "validation/reference_progress_p95": float(torch.quantile(reference_progress, 0.95).item()),
         "validation/full_motion_control_steps": float(env.full_motion_control_steps()),
     }
     metrics.update(reset_metrics)
@@ -435,6 +459,7 @@ def run_validation_rollout(
         "validation/time_out_frac": float(timeout.float().mean().item()),
         "validation/motion_complete_frac": float(motion_complete.float().mean().item()),
         "validation/failure_frac": float(failure.float().mean().item()),
+        "validation/censored_frac": float((~done).float().mean().item()),
         "validation/anchor_pos_bad_frac": float(done_term_record["anchor_pos_bad"].float().mean().item()),
         "validation/anchor_ori_bad_frac": float(done_term_record["anchor_ori_bad"].float().mean().item()),
         "validation/ee_body_bad_frac": float(done_term_record["ee_body_bad"].float().mean().item()),

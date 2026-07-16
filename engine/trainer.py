@@ -21,6 +21,8 @@ class CoreTrainer:
         self.algo_cfg = cfg.parameters
         self.train_cfg = cfg.training
         self.start_update = 1
+        self.env_transitions_total = 0
+        self.train_wall_seconds_total = 0.0
 
         torch.manual_seed(cfg.training.seed)
         if torch.cuda.is_available():
@@ -58,6 +60,23 @@ class CoreTrainer:
             collect_time = time.perf_counter() - t0
 
             metrics = self.algo.update(rollout, collect_time)
+            iteration_s = time.perf_counter() - t0
+            transitions_update = int(self.env_cfg.num_envs) * int(self.algo_cfg.rollout_env_steps)
+            self.env_transitions_total += transitions_update
+            self.train_wall_seconds_total += iteration_s
+            metrics.update(
+                {
+                    "samples/env_transitions_update": float(transitions_update),
+                    "samples/env_transitions_total": float(self.env_transitions_total),
+                    "progress/control_seconds_per_env": float(
+                        self.env_transitions_total * self.env_cfg.sim_dt / self.env_cfg.num_envs
+                    ),
+                    "perf/iteration_s": float(iteration_s),
+                    "perf/train_wall_s_total": float(self.train_wall_seconds_total),
+                    "perf/env_transitions_per_s": float(transitions_update / max(iteration_s, 1.0e-9)),
+                    "health/parameters_finite": float(metrics.get("system/parameters_finite", 1.0)),
+                }
+            )
 
 
             del rollout
@@ -66,6 +85,11 @@ class CoreTrainer:
 
             if update_idx % tcfg.log_every == 0:
                 self.algo.log(update_idx, tcfg.max_updates, metrics)
+                print(
+                    f"[PROGRESS] env_steps={self.env_transitions_total} "
+                    f"iteration={iteration_s:.3f}s throughput={metrics['perf/env_transitions_per_s']:.1f}",
+                    flush=True,
+                )
 
             if tcfg.validation_every > 0 and update_idx % tcfg.validation_every == 0:
                 fixed_seed = (
@@ -82,7 +106,7 @@ class CoreTrainer:
                 )
                 vt0 = time.perf_counter()
                 metrics["validation/fixed_seed"] = float(fixed_seed)
-                metrics["validation/protocol_version"] = 2.0
+                metrics["validation/protocol_version"] = 3.0
                 metrics["validation/max_steps"] = float(val_max_steps)
                 metrics.update(run_validation_rollout(self, fixed_seed=fixed_seed))
                 dir_phase = tcfg.validation_directional_start_phase
@@ -140,7 +164,7 @@ class CoreTrainer:
         )
         metrics = run_validation_rollout(self, fixed_seed=fixed_seed)
         metrics["validation/fixed_seed"] = float(fixed_seed)
-        metrics["validation/protocol_version"] = 2.0
+        metrics["validation/protocol_version"] = 3.0
         metrics["validation/max_steps"] = float(validation_max_steps(self.train_cfg, self.env))
         log_validation_metrics(self.env, metrics)
         self.metrics_logger.write_validation_summary(self.start_update - 1, metrics)

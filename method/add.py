@@ -12,6 +12,7 @@ from components.imitation.style_reward import discriminator_style_reward, style_
 from components.normalization.diff_stats import DiffNormalizer
 from components.normalization.running_stats import RunningNormalizer
 from components.replay.sample_buffer import SampleReplayBuffer
+from envs.motion import ADD_TARGET_OBS_STEPS
 from method.amp import AMP, _AMPActor, _AMPCritic, _MimicKitIndexSampler
 from method.base import classify_mimickit_done_terms
 from models.style_discriminator import StyleDiscriminator
@@ -231,6 +232,9 @@ class ADD(AMP):
         first_done_step = torch.full((n_envs,), steps, dtype=torch.long, device=device)
         first_done_phase = torch.full((n_envs,), -1, dtype=torch.long, device=device)
         ever_done = torch.zeros(n_envs, dtype=torch.bool, device=device)
+        first_failure = torch.zeros(n_envs, dtype=torch.bool, device=device)
+        first_timeout = torch.zeros(n_envs, dtype=torch.bool, device=device)
+        first_motion_complete = torch.zeros(n_envs, dtype=torch.bool, device=device)
         done_terms_union: dict[str, torch.Tensor] = {}
         rollout_info_items: list[tuple[dict, torch.Tensor]] = []
         first_infos: list[dict] = []
@@ -302,6 +306,9 @@ class ADD(AMP):
                     phase = info.get("termination_phase_steps")
                     if torch.is_tensor(phase):
                         first_done_phase[ids] = phase.long()[ids]
+                    first_failure[ids] = failure[ids]
+                    first_timeout[ids] = timeout[ids]
+                    first_motion_complete[ids] = motion_complete[ids]
                     ever_done[ids] = True
                 rollout_info_items.append((info, torch.ones(n_envs, dtype=torch.bool, device=device)))
                 self._record_episode_stats(mixed_reward, done_bool)
@@ -343,6 +350,9 @@ class ADD(AMP):
             "first_infos": first_infos,
             "first_done_step": first_done_step,
             "first_done_phase": first_done_phase,
+            "first_failure": first_failure,
+            "first_timeout": first_timeout,
+            "first_motion_complete": first_motion_complete,
             "collection_start_phases": start_phases,
             "action_abs_max": action_abs_max,
             "disc_pairs": torch.cat(disc_pair_chunks, dim=0),
@@ -515,10 +525,10 @@ class ADD(AMP):
         replay_added = self._store_disc_replay_data(policy_cpu, demo_cpu)
         sampler = _MimicKitIndexSampler(int(pair_cpu.shape[0]), device=self.env.device)
         critic_start = time.perf_counter()
-        critic_metrics = self._critic_update(rollout, sampler)
+        critic_metrics = self._add_ppo_metric_aliases(self._critic_update(rollout, sampler))
         critic_time = time.perf_counter() - critic_start
         actor_start = time.perf_counter()
-        actor_metrics = self._actor_update(rollout, sampler)
+        actor_metrics = self._add_ppo_metric_aliases(self._actor_update(rollout, sampler))
         actor_time = time.perf_counter() - actor_start
         disc_start = time.perf_counter()
         disc_metrics = self._disc_update(pair_cpu, sampler)
@@ -530,8 +540,6 @@ class ADD(AMP):
         metrics = self._build_metrics(rollout, collect_time, time.perf_counter() - start)
         metrics.update(critic_metrics)
         metrics.update(actor_metrics)
-        metrics.update(self._add_ppo_metric_aliases(critic_metrics))
-        metrics.update(self._add_ppo_metric_aliases(actor_metrics))
         metrics.update(disc_metrics)
         diff_samples = (demo_cpu[: min(8192, demo_cpu.shape[0])] - policy_cpu[: min(8192, policy_cpu.shape[0])]).to(
             device=self.env.device
@@ -572,6 +580,7 @@ class ADD(AMP):
 
     def _build_metrics(self, rollout: dict, collect_time: float, update_time: float) -> dict:
         metrics = super()._build_metrics(rollout, collect_time, update_time)
+        metrics = {key: value for key, value in metrics.items() if not key.startswith("amp_reward/")}
         metrics.update(
             style_reward_statistics(
                 rollout["disc_logits"].reshape(-1),
@@ -659,7 +668,7 @@ class ADD(AMP):
             f"update_enabled={int(self._need_normalizer_update())}",
             flush=True,
         )
-        preview_ms = [1000.0 * self.env.dt * step for step in (1, 2, 3)]
+        preview_ms = [1000.0 * self.env.dt * step for step in ADD_TARGET_OBS_STEPS]
         print(
             f"[ADD_TIME] control_hz={1.0 / self.env.dt:.1f} "
             f"physics_hz={1.0 / self.env.physics_dt:.1f} motion_fps={self.env.motion.fps:.1f} "

@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -5,7 +6,9 @@ import torch
 
 from engine.config import ADDConfig, load_config
 from envs.motion import (
+    ADD_TARGET_OBS_STEPS,
     MimicMotionReference,
+    add_target_phase_offsets,
     mimickit_frame_delta,
     mimickit_full_motion_steps,
     sample_mimickit_phase,
@@ -17,15 +20,20 @@ from method.base import classify_mimickit_done_terms
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_add_config_keeps_task_termination_and_official_normalizer_limit() -> None:
+def test_add_config_uses_common_platform_and_official_recipe() -> None:
     cfg = load_config(ROOT / "configs" / "add_largebox.yaml")
     assert isinstance(cfg.parameters, ADDConfig)
+    assert cfg.environment.platform_profile == "g1_largebox_50hz"
     assert cfg.environment.termination_mode == "amp"
     assert cfg.environment.terminate_on_motion_end is True
     assert cfg.environment.motion_reference_mode == "mimickit_add"
-    assert cfg.environment.sim_dt == 1.0 / 30.0
+    assert cfg.environment.root_velocity_mode == "link"
+    assert cfg.environment.reset_phase_sampling == "continuous_uniform"
+    assert cfg.environment.sim_dt == 0.02
     assert cfg.environment.decimation == 4
-    assert cfg.environment.max_episode_steps == 300
+    assert cfg.environment.max_episode_steps == 500
+    assert cfg.parameters.discount_gamma == 0.99
+    assert cfg.parameters.gae_lambda == 0.95
     assert cfg.parameters.normalizer_samples == 100_000_000
 
 
@@ -38,6 +46,15 @@ def test_mimickit_timebase_uses_motion_fps_and_continuous_resets() -> None:
     assert bool(((phases > 0.0) & (phases < 324.0)).all())
     assert bool((phases != phases.round()).any())
     assert float(phases.max()) > 323.0
+
+
+def test_add_preview_uses_official_control_step_offsets() -> None:
+    assert ADD_TARGET_OBS_STEPS == (1, 2, 3)
+    assert add_target_phase_offsets(1.0) == (1.0, 2.0, 3.0)
+    assert all(
+        math.isclose(actual, expected)
+        for actual, expected in zip(add_target_phase_offsets(0.6), (0.6, 1.2, 1.8), strict=True)
+    )
 
 
 def test_mimickit_forward_velocities_are_separate_and_left_held() -> None:
@@ -75,6 +92,14 @@ def test_normalizer_gate_uses_transition_clock_and_allows_crossing_update() -> N
     algo._advance_normalizer_sample_count(32)
     assert algo.normalizer_sample_count == 131
     assert not algo._need_normalizer_update()
+
+
+def test_advantage_normalization_matches_mimickit_unbiased_std() -> None:
+    algo = AMP.__new__(AMP)
+    algo.cfg = SimpleNamespace(norm_adv_clip=4.0)
+    advantages = torch.tensor([1.0, 2.0, 4.0, 8.0])
+    expected = (advantages - advantages.mean()) / advantages.std(unbiased=True)
+    torch.testing.assert_close(algo._normalize_advantages(advantages), expected)
 
 
 def test_done_precedence_is_failure_then_success_then_timeout() -> None:

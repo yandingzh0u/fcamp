@@ -1,5 +1,6 @@
 method: fcamp
 environment:
+  platform_profile: g1_largebox_50hz
   task: largebox_plane
   device: cuda:0
   num_envs: 8192
@@ -21,6 +22,8 @@ environment:
   adaptive_predecessor_ratio: 0.8
   adaptive_predecessor_lookback_bins: 1
   action_rate_weight: 0.1
+  motion_reference_mode: frame
+  root_velocity_mode: com
 
 parameters:
   # Causal Flow-CPS chunk actor (kept aligned with the Flow-CPS actor).

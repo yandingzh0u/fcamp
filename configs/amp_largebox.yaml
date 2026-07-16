@@ -1,5 +1,6 @@
 method: amp
 environment:
+  platform_profile: g1_largebox_50hz
   task: largebox_plane
   device: cuda:0
   num_envs: 4096
@@ -23,6 +24,8 @@ environment:
   action_rate_weight: 0.1
   termination_mode: amp
   terminate_on_motion_end: false
+  motion_reference_mode: frame
+  root_velocity_mode: com
 
 parameters:
   # Mirrors MimicKit data/agents/amp_g1_agent.yaml while keeping this repo's

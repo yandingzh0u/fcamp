@@ -37,10 +37,7 @@ class MimicStepMixin:
             if reference_dt_tensor.ndim == 0:
                 reference_dt_tensor = reference_dt_tensor.expand(self.num_envs)
             reference_dt_tensor = reference_dt_tensor.reshape(self.num_envs).clamp(min=1.0e-6)
-            if self.uses_mimickit_motion_reference:
-                reference_frame_delta = reference_dt_tensor * float(self.motion.fps)
-            else:
-                reference_frame_delta = reference_dt_tensor / float(self.dt)
+            reference_frame_delta = reference_dt_tensor * float(self.motion.fps)
         next_phase_steps = phase_start_steps + reference_frame_delta.to(dtype=phase_start_steps.dtype)
         reference_phase_steps = torch.clamp(
             next_phase_steps, max=self.motion.num_frames - 1
@@ -134,7 +131,7 @@ class MimicStepMixin:
         return observation, reward, done, info
 
     def _apply_interval_pushes(self) -> None:
-        if not self.config.interval_pushes:
+        if not self.interval_pushes:
             return
         due_env_ids = torch.where(self.episode_steps >= self.next_push_step)[0]
         if due_env_ids.numel() == 0:
@@ -149,7 +146,7 @@ class MimicStepMixin:
         high = velocity_range[:, 1].unsqueeze(0)
         velocity_delta = low + (high - low) * torch.rand((due_env_ids.numel(), 6), device=self.device)
         root_velocity = self.get_mimic_root_velocity_w().index_select(0, due_env_ids) + velocity_delta
-        if self.uses_mimickit_motion_reference:
+        if self.config.root_velocity_mode == "link":
             self.robot.write_root_link_velocity_to_sim(root_velocity, env_ids=due_env_ids)
         else:
             self.robot.write_root_velocity_to_sim(root_velocity, env_ids=due_env_ids)

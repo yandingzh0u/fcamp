@@ -36,6 +36,8 @@ simulation_app = app_launcher.app
 
 def main() -> None:
     from engine.trainer import CoreTrainer
+    from envs.robots.g1 import G1_29DOF_ACTION_NAMES, G1_LOCAL_URDF_PATH
+    from envs.tasks import resolve_task
     from method import load_method_class
 
     run_name = args_cli.run_name or f"{cfg.method}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -46,6 +48,15 @@ def main() -> None:
 
     # Persist the fully-resolved experiment identity before Isaac Sim starts.
     resolved = asdict(cfg)
+    dataset_path = resolve_task(cfg.environment.task).motion_file.resolve()
+    robot_path = G1_LOCAL_URDF_PATH.resolve()
+    resolved["dataset_path"] = str(dataset_path)
+    resolved["dataset_sha256"] = hashlib.sha256(dataset_path.read_bytes()).hexdigest()
+    resolved["robot_asset_path"] = str(robot_path)
+    resolved["robot_asset_sha256"] = hashlib.sha256(robot_path.read_bytes()).hexdigest()
+    resolved["action_schema_sha256"] = hashlib.sha256(
+        json.dumps(G1_29DOF_ACTION_NAMES, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     try:
         resolved["git_commit"] = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True

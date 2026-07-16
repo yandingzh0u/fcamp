@@ -8,6 +8,30 @@ import shutil
 import torch
 
 
+_RESUME_ENV_KEYS = (
+    "platform_profile",
+    "task",
+    "sim_dt",
+    "decimation",
+    "fix_root_link",
+    "max_episode_steps",
+    "reset_phase_sampling",
+    "termination_mode",
+    "terminate_on_motion_end",
+    "motion_reference_mode",
+    "root_velocity_mode",
+)
+
+
+def _resume_signature(config: dict) -> dict:
+    environment = config.get("environment", {})
+    return {
+        "method": config.get("method", config.get("algorithm")),
+        "environment": {key: environment.get(key) for key in _RESUME_ENV_KEYS},
+        "parameters": config.get("parameters"),
+    }
+
+
 class Checkpointer:
     def __init__(self, trainer):
         self.t = trainer
@@ -39,6 +63,8 @@ class Checkpointer:
             "optimizer": t.algo.optimizer.state_dict(),
             "metrics": metrics,
             "algo_state": t.algo.extra_checkpoint_state(),
+            "env_transitions_total": int(t.env_transitions_total),
+            "train_wall_seconds_total": float(t.train_wall_seconds_total),
         }
         payload["adaptive_sampler_state"] = t.env.adaptive_sampler.state_dict()
         payload["torch_rng_state"] = torch.random.get_rng_state()
@@ -64,6 +90,15 @@ class Checkpointer:
         # Load through CPU so a large discriminator replay sidecar does not
         # transiently consume GPU memory before being copied back to its CPU ring.
         payload = torch.load(checkpoint_path, map_location="cpu")
+        saved_config = payload.get("config")
+        if saved_config is not None:
+            current_signature = _resume_signature(asdict(t.cfg))
+            saved_signature = _resume_signature(saved_config)
+            if saved_signature != current_signature:
+                raise ValueError(
+                    "Checkpoint training semantics do not match the current config; "
+                    "start a fresh run instead of crossing dataset/platform/recipe profiles."
+                )
         t.algo.policy.load_state_dict(payload["policy"])
         reset_optimizer = bool(t.train_cfg.reset_optimizer_on_resume)
         if reset_optimizer:
@@ -95,4 +130,10 @@ class Checkpointer:
             print(f"[CHECKPOINT] WARN: could not restore RNG state: {exc}", flush=True)
 
         t.start_update = int(payload.get("update_idx", 0)) + 1
+        completed_updates = t.start_update - 1
+        if hasattr(t, "env_cfg") and hasattr(t, "algo_cfg"):
+            transitions_per_update = int(t.env_cfg.num_envs) * int(t.algo_cfg.rollout_env_steps)
+            fallback_transitions = completed_updates * transitions_per_update
+            t.env_transitions_total = int(payload.get("env_transitions_total", fallback_transitions))
+            t.train_wall_seconds_total = float(payload.get("train_wall_seconds_total", 0.0))
         print(f"[CHECKPOINT] loaded {checkpoint_path}, resuming from update {t.start_update}.", flush=True)

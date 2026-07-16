@@ -491,6 +491,9 @@ class AMP(Algorithm):
         first_done_step = torch.full((n_envs,), steps, dtype=torch.long, device=device)
         first_done_phase = torch.full((n_envs,), -1, dtype=torch.long, device=device)
         ever_done = torch.zeros(n_envs, dtype=torch.bool, device=device)
+        first_failure = torch.zeros(n_envs, dtype=torch.bool, device=device)
+        first_timeout = torch.zeros(n_envs, dtype=torch.bool, device=device)
+        first_motion_complete = torch.zeros(n_envs, dtype=torch.bool, device=device)
         done_terms_union: dict[str, torch.Tensor] = {}
         rollout_info_items: list[tuple[dict, torch.Tensor]] = []
         first_infos: list[dict] = []
@@ -558,6 +561,9 @@ class AMP(Algorithm):
                     phase = info.get("termination_phase_steps")
                     if torch.is_tensor(phase):
                         first_done_phase[ids] = phase.long()[ids]
+                    first_failure[ids] = failure[ids]
+                    first_timeout[ids] = timeout[ids]
+                    first_motion_complete[ids] = motion_complete[ids]
                     ever_done[ids] = True
                 rollout_info_items.append((info, torch.ones(n_envs, dtype=torch.bool, device=device)))
                 self._record_episode_stats(mixed_reward, done_bool)
@@ -603,6 +609,9 @@ class AMP(Algorithm):
             "first_infos": first_infos,
             "first_done_step": first_done_step,
             "first_done_phase": first_done_phase,
+            "first_failure": first_failure,
+            "first_timeout": first_timeout,
+            "first_motion_complete": first_motion_complete,
             "collection_start_phases": start_phases,
             "action_abs_max": action_abs_max,
             "disc_windows": torch.cat(disc_window_chunks, dim=0),
@@ -636,7 +645,7 @@ class AMP(Algorithm):
 
     def _normalize_advantages(self, advantages: torch.Tensor) -> torch.Tensor:
         mean = advantages.mean()
-        std = advantages.std(unbiased=False).clamp_min(1.0e-5)
+        std = advantages.std(unbiased=True).clamp_min(1.0e-5)
         normalized = (advantages - mean) / std
         return torch.clamp(normalized, -float(self.cfg.norm_adv_clip), float(self.cfg.norm_adv_clip))
 
@@ -942,7 +951,7 @@ class AMP(Algorithm):
         timeouts = rollout["timeout"]
         motion_complete = rollout["motion_complete"]
         first_done_step = rollout["first_done_step"]
-        failed_first = (first_done_step < self.rollout_steps) & ~timeouts.any(dim=0) & ~motion_complete.any(dim=0)
+        first_done = rollout["first_failure"] | rollout["first_timeout"] | rollout["first_motion_complete"]
         returns = rewards.sum(dim=0)
         metrics = {
             "rollout/task_reward_mean": float(rollout["task_reward"].mean().item()),
@@ -954,7 +963,12 @@ class AMP(Algorithm):
             "rollout/failure_frac": float(failures.float().mean().item()),
             "rollout/timeout_frac": float(timeouts.float().mean().item()),
             "rollout/motion_complete_frac": float(motion_complete.float().mean().item()),
-            "rollout/success_frac": float((~failed_first).float().mean().item()),
+            "rollout/first_done_frac": float(first_done.float().mean().item()),
+            "rollout/first_failure_frac": float(rollout["first_failure"].float().mean().item()),
+            "rollout/first_timeout_frac": float(rollout["first_timeout"].float().mean().item()),
+            "rollout/first_motion_complete_frac": float(
+                rollout["first_motion_complete"].float().mean().item()
+            ),
             "rollout/first_done_step_mean": float(first_done_step.float().mean().item()),
             "phase/start_mean": float(rollout["collection_start_phases"].float().mean().item()),
             "phase/start_min": float(rollout["collection_start_phases"].min().item()),

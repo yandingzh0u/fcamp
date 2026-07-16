@@ -57,7 +57,11 @@ class G1Env:
         self.sim = SimulationContext(sim_cfg)
 
         scene_cfg = G1SceneConfig(num_envs=cfg.num_envs, env_spacing=2.5)
-        use_ground_filter = task.terrain == "plane" and cfg.motion_reference_mode == "mimickit_add"
+        # Contact sensing is a property of the shared physical platform, not of
+        # the algorithm consuming it. Every largebox benchmark method sees the
+        # same ground-filtered force tensor.
+        use_ground_filter = task.terrain == "plane" and cfg.platform_profile == "g1_largebox_50hz"
+        self.uses_ground_contact_filter = use_ground_filter
         if task.terrain == "plane":
             if use_ground_filter:
                 scene_cfg.contact_forces.filter_prim_paths_expr = ["/World/ground.*"]
@@ -201,7 +205,7 @@ class G1Env:
         return torch.cat([joint_pos, joint_vel], dim=-1)
 
     def get_mimic_root_velocity_w(self) -> torch.Tensor:
-        if self.config.motion_reference_mode == "mimickit_add":
+        if self.config.root_velocity_mode == "link":
             return self.robot.data.root_link_vel_w
         return self.robot.data.root_vel_w
 
@@ -232,7 +236,7 @@ class G1Env:
         sim_joint_vel[:, self.action_joint_ids] = joint_vel
 
         self.robot.write_root_pose_to_sim(root_state[:, :7], env_ids=env_ids)
-        if self.config.motion_reference_mode == "mimickit_add":
+        if self.config.root_velocity_mode == "link":
             self.robot.write_root_link_velocity_to_sim(root_state[:, 7:], env_ids=env_ids)
         else:
             self.robot.write_root_velocity_to_sim(root_state[:, 7:], env_ids=env_ids)

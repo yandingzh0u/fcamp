@@ -21,9 +21,7 @@ from .imitation_data import (
     joint_positions_to_tan_norm,
     quat_wxyz_to_tan_norm,
 )
-
-
-ADD_TARGET_OBS_STEPS = (1, 2, 3)
+from .motion import ADD_TARGET_OBS_STEPS, add_target_phase_offsets
 
 
 class MimicObservationMixin:
@@ -184,8 +182,11 @@ class MimicObservationMixin:
         env_origins = self.scene.env_origins.index_select(0, env_ids)
         root_pos_local = self.robot.data.root_pos_w.index_select(0, env_ids) - env_origins
 
-        offsets = torch.tensor(ADD_TARGET_OBS_STEPS, dtype=self.phase_steps.dtype, device=self.device)
-        offsets = offsets * float(self.motion_frame_delta)
+        offsets = torch.tensor(
+            add_target_phase_offsets(self.motion_frame_delta),
+            dtype=self.phase_steps.dtype,
+            device=self.device,
+        )
         target_steps = self.phase_steps.index_select(0, env_ids).unsqueeze(-1) + offsets
         flat_target = self.motion.get_add_target_frame(target_steps.reshape(-1))
         n = int(env_ids.numel())

@@ -12,6 +12,7 @@ MethodName: TypeAlias = str
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentConfig:
+    platform_profile: str
     task: str
     device: str
     num_envs: int
@@ -36,6 +37,7 @@ class EnvironmentConfig:
     termination_mode: str
     terminate_on_motion_end: bool
     motion_reference_mode: str
+    root_velocity_mode: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,9 +363,11 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
         raise ValueError(f"method must be one of {sorted(METHOD_CONFIGS)}, got {method!r}")
     source_path = Path(source).expanduser().resolve()
     environment_values = dict(normalized["environment"])
+    environment_values.setdefault("platform_profile", "custom")
     environment_values.setdefault("termination_mode", "tracking")
     environment_values.setdefault("terminate_on_motion_end", False)
     environment_values.setdefault("motion_reference_mode", "frame")
+    environment_values.setdefault("root_velocity_mode", "com")
     training_values = dict(normalized["training"])
     training_values.setdefault("official_reset_every", 0)
     training_values["resume"] = _resolve_path(str(training_values["resume"]), source_path)
@@ -397,8 +401,13 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError("environment.sim_dt must be positive")
     if env.decimation < 1:
         raise ValueError("environment.decimation must be positive")
-    if env.reset_phase_sampling not in {"adaptive", "uniform", "rsi", "zero"}:
-        raise ValueError("environment.reset_phase_sampling must be one of adaptive/uniform/rsi/zero")
+    if env.platform_profile not in {"custom", "g1_largebox_50hz"}:
+        raise ValueError("environment.platform_profile must be custom or g1_largebox_50hz")
+    if env.reset_phase_sampling not in {"adaptive", "uniform", "continuous_uniform", "rsi", "zero"}:
+        raise ValueError(
+            "environment.reset_phase_sampling must be one of "
+            "adaptive/uniform/continuous_uniform/rsi/zero"
+        )
     if env.rsi_keyframe_count < 1:
         raise ValueError("environment.rsi_keyframe_count must be positive")
     if env.adaptive_motion_sampling != (env.reset_phase_sampling == "adaptive"):
@@ -407,6 +416,17 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError("environment.termination_mode must be one of tracking/amp/add")
     if env.motion_reference_mode not in {"frame", "mimickit_add"}:
         raise ValueError("environment.motion_reference_mode must be frame or mimickit_add")
+    if env.root_velocity_mode not in {"com", "link"}:
+        raise ValueError("environment.root_velocity_mode must be com or link")
+    if env.platform_profile == "g1_largebox_50hz":
+        if env.task != "largebox_plane":
+            raise ValueError("g1_largebox_50hz requires environment.task=largebox_plane")
+        if abs(float(env.sim_dt) - 0.02) > 1.0e-12 or env.decimation != 4:
+            raise ValueError("g1_largebox_50hz requires 50 Hz control / 200 Hz simulation")
+        if env.fix_root_link:
+            raise ValueError("g1_largebox_50hz requires a free root link")
+        if int(env.max_episode_steps) != 500:
+            raise ValueError("g1_largebox_50hz uses a 10 second, 500-step episode limit")
     if train.max_updates < 1:
         raise ValueError("training.max_updates must be positive")
     if train.log_every < 1:
@@ -427,9 +447,9 @@ def _validate(config: ExperimentConfig) -> None:
     elif config.method == "add":
         if env.motion_reference_mode != "mimickit_add":
             raise ValueError("ADD requires environment.motion_reference_mode=mimickit_add")
-        if abs(float(env.sim_dt) - 1.0 / 30.0) > 1.0e-12 or env.decimation != 4:
-            raise ValueError("ADD follows MimicKit's 30 Hz control / 120 Hz simulation")
-        if env.reset_phase_sampling != "uniform":
+        if env.root_velocity_mode != "link":
+            raise ValueError("ADD requires MimicKit root-link velocity semantics")
+        if env.reset_phase_sampling != "continuous_uniform":
             raise ValueError("ADD follows MimicKit's continuous uniform motion-time reset")
         _validate_add(config.parameters)
     else:

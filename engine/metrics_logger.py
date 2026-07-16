@@ -42,13 +42,14 @@ class MetricsLogger:
     def write(self, update_idx: int, metrics: dict[str, Any]) -> None:
         clean: dict[str, float | None] = {}
         nonfinite: list[str] = []
+        tensorboard_step = int(metrics.get("samples/env_transitions_total", update_idx))
         for key, value in sorted(metrics.items()):
             scalar = _finite_float(value)
             clean[key] = scalar
             if scalar is None:
                 nonfinite.append(key)
             elif self._tb is not None:
-                self._tb.add_scalar(key, scalar, update_idx)
+                self._tb.add_scalar(key, scalar, tensorboard_step)
         record = {
             "update": int(update_idx),
             "nonfinite_count": len(nonfinite),
@@ -58,7 +59,7 @@ class MetricsLogger:
         self._handle.write(json.dumps(record, sort_keys=True, allow_nan=False) + "\n")
         self._handle.flush()
         if self._tb is not None:
-            self._tb.add_scalar("system/nonfinite_metric_count", len(nonfinite), update_idx)
+            self._tb.add_scalar("system/nonfinite_metric_count", len(nonfinite), tensorboard_step)
             self._tb.flush()
         if nonfinite:
             print(f"[METRICS_WARN] update={update_idx} nonfinite={nonfinite}", flush=True)
@@ -75,13 +76,23 @@ class MetricsLogger:
             "validation/steps_p50",
             "validation/steps_p95",
             "validation/steps_max",
+            "validation/survival_seconds_mean",
+            "validation/survival_seconds_p50",
+            "validation/survival_seconds_p95",
+            "validation/reference_progress_mean",
+            "validation/reference_progress_p50",
+            "validation/reference_progress_p95",
             "validation/return_mean",
             "validation/done_frac",
             "validation/motion_complete_frac",
+            "validation/failure_frac",
+            "validation/time_out_frac",
+            "validation/censored_frac",
             "validation/ee_body_bad_frac",
             "validation/push_applied_frac",
             "validation/died_before_push_frac",
             "validation/first_push_step_mean",
+            "samples/env_transitions_total",
         ]
         write_header = not self.validation_path.exists() or self.validation_path.stat().st_size == 0
         with self.validation_path.open("a", encoding="utf-8", newline="") as handle:

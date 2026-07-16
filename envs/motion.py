@@ -36,6 +36,14 @@ _G1_FIXED_BODY_OFFSETS = {
     "LR_FOOT": ("right_ankle_roll_link", np.array([0.04, 0.0, -0.037], dtype=np.float32)),
 }
 
+ADD_TARGET_OBS_STEPS = (1, 2, 3)
+
+
+def add_target_phase_offsets(motion_frame_delta: float) -> tuple[float, ...]:
+    """Official ADD control-step targets expressed in motion-frame coordinates."""
+
+    return tuple(float(motion_frame_delta) * step for step in ADD_TARGET_OBS_STEPS)
+
 
 def mimickit_frame_delta(fps: float, control_dt: float) -> float:
     return float(fps) * float(control_dt)
