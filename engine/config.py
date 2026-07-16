@@ -33,6 +33,9 @@ class EnvironmentConfig:
     adaptive_predecessor_ratio: float
     adaptive_predecessor_lookback_bins: int
     action_rate_weight: float
+    termination_mode: str
+    terminate_on_motion_end: bool
+    motion_reference_mode: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,9 +214,15 @@ class AMPConfig:
     disc_eval_batch_size: int
     empirical_normalization: bool
     init_at_random_ep_len: bool
+    normalizer_samples: int
 
 
-MethodConfig: TypeAlias = FCAMPConfig | AdaMimicConfig | AMPConfig
+@dataclass(frozen=True, slots=True)
+class ADDConfig(AMPConfig):
+    """MimicKit ADD uses AMP's PPO knobs with a diff discriminator."""
+
+
+MethodConfig: TypeAlias = FCAMPConfig | AdaMimicConfig | AMPConfig | ADDConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +231,7 @@ class TrainingConfig:
     max_updates: int
     log_every: int
     save_every: int
+    official_reset_every: int
     resume: str
     reset_optimizer_on_resume: bool
     reset_sampler_on_resume: bool
@@ -255,6 +265,7 @@ METHOD_CONFIGS = {
     "fcamp": FCAMPConfig,
     "adamimic": AdaMimicConfig,
     "amp": AMPConfig,
+    "add": ADDConfig,
 }
 
 
@@ -284,7 +295,13 @@ def _construct(cls, values: dict[str, Any]):
 
 def _construct_method_config(method: str, values: dict[str, Any], source_path: Path) -> MethodConfig:
     if method == "amp":
-        return _construct(AMPConfig, dict(values))
+        nested = dict(values)
+        nested.setdefault("normalizer_samples", 100_000_000)
+        return _construct(AMPConfig, nested)
+    if method == "add":
+        nested = dict(values)
+        nested.setdefault("normalizer_samples", 100_000_000)
+        return _construct(ADDConfig, nested)
     if method == "adamimic":
         nested = dict(values)
         nested["checkpoint_path"] = _resolve_path(str(nested.get("checkpoint_path", "")), source_path)
@@ -343,11 +360,16 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
     if method not in METHOD_CONFIGS:
         raise ValueError(f"method must be one of {sorted(METHOD_CONFIGS)}, got {method!r}")
     source_path = Path(source).expanduser().resolve()
+    environment_values = dict(normalized["environment"])
+    environment_values.setdefault("termination_mode", "tracking")
+    environment_values.setdefault("terminate_on_motion_end", False)
+    environment_values.setdefault("motion_reference_mode", "frame")
     training_values = dict(normalized["training"])
+    training_values.setdefault("official_reset_every", 0)
     training_values["resume"] = _resolve_path(str(training_values["resume"]), source_path)
     config = ExperimentConfig(
         method=method,
-        environment=_construct(EnvironmentConfig, dict(normalized["environment"])),
+        environment=_construct(EnvironmentConfig, environment_values),
         parameters=_construct_method_config(method, dict(normalized["parameters"]), source_path),
         training=_construct(TrainingConfig, training_values),
     )
@@ -381,10 +403,16 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError("environment.rsi_keyframe_count must be positive")
     if env.adaptive_motion_sampling != (env.reset_phase_sampling == "adaptive"):
         raise ValueError("environment.adaptive_motion_sampling must match reset_phase_sampling=adaptive")
+    if env.termination_mode not in {"tracking", "amp", "add"}:
+        raise ValueError("environment.termination_mode must be one of tracking/amp/add")
+    if env.motion_reference_mode not in {"frame", "mimickit_add"}:
+        raise ValueError("environment.motion_reference_mode must be frame or mimickit_add")
     if train.max_updates < 1:
         raise ValueError("training.max_updates must be positive")
     if train.log_every < 1:
         raise ValueError("training.log_every must be positive")
+    if train.official_reset_every < 0:
+        raise ValueError("training.official_reset_every must be non-negative")
     resolve_task(env.task)
     if config.method == "fcamp":
         _validate_fcamp(config.parameters)
@@ -396,6 +424,14 @@ def _validate(config: ExperimentConfig) -> None:
         _validate_adamimic(config.parameters)
     elif config.method == "amp":
         _validate_amp(config.parameters)
+    elif config.method == "add":
+        if env.motion_reference_mode != "mimickit_add":
+            raise ValueError("ADD requires environment.motion_reference_mode=mimickit_add")
+        if abs(float(env.sim_dt) - 1.0 / 30.0) > 1.0e-12 or env.decimation != 4:
+            raise ValueError("ADD follows MimicKit's 30 Hz control / 120 Hz simulation")
+        if env.reset_phase_sampling != "uniform":
+            raise ValueError("ADD follows MimicKit's continuous uniform motion-time reset")
+        _validate_add(config.parameters)
     else:
         raise ValueError(f"Unsupported method {config.method!r}")
 
@@ -524,17 +560,17 @@ def _validate_adamimic(params: AdaMimicConfig) -> None:
             raise ValueError("AdaMimic stage2 follows official use_smooth=false")
 
 
-def _validate_amp(params: AMPConfig) -> None:
+def _validate_amp(params: AMPConfig, *, method_label: str = "AMP", min_disc_obs_steps: int = 2) -> None:
     if not params.actor_hidden_dims or not params.critic_hidden_dims or not params.disc_hidden_dims:
-        raise ValueError("AMP actor/critic/discriminator hidden dims cannot be empty")
+        raise ValueError(f"{method_label} actor/critic/discriminator hidden dims cannot be empty")
     if params.rollout_env_steps < 1:
-        raise ValueError("AMP rollout_env_steps must be positive")
+        raise ValueError(f"{method_label} rollout_env_steps must be positive")
     if not (0.0 < params.discount_gamma <= 1.0):
-        raise ValueError("AMP discount_gamma must be in (0, 1]")
+        raise ValueError(f"{method_label} discount_gamma must be in (0, 1]")
     if not (0.0 <= params.gae_lambda <= 1.0):
-        raise ValueError("AMP gae_lambda must be in [0, 1]")
+        raise ValueError(f"{method_label} gae_lambda must be in [0, 1]")
     if not (0.0 < params.clip_range < 1.0):
-        raise ValueError("AMP clip_range must be in (0, 1)")
+        raise ValueError(f"{method_label} clip_range must be in (0, 1)")
     for name in (
         "actor_epochs",
         "actor_batch_size",
@@ -544,25 +580,33 @@ def _validate_amp(params: AMPConfig) -> None:
         "disc_batch_size",
     ):
         if int(getattr(params, name)) < 1:
-            raise ValueError(f"AMP {name} must be positive")
+            raise ValueError(f"{method_label} {name} must be positive")
     for name in ("actor_lr", "critic_lr", "disc_lr", "action_std", "actor_init_output_scale"):
         if float(getattr(params, name)) <= 0.0:
-            raise ValueError(f"AMP {name} must be positive")
+            raise ValueError(f"{method_label} {name} must be positive")
     if params.disc_weight_decay < 0.0:
-        raise ValueError("AMP disc_weight_decay must be non-negative")
+        raise ValueError(f"{method_label} disc_weight_decay must be non-negative")
     if params.action_bound_weight < 0.0 or params.action_entropy_weight < 0.0 or params.action_reg_weight < 0.0:
-        raise ValueError("AMP action regularization weights must be non-negative")
+        raise ValueError(f"{method_label} action regularization weights must be non-negative")
     if params.task_reward_weight < 0.0 or params.disc_reward_weight < 0.0:
-        raise ValueError("AMP reward weights must be non-negative")
+        raise ValueError(f"{method_label} reward weights must be non-negative")
     if params.task_reward_weight == 0.0 and params.disc_reward_weight == 0.0:
-        raise ValueError("AMP requires at least one non-zero reward weight")
+        raise ValueError(f"{method_label} requires at least one non-zero reward weight")
     if params.disc_reward_scale <= 0.0 or not (0.0 < params.disc_reward_epsilon < 1.0):
-        raise ValueError("AMP discriminator reward scale/epsilon are invalid")
+        raise ValueError(f"{method_label} discriminator reward scale/epsilon are invalid")
     if params.disc_buffer_size < 1 or params.disc_replay_samples < 0:
-        raise ValueError("AMP discriminator replay settings are invalid")
+        raise ValueError(f"{method_label} discriminator replay settings are invalid")
     if params.disc_logit_reg < 0.0 or params.disc_grad_penalty < 0.0:
-        raise ValueError("AMP discriminator regularization weights must be non-negative")
-    if params.disc_obs_steps < 2:
-        raise ValueError("AMP disc_obs_steps must be at least 2")
+        raise ValueError(f"{method_label} discriminator regularization weights must be non-negative")
+    if params.disc_obs_steps < int(min_disc_obs_steps):
+        raise ValueError(f"{method_label} disc_obs_steps must be at least {int(min_disc_obs_steps)}")
     if params.disc_normalizer_clip <= 0.0 or params.disc_eval_batch_size < 1:
-        raise ValueError("AMP discriminator normalizer/eval batch settings are invalid")
+        raise ValueError(f"{method_label} discriminator normalizer/eval batch settings are invalid")
+    if params.normalizer_samples < 1:
+        raise ValueError(f"{method_label} normalizer_samples must be positive")
+
+
+def _validate_add(params: ADDConfig) -> None:
+    _validate_amp(params, method_label="ADD", min_disc_obs_steps=1)
+    if params.disc_obs_steps != 1:
+        raise ValueError("ADD follows MimicKit add_g1_env.yaml: parameters.disc_obs_steps must be 1")

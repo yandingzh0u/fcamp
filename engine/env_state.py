@@ -6,7 +6,8 @@ import torch
 def snapshot_env_state(env) -> dict[str, torch.Tensor]:
     robot = env.robot
     return {
-        "root_state_w": robot.data.root_state_w.clone(),
+        "root_pose_w": robot.data.root_link_pose_w.clone(),
+        "root_velocity_w": env.get_mimic_root_velocity_w().clone(),
         "joint_pos": robot.data.joint_pos.clone(),
         "joint_vel": robot.data.joint_vel.clone(),
         "phase_steps": env.phase_steps.clone(),
@@ -26,14 +27,15 @@ def snapshot_env_state(env) -> dict[str, torch.Tensor]:
 
 def restore_env_state(env, snapshot: dict[str, torch.Tensor]) -> None:
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
-    root_state = snapshot["root_state_w"]
-    root_pos_local = root_state[:, :3] - env.scene.env_origins
+    root_pose = snapshot["root_pose_w"]
+    root_velocity = snapshot["root_velocity_w"]
+    root_pos_local = root_pose[:, :3] - env.scene.env_origins
     env.scene.reset(env_ids=env_ids)
     env._write_robot_state(
         root_pos=root_pos_local,
-        root_quat=root_state[:, 3:7],
-        root_lin_vel=root_state[:, 7:10],
-        root_ang_vel=root_state[:, 10:13],
+        root_quat=root_pose[:, 3:7],
+        root_lin_vel=root_velocity[:, :3],
+        root_ang_vel=root_velocity[:, 3:],
         joint_pos=snapshot["joint_pos"][:, env.action_joint_ids],
         joint_vel=snapshot["joint_vel"][:, env.action_joint_ids],
         env_ids=env_ids,

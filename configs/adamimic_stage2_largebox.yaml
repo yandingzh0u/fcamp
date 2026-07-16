@@ -2,7 +2,7 @@ method: adamimic
 environment:
   task: largebox_plane
   device: cuda:0
-  num_envs: 9129
+  num_envs: 8192
   sim_dt: 0.02
   decimation: 4
   fix_root_link: false

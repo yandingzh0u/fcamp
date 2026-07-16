@@ -5,6 +5,27 @@ from abc import ABC, abstractmethod
 import torch
 
 
+def classify_mimickit_done_terms(
+    done: torch.Tensor,
+    done_terms: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Apply MimicKit's TIME -> SUCC -> FAIL overwrite precedence."""
+    done = done.bool()
+    failure = done & (
+        done_terms["anchor_pos_bad"].bool()
+        | done_terms["anchor_ori_bad"].bool()
+        | done_terms["ee_body_bad"].bool()
+    )
+    motion_complete_term = done_terms.get("motion_complete")
+    motion_complete = (
+        done & motion_complete_term.bool() & ~failure
+        if torch.is_tensor(motion_complete_term)
+        else torch.zeros_like(done)
+    )
+    timeout = done & done_terms["time_out"].bool() & ~motion_complete & ~failure
+    return timeout, motion_complete, failure
+
+
 class Algorithm(ABC):
     def __init__(self, cfg, env, simulation_app):
         self.cfg = cfg

@@ -26,14 +26,21 @@ class MimicStepMixin:
 
         phase_start_steps = self.phase_steps.clone()
         if reference_dt is None:
-            reference_frame_delta = torch.ones_like(phase_start_steps, dtype=torch.float32)
+            reference_frame_delta = torch.full_like(
+                phase_start_steps,
+                float(self.motion_frame_delta),
+                dtype=torch.float32,
+            )
             reference_dt_tensor = torch.full_like(reference_frame_delta, float(self.dt))
         else:
             reference_dt_tensor = torch.as_tensor(reference_dt, dtype=torch.float32, device=self.device)
             if reference_dt_tensor.ndim == 0:
                 reference_dt_tensor = reference_dt_tensor.expand(self.num_envs)
             reference_dt_tensor = reference_dt_tensor.reshape(self.num_envs).clamp(min=1.0e-6)
-            reference_frame_delta = reference_dt_tensor / float(self.dt)
+            if self.uses_mimickit_motion_reference:
+                reference_frame_delta = reference_dt_tensor * float(self.motion.fps)
+            else:
+                reference_frame_delta = reference_dt_tensor / float(self.dt)
         next_phase_steps = phase_start_steps + reference_frame_delta.to(dtype=phase_start_steps.dtype)
         reference_phase_steps = torch.clamp(
             next_phase_steps, max=self.motion.num_frames - 1
@@ -62,6 +69,9 @@ class MimicStepMixin:
         # semantics correct for evaluation code that uses auto_reset=True.
         imitation_frame = self.get_imitation_policy_frame()
         amp_policy_observation = self.get_amp_policy_observation()
+        add_policy_disc_frame = self.get_add_policy_disc_frame()
+        add_demo_disc_frame = self.get_add_demo_disc_frame(reference_phase_steps)
+        add_policy_observation = self.get_add_policy_observation()
         reset_env_ids = torch.empty(0, dtype=torch.long, device=self.device)
         reset_phase_indices = torch.empty(0, dtype=torch.long, device=self.device)
 
@@ -109,6 +119,9 @@ class MimicStepMixin:
             "reference_frame_delta": reference_frame_delta,
             "imitation_frame": imitation_frame,
             "amp_policy_observation": amp_policy_observation,
+            "add_policy_disc_frame": add_policy_disc_frame,
+            "add_demo_disc_frame": add_demo_disc_frame,
+            "add_policy_observation": add_policy_observation,
             "reset_env_ids": reset_env_ids,
             "reset_phase_indices": reset_phase_indices,
             "motion_wrap_env_ids": motion_wrap_env_ids,
@@ -135,8 +148,11 @@ class MimicStepMixin:
         low = velocity_range[:, 0].unsqueeze(0)
         high = velocity_range[:, 1].unsqueeze(0)
         velocity_delta = low + (high - low) * torch.rand((due_env_ids.numel(), 6), device=self.device)
-        root_velocity = self.robot.data.root_vel_w.index_select(0, due_env_ids) + velocity_delta
-        self.robot.write_root_velocity_to_sim(root_velocity, env_ids=due_env_ids)
+        root_velocity = self.get_mimic_root_velocity_w().index_select(0, due_env_ids) + velocity_delta
+        if self.uses_mimickit_motion_reference:
+            self.robot.write_root_link_velocity_to_sim(root_velocity, env_ids=due_env_ids)
+        else:
+            self.robot.write_root_velocity_to_sim(root_velocity, env_ids=due_env_ids)
 
         min_interval, max_interval = PUSH_INTERVAL_STEP_RANGE
         self.next_push_step[due_env_ids] = self.episode_steps[due_env_ids] + torch.randint(

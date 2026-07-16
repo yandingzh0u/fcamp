@@ -40,6 +40,9 @@ class SampleReplayBuffer:
         self._cursor = 0
         self._total_inserted = 0
         self._push_step = 0
+        self._sample_buf = torch.empty(self.capacity, dtype=torch.long, device="cpu")
+        self._sample_buf_head = 0
+        self._reset_sample_buf()
 
     def __len__(self) -> int:
         return self._size
@@ -52,6 +55,7 @@ class SampleReplayBuffer:
         self._total_inserted = 0
         self._push_step = 0
         self._insert_step.fill_(-1)
+        self._reset_sample_buf()
 
     @property
     def is_full(self) -> bool:
@@ -95,7 +99,7 @@ class SampleReplayBuffer:
             raise RuntimeError("cannot sample an empty frame replay buffer")
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        idx = torch.randint(self._size, (int(batch_size),), generator=generator, device="cpu")
+        idx = self._sample_indices(int(batch_size), generator=generator)
         batch = self._data.index_select(0, idx)
         if device is None:
             return batch.to(dtype=dtype)
@@ -154,6 +158,8 @@ class SampleReplayBuffer:
             "cursor": self._cursor,
             "total_inserted": self._total_inserted,
             "push_step": self._push_step,
+            "sample_buf": self._sample_buf.clone(),
+            "sample_buf_head": self._sample_buf_head,
         }
 
     @torch.no_grad()
@@ -175,4 +181,36 @@ class SampleReplayBuffer:
         self._cursor = int(state.get("cursor", size % self.capacity)) % self.capacity
         self._total_inserted = int(state.get("total_inserted", size))
         self._push_step = int(state.get("push_step", 0))
+        sample_buf = state.get("sample_buf")
+        if torch.is_tensor(sample_buf) and tuple(sample_buf.shape) == (self.capacity,):
+            self._sample_buf.copy_(sample_buf.to(dtype=torch.long, device="cpu"))
+            self._sample_buf_head = int(state.get("sample_buf_head", 0)) % self.capacity
+        else:
+            self._reset_sample_buf()
         return True
+
+    @torch.no_grad()
+    def _reset_sample_buf(self, generator: torch.Generator | None = None) -> None:
+        self._sample_buf.copy_(torch.randperm(self.capacity, generator=generator, device="cpu", dtype=torch.long))
+        self._sample_buf_head = 0
+
+    @torch.no_grad()
+    def _sample_indices(self, batch_size: int, generator: torch.Generator | None = None) -> torch.Tensor:
+        if batch_size > self.capacity:
+            chunks: list[torch.Tensor] = []
+            remaining = int(batch_size)
+            while remaining > 0:
+                n = min(remaining, self.capacity)
+                chunks.append(self._sample_indices(n, generator=generator))
+                remaining -= n
+            return torch.cat(chunks, dim=0)
+        if self._sample_buf_head + batch_size <= self.capacity:
+            indices = self._sample_buf[self._sample_buf_head : self._sample_buf_head + batch_size]
+            self._sample_buf_head += batch_size
+        else:
+            first = self._sample_buf[self._sample_buf_head :]
+            remainder = batch_size - int(first.numel())
+            self._reset_sample_buf(generator=generator)
+            indices = torch.cat((first, self._sample_buf[:remainder]), dim=0)
+            self._sample_buf_head = remainder
+        return torch.remainder(indices, self._size)

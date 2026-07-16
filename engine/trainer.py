@@ -116,9 +116,21 @@ class CoreTrainer:
                     flush=True,
                 )
                 break
+            if self._official_output_reset_due(update_idx):
+                self.current_observation = self.algo.initial_reset()
+                print(
+                    f"[OFFICIAL_RESET] update={update_idx} every={tcfg.official_reset_every}",
+                    flush=True,
+                )
 
         print("[INFO] Training finished.", flush=True)
         self.metrics_logger.close()
+
+    def _official_output_reset_due(self, update_idx: int) -> bool:
+        every = int(self.train_cfg.official_reset_every)
+        if every <= 0:
+            return False
+        return update_idx >= 1 and (update_idx - 1) % every == 0
 
     def validate_only(self) -> None:
         fixed_seed = (

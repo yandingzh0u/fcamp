@@ -1,13 +1,13 @@
-method: amp
+method: add
 environment:
   task: largebox_plane
   device: cuda:0
   num_envs: 4096
-  sim_dt: 0.02
+  sim_dt: 0.03333333333333333
   decimation: 4
   fix_root_link: false
   startup_randomization: false
-  max_episode_steps: 500
+  max_episode_steps: 300
   motion_start_phase: 0
   motion_end_phase: -1
   reset_noise: false
@@ -21,11 +21,14 @@ environment:
   adaptive_predecessor_ratio: 0.8
   adaptive_predecessor_lookback_bins: 1
   action_rate_weight: 0.1
+  # ADD is the official algorithm; termination remains the largebox task's
+  # ground-contact semantics and ends cleanly at the motion boundary.
   termination_mode: amp
-  terminate_on_motion_end: false
+  terminate_on_motion_end: true
+  motion_reference_mode: mimickit_add
 
 parameters:
-  # Mirrors MimicKit data/agents/amp_g1_agent.yaml while keeping this repo's
+  # Mirrors MimicKit data/agents/add_g1_agent.yaml while keeping this repo's
   # G1 assets, action space, task, and reward implementation.
   actor_hidden_dims: [1024, 512]
   critic_hidden_dims: [1024, 512]
@@ -61,8 +64,8 @@ parameters:
   disc_buffer_size: 200000
   disc_replay_samples: 1000
   disc_logit_reg: 0.01
-  disc_grad_penalty: 10.0
-  disc_obs_steps: 10
+  disc_grad_penalty: 2.0
+  disc_obs_steps: 1
   disc_normalizer_clip: 10.0
   disc_eval_batch_size: 8192
 
@@ -75,6 +78,7 @@ training:
   max_updates: 500
   log_every: 10
   save_every: 50
+  official_reset_every: 100
   resume: ""
   reset_optimizer_on_resume: false
   reset_sampler_on_resume: false

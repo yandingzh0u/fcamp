@@ -11,7 +11,7 @@ from components.imitation.style_reward import discriminator_style_reward, style_
 from components.imitation.window_pipeline import TemporalWindowPipeline
 from components.normalization.running_stats import RunningNormalizer
 from components.replay.sample_buffer import SampleReplayBuffer
-from method.base import Algorithm
+from method.base import Algorithm, classify_mimickit_done_terms
 from models.style_discriminator import StyleDiscriminator, compute_style_discriminator_loss
 
 
@@ -181,14 +181,40 @@ class _MimicKitDiscHistory:
         }
 
 
+class _MimicKitIndexSampler:
+    """MimicKit ExperienceBuffer.sample cursor shared across update phases."""
+
+    def __init__(self, sample_count: int, *, device: torch.device | str) -> None:
+        if sample_count <= 0:
+            raise ValueError("sample_count must be positive")
+        self.sample_count = int(sample_count)
+        self.device = torch.device(device)
+        self._sample_buf = torch.randperm(self.sample_count, device=self.device, dtype=torch.long)
+        self._head = 0
+
+    def sample(self, batch_size: int) -> torch.Tensor:
+        batch_size = int(batch_size)
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if batch_size > self.sample_count:
+            raise ValueError(f"batch_size {batch_size} exceeds sample_count {self.sample_count}")
+        if self._head + batch_size <= self.sample_count:
+            indices = self._sample_buf[self._head : self._head + batch_size]
+            self._head += batch_size
+            return indices
+        first = self._sample_buf[self._head :]
+        remainder = batch_size - int(first.numel())
+        self._sample_buf = torch.randperm(self.sample_count, device=self.device, dtype=torch.long)
+        self._head = remainder
+        return torch.cat((first, self._sample_buf[:remainder]), dim=0)
+
+
 class AMP(Algorithm):
     """MimicKit-style AMP: PPO actor-critic plus independent style discriminator."""
 
     def build(self) -> None:
         cfg = self.cfg
         env = self.env
-        env.termination_mode = "amp"
-        env.terminate_on_motion_end = False
         self.imitation_frame_dim = int(env.imitation_frame_dim)
         self.actor_obs_dim = int(env.get_amp_policy_observation().shape[-1])
         self.critic_obs_dim = self.actor_obs_dim
@@ -253,6 +279,7 @@ class AMP(Algorithm):
             weight_decay=float(cfg.disc_weight_decay),
         )
         self.disc_version = 0
+        self.normalizer_sample_count = 0
         self._policy_module = nn.ModuleDict(
             {
                 "actor": self.actor,
@@ -311,7 +338,8 @@ class AMP(Algorithm):
             "disc_optimizer": self.disc_optimizer.state_dict(),
             "disc_replay": self.disc_replay.state_dict(),
             "disc_version": int(self.disc_version),
-            "amp_schema_version": 3,
+            "normalizer_sample_count": int(self.normalizer_sample_count),
+            "amp_schema_version": 4,
         }
 
     def load_extra_checkpoint_state(self, payload: dict, reset_optimizer: bool = False) -> None:
@@ -323,20 +351,32 @@ class AMP(Algorithm):
             if "disc_optimizer" in payload:
                 self.disc_optimizer.load_state_dict(payload["disc_optimizer"])
         self.disc_version = int(payload.get("disc_version", self.disc_version))
+        inferred_count = (
+            int(self.obs_normalizer.count.item()) if self.empirical_normalization else 0
+        )
+        self.normalizer_sample_count = int(
+            payload.get("normalizer_sample_count", inferred_count)
+        )
         if not self.disc_replay.load_state_dict(payload.get("disc_replay")):
             print("[AMP] discriminator replay absent/incompatible; starting empty", flush=True)
+
+    def _need_normalizer_update(self) -> bool:
+        return self.normalizer_sample_count < int(self.cfg.normalizer_samples)
+
+    def _advance_normalizer_sample_count(self, sample_count: int) -> None:
+        self.normalizer_sample_count += int(sample_count)
 
     def _norm_actor(self, obs: torch.Tensor, update: bool = True) -> torch.Tensor:
         if not self.empirical_normalization:
             return obs
-        if update:
+        if update and self._need_normalizer_update():
             self.obs_normalizer.record(obs)
         return self.obs_normalizer.normalize(obs)
 
     def _norm_critic(self, obs: torch.Tensor, update: bool = True) -> torch.Tensor:
         if not self.empirical_normalization:
             return obs
-        if update:
+        if update and self._need_normalizer_update():
             self.obs_normalizer.record(obs)
         return self.obs_normalizer.normalize(obs)
 
@@ -485,20 +525,7 @@ class AMP(Algorithm):
 
                 done_bool = done.bool()
                 done_terms = info["done_terms"]
-                timeout = done_bool & done_terms["time_out"].bool()
-                motion_complete = done_terms.get("motion_complete")
-                motion_complete = (
-                    motion_complete.bool()
-                    if torch.is_tensor(motion_complete)
-                    else torch.zeros_like(timeout)
-                )
-                motion_complete = done_bool & motion_complete
-                failure_terms = (
-                    done_terms["anchor_pos_bad"].bool()
-                    | done_terms["anchor_ori_bad"].bool()
-                    | done_terms["ee_body_bad"].bool()
-                )
-                failure = done_bool & failure_terms & (~timeout) & (~motion_complete)
+                timeout, motion_complete, failure = classify_mimickit_done_terms(done_bool, done_terms)
                 timeout_value = self._timeout_bootstrap_value(info, timeout)
 
                 actor_obs_buf[step_idx] = amp_obs
@@ -613,13 +640,39 @@ class AMP(Algorithm):
         normalized = (advantages - mean) / std
         return torch.clamp(normalized, -float(self.cfg.norm_adv_clip), float(self.cfg.norm_adv_clip))
 
-    def _sample_indices(self, sample_count: int, batch_size: int) -> torch.Tensor:
-        return torch.randint(sample_count, (int(batch_size),), device=self.env.device)
+    def _minibatch_indices(
+        self,
+        sample_count: int,
+        batch_size: int,
+        steps: int,
+        *,
+        device: torch.device | str | None = None,
+    ):
+        device = self.env.device if device is None else torch.device(device)
+        sample_count = int(sample_count)
+        batch_size = int(batch_size)
+        if sample_count <= 0 or batch_size <= 0:
+            raise ValueError("sample_count and batch_size must be positive")
+        if batch_size > sample_count:
+            raise ValueError(f"batch_size {batch_size} exceeds sample_count {sample_count}")
+        permutation = torch.randperm(sample_count, device=device, dtype=torch.long)
+        head = 0
+        for _ in range(int(steps)):
+            if head + batch_size <= sample_count:
+                indices = permutation[head : head + batch_size]
+                head += batch_size
+            else:
+                first = permutation[head:]
+                remainder = batch_size - int(first.numel())
+                permutation = torch.randperm(sample_count, device=device, dtype=torch.long)
+                indices = torch.cat((first, permutation[:remainder]), dim=0)
+                head = remainder
+            yield indices
 
     def _mimickit_batch_size(self, multiplier: int) -> int:
         return int(math.ceil(int(multiplier) * self.env.num_envs))
 
-    def _critic_update(self, rollout: dict) -> dict[str, float]:
+    def _critic_update(self, rollout: dict, sampler: _MimicKitIndexSampler) -> dict[str, float]:
         steps, n_envs = rollout["values"].shape
         sample_count = steps * n_envs
         critic_obs = rollout["critic_obs"].reshape(sample_count, self.critic_obs_dim)
@@ -628,7 +681,7 @@ class AMP(Algorithm):
         update_steps = int(math.ceil(sample_count / batch_size)) * int(self.cfg.critic_epochs)
         total_loss = 0.0
         for _ in range(update_steps):
-            idx = self._sample_indices(sample_count, batch_size)
+            idx = sampler.sample(batch_size)
             pred = self.critic(self._norm_critic(critic_obs[idx], update=False))
             loss = (returns[idx] - pred).square().mean()
             self.critic_optimizer.zero_grad(set_to_none=True)
@@ -659,7 +712,7 @@ class AMP(Algorithm):
         high_violation = torch.clamp_min(dist.mode - 1.0, 0.0)
         return (low_violation.square() + high_violation.square()).sum(dim=-1)
 
-    def _actor_update(self, rollout: dict) -> dict[str, float]:
+    def _actor_update(self, rollout: dict, sampler: _MimicKitIndexSampler) -> dict[str, float]:
         steps, n_envs = rollout["old_logp"].shape
         sample_count = steps * n_envs
         actor_obs = rollout["actor_obs"].reshape(sample_count, self.actor_obs_dim)
@@ -683,7 +736,7 @@ class AMP(Algorithm):
             "reg": 0.0,
         }
         for _ in range(update_steps):
-            idx = self._sample_indices(sample_count, batch_size)
+            idx = sampler.sample(batch_size)
             dist = self.actor.distribution(self._norm_actor(actor_obs[idx], update=False))
             logp = dist.log_prob(actions[idx])
             ratio = torch.exp(logp - old_logp[idx])
@@ -745,6 +798,8 @@ class AMP(Algorithm):
     @torch.no_grad()
     def _record_disc_normalizer(self, current_cpu: torch.Tensor, demo_cpu: torch.Tensor) -> int:
         self.disc_normalizer.clear_pending()
+        if not self._need_normalizer_update():
+            return 0
         batch_size = max(1, int(self.cfg.disc_eval_batch_size))
         count = int(current_cpu.shape[0])
         for start in range(0, count, batch_size):
@@ -766,7 +821,12 @@ class AMP(Algorithm):
         self.disc_replay.push(current_cpu.index_select(0, indices))
         return int(keep)
 
-    def _disc_update(self, current_cpu: torch.Tensor, demo_cpu: torch.Tensor) -> dict[str, float]:
+    def _disc_update(
+        self,
+        current_cpu: torch.Tensor,
+        demo_cpu: torch.Tensor,
+        sampler: _MimicKitIndexSampler,
+    ) -> dict[str, float]:
         count = int(current_cpu.shape[0])
         if count == 0:
             return {"disc/update_steps": 0.0, "disc/skipped_no_current": 1.0}
@@ -776,7 +836,7 @@ class AMP(Algorithm):
         grad_total = 0.0
         self.discriminator.train()
         for _ in range(update_steps):
-            idx = torch.randint(count, (batch_size,), device="cpu")
+            idx = sampler.sample(batch_size).to(device="cpu")
             current = current_cpu.index_select(0, idx).to(device=self.env.device, dtype=torch.float32)
             demo = demo_cpu.index_select(0, idx).to(device=self.env.device, dtype=torch.float32)
             replay = self.disc_replay.sample(batch_size, device=self.env.device, dtype=torch.float32)
@@ -812,19 +872,22 @@ class AMP(Algorithm):
         start = time.perf_counter()
         current_cpu = rollout["disc_windows"]
         demo_cpu = self._sample_demo_windows_cpu(int(current_cpu.shape[0]))
+        normalizer_update_enabled = self._need_normalizer_update()
         normalizer_samples = self._record_disc_normalizer(current_cpu, demo_cpu)
         replay_added = self._store_disc_replay_data(current_cpu)
+        sampler = _MimicKitIndexSampler(int(current_cpu.shape[0]), device=self.env.device)
         critic_start = time.perf_counter()
-        critic_metrics = self._critic_update(rollout)
+        critic_metrics = self._critic_update(rollout, sampler)
         critic_time = time.perf_counter() - critic_start
         actor_start = time.perf_counter()
-        actor_metrics = self._actor_update(rollout)
+        actor_metrics = self._actor_update(rollout, sampler)
         actor_time = time.perf_counter() - actor_start
         disc_start = time.perf_counter()
-        disc_metrics = self._disc_update(current_cpu, demo_cpu)
+        disc_metrics = self._disc_update(current_cpu, demo_cpu, sampler)
         disc_time = time.perf_counter() - disc_start
         obs_committed = self.obs_normalizer.commit() if self.empirical_normalization else False
         committed = self.disc_normalizer.commit()
+        self._advance_normalizer_sample_count(int(current_cpu.shape[0]))
 
         metrics = self._build_metrics(rollout, collect_time, time.perf_counter() - start)
         metrics.update(critic_metrics)
@@ -846,6 +909,9 @@ class AMP(Algorithm):
                 "obs_norm/committed_this_update": float(obs_committed),
                 "disc_norm/policy_samples_update": float(normalizer_samples),
                 "disc_norm/expert_samples_update": float(normalizer_samples),
+                "normalizer/update_enabled": float(normalizer_update_enabled),
+                "normalizer/sample_count": float(self.normalizer_sample_count),
+                "normalizer/sample_limit": float(self.cfg.normalizer_samples),
                 "disc_replay/added_this_update": float(replay_added),
                 "timing/collect_s": float(collect_time),
                 "timing/critic_update_s": float(critic_time),

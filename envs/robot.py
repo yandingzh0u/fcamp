@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 from gymnasium import spaces
+from pxr import UsdPhysics
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, AssetBaseCfg
@@ -56,7 +57,10 @@ class G1Env:
         self.sim = SimulationContext(sim_cfg)
 
         scene_cfg = G1SceneConfig(num_envs=cfg.num_envs, env_spacing=2.5)
+        use_ground_filter = task.terrain == "plane" and cfg.motion_reference_mode == "mimickit_add"
         if task.terrain == "plane":
+            if use_ground_filter:
+                scene_cfg.contact_forces.filter_prim_paths_expr = ["/World/ground.*"]
             scene_cfg.terrain = AssetBaseCfg(
                 prim_path="/World/ground",
                 spawn=sim_utils.GroundPlaneCfg(
@@ -69,8 +73,15 @@ class G1Env:
                 ),
             )
         scene_cfg.robot = make_g1_cfg("{ENV_REGEX_NS}/Robot", fix_root_link=cfg.fix_root_link)
+        scene_cfg.contact_forces.update_period = cfg.sim_dt
         scene_cfg.contact_forces.debug_vis = contact_debug_vis
         self.scene = InteractiveScene(scene_cfg)
+        if use_ground_filter:
+            ground_path = "/World/ground"
+            UsdPhysics.RigidBodyAPI.Apply(self.scene.stage.GetPrimAtPath(ground_path))
+            UsdPhysics.RigidBodyAPI.Get(
+                self.scene.stage, ground_path
+            ).GetKinematicEnabledAttr().Set(True)
         self.robot: Articulation = self.scene["robot"]
 
         self.sim.set_camera_view((2.5, 2.5, 1.6), (0.0, 0.0, 0.8))
@@ -189,6 +200,11 @@ class G1Env:
         joint_pos, joint_vel = self.get_action_joint_state()
         return torch.cat([joint_pos, joint_vel], dim=-1)
 
+    def get_mimic_root_velocity_w(self) -> torch.Tensor:
+        if self.config.motion_reference_mode == "mimickit_add":
+            return self.robot.data.root_link_vel_w
+        return self.robot.data.root_vel_w
+
     def _write_robot_state(
         self,
         root_pos: torch.Tensor,
@@ -216,7 +232,10 @@ class G1Env:
         sim_joint_vel[:, self.action_joint_ids] = joint_vel
 
         self.robot.write_root_pose_to_sim(root_state[:, :7], env_ids=env_ids)
-        self.robot.write_root_velocity_to_sim(root_state[:, 7:], env_ids=env_ids)
+        if self.config.motion_reference_mode == "mimickit_add":
+            self.robot.write_root_link_velocity_to_sim(root_state[:, 7:], env_ids=env_ids)
+        else:
+            self.robot.write_root_velocity_to_sim(root_state[:, 7:], env_ids=env_ids)
         self.robot.write_joint_state_to_sim(sim_joint_pos, sim_joint_vel, env_ids=env_ids)
         self.robot.set_joint_position_target(sim_joint_pos, env_ids=env_ids)
         self.scene.write_data_to_sim()

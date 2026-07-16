@@ -6,10 +6,12 @@ from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
 from engine.config import EnvironmentConfig
 
 from .adaptive_sampling import AdaptiveTimestepsSampler
-from .imitation_data import G1_IMITATION_FRAME_DIM, G1_IMITATION_KEY_BODY_NAMES
+from .imitation_data import G1_IMITATION_FRAME_DIM, G1_IMITATION_KEY_BODY_NAMES, g1_add_disc_frame_dim
 from .spec import (
+    ADD_DISC_BODY_NAMES,
     CRITIC_OBS_DIM,
     OBS_DIM,
+    PROJECT_ROOT,
     PUSH_INTERVAL_STEP_RANGE,
     RESET_JOINT_POSITION_RANGE,
     RESET_ROOT_POSE_RANGE,
@@ -21,7 +23,12 @@ from .spec import (
     MIMIC_FOOT_BODY_NAMES,
     MIMIC_TERMINATION_BODY_NAMES,
 )
-from .motion import MimicMotionReference
+from .motion import (
+    MimicMotionReference,
+    mimickit_frame_delta,
+    mimickit_full_motion_steps,
+    sample_mimickit_phase,
+)
 from .observation import MimicObservationMixin
 from .reward import MimicRewardMixin
 from .robot import G1Env
@@ -69,12 +76,29 @@ class G1MimicEnv(
             dtype=torch.long,
             device=self.device,
         )
+        missing_add_disc_bodies = [name for name in ADD_DISC_BODY_NAMES if name not in self.robot.body_names]
+        if missing_add_disc_bodies:
+            raise ValueError(f"ADD discriminator bodies are missing from the robot asset: {missing_add_disc_bodies}")
+        self.add_disc_body_names = list(ADD_DISC_BODY_NAMES)
+        self.add_disc_body_ids = torch.tensor(
+            [self.robot.body_names.index(name) for name in self.add_disc_body_names],
+            dtype=torch.long,
+            device=self.device,
+        )
         self.anchor_body_id = self.robot.body_names.index(MIMIC_ANCHOR_BODY_NAME)
         self.ee_body_names = list(MIMIC_EE_BODY_NAMES)
         self.ee_body_indices = [self.track_body_names.index(name) for name in MIMIC_EE_BODY_NAMES]
         termination_names = MIMIC_TERMINATION_BODY_NAMES
         self.termination_body_indices = [self.track_body_names.index(name) for name in termination_names]
         self.contact_sensor = self.scene["contact_forces"]
+        if self.uses_mimickit_motion_reference:
+            force_matrix = self.contact_sensor.data.force_matrix_w
+            expected_shape = (self.num_envs, len(self.contact_sensor.body_names), 1, 3)
+            if not torch.is_tensor(force_matrix) or tuple(force_matrix.shape) != expected_shape:
+                actual_shape = None if force_matrix is None else tuple(force_matrix.shape)
+                raise RuntimeError(
+                    f"Ground-filter contact matrix shape mismatch: expected {expected_shape}, got {actual_shape}"
+                )
         self.contact_robot_body_ids = torch.tensor(
             [
                 self.robot.body_names.index(body_name) if body_name in self.robot.body_names else -1
@@ -118,6 +142,19 @@ class G1MimicEnv(
             dtype=torch.long,
             device=self.device,
         )
+        # MimicKit ADD reads contact_bodies from the environment config.  This
+        # port keeps the largebox task's contact semantics instead of hardcoding
+        # the official walking whitelist.
+        self.add_allowed_contact_body_ids = torch.tensor(
+            [
+                self.contact_sensor.body_names.index(body_name)
+                for body_name in self.contact_sensor.body_names
+                if any(token in body_name for token in amp_contact_allowed)
+            ],
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.add_undesired_contact_body_ids = self.amp_undesired_contact_body_ids.clone()
         self.foot_body_names = list(MIMIC_FOOT_BODY_NAMES)
         self.foot_contact_body_ids = torch.tensor(
             [self.contact_sensor.body_names.index(name) for name in self.foot_body_names],
@@ -139,6 +176,9 @@ class G1MimicEnv(
             robot_body_names=list(self.robot.body_names),
             action_joint_names=list(G1_29DOF_ACTION_NAMES),
             root_body_name="pelvis",
+            required_body_names=ADD_DISC_BODY_NAMES,
+            kinematic_urdf_file=PROJECT_ROOT / "assets" / "robots" / "holosoma_g1" / "g1_29dof.urdf",
+            motion_reference_mode=cfg.motion_reference_mode,
         )
         self._init_adaptive_motion_sampling()
 
@@ -173,6 +213,28 @@ class G1MimicEnv(
     @property
     def imitation_frame_dim(self) -> int:
         return G1_IMITATION_FRAME_DIM
+
+    @property
+    def add_disc_frame_dim(self) -> int:
+        return g1_add_disc_frame_dim(len(self.add_disc_body_names))
+
+    @property
+    def uses_mimickit_motion_reference(self) -> bool:
+        return self.config.motion_reference_mode == "mimickit_add"
+
+    @property
+    def motion_frame_delta(self) -> float:
+        return mimickit_frame_delta(self.motion.fps, self.dt) if self.uses_mimickit_motion_reference else 1.0
+
+    def full_motion_control_steps(self) -> int:
+        if not self.uses_mimickit_motion_reference:
+            return max(1, self.motion_end_phase - self.motion_start_phase)
+        return mimickit_full_motion_steps(
+            self.motion_start_phase,
+            self.motion_end_phase,
+            self.motion.fps,
+            self.dt,
+        )
 
     def get_imitation_demo_history(
         self,
@@ -229,7 +291,15 @@ class G1MimicEnv(
         if num_samples < 0:
             raise ValueError(f"num_samples must be >= 0, got {num_samples}")
         if num_samples == 0:
-            return torch.empty(0, dtype=torch.long, device=self.device)
+            dtype = torch.float32 if self.uses_mimickit_motion_reference else torch.long
+            return torch.empty(0, dtype=dtype, device=self.device)
+        if self.uses_mimickit_motion_reference:
+            return sample_mimickit_phase(
+                num_samples,
+                self.motion_start_phase,
+                self.motion_end_phase,
+                device=self.device,
+            )
         min_phase, max_phase = self._adaptive_phase_range(horizon)
         if max_phase < min_phase:
             return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
@@ -376,9 +446,8 @@ class G1MimicEnv(
         )
         self._failure_recorded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.record_motion_failures = True
-        # Preserve Flow-CPS's historical default.  FCAMP opts in through its own
-        # environment config without requiring this module to import FCAMP.
-        self.terminate_on_motion_end = bool(getattr(self.config, "terminate_on_motion_end", False))
+        self.termination_mode = str(self.config.termination_mode)
+        self.terminate_on_motion_end = bool(self.config.terminate_on_motion_end)
 
     def _record_adaptive_failures(
         self,
