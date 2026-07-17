@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import hashlib
+import json
 from pathlib import Path
 import os
 import shutil
@@ -15,26 +17,88 @@ _RESUME_ENV_KEYS = (
     "decimation",
     "fix_root_link",
     "max_episode_steps",
+    "motion_start_phase",
+    "motion_end_phase",
     "reset_phase_sampling",
+    "rsi_keyframe_count",
+    "startup_randomization",
+    "reset_noise",
+    "interval_pushes",
+    "observation_noise",
+    "adaptive_motion_sampling",
+    "adaptive_num_bins",
+    "adaptive_alpha",
+    "adaptive_predecessor_ratio",
+    "adaptive_predecessor_lookback_bins",
+    "adaptive_uniform_ratio",
+    "adaptive_kernel_size",
+    "adaptive_lambda",
     "termination_mode",
     "terminate_on_motion_end",
     "motion_reference_mode",
     "root_velocity_mode",
+    "policy_observation_mode",
+    "motion_end_behavior",
+    "action_rate_weight",
+    "physics_material_combine_mode",
+    "contact_sensor_update_period",
 )
+
+_RESUME_ENV_DEFAULTS = {
+    "adaptive_uniform_ratio": 0.1,
+    "adaptive_kernel_size": 1,
+    "adaptive_lambda": 0.8,
+    "policy_observation_mode": "tracking",
+    "motion_end_behavior": "hold_last",
+    "physics_material_combine_mode": "average",
+    "contact_sensor_update_period": "control",
+}
 
 
 def _resume_signature(config: dict) -> dict:
     environment = config.get("environment", {})
     return {
         "method": config.get("method", config.get("algorithm")),
-        "environment": {key: environment.get(key) for key in _RESUME_ENV_KEYS},
+        "environment": {
+            key: environment.get(key, _RESUME_ENV_DEFAULTS.get(key))
+            for key in _RESUME_ENV_KEYS
+        },
         "parameters": config.get("parameters"),
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _platform_identity(task_name: str) -> dict[str, str]:
+    from envs.robots.g1 import G1_29DOF_ACTION_NAMES, G1_LOCAL_URDF_PATH
+    from envs.tasks import resolve_task
+
+    dataset_path = resolve_task(task_name).motion_file.resolve()
+    robot_path = G1_LOCAL_URDF_PATH.resolve()
+    action_schema = json.dumps(
+        G1_29DOF_ACTION_NAMES,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "dataset_sha256": _file_sha256(dataset_path),
+        "robot_asset_sha256": _file_sha256(robot_path),
+        "action_schema_sha256": hashlib.sha256(action_schema).hexdigest(),
     }
 
 
 class Checkpointer:
     def __init__(self, trainer):
         self.t = trainer
+        task_name = getattr(getattr(trainer, "env_cfg", None), "task", None)
+        self.platform_identity = (
+            _platform_identity(str(task_name)) if task_name is not None else None
+        )
 
     def target_reached(self, metrics: dict[str, float]) -> bool:
         tcfg = self.t.train_cfg
@@ -65,6 +129,7 @@ class Checkpointer:
             "algo_state": t.algo.extra_checkpoint_state(),
             "env_transitions_total": int(t.env_transitions_total),
             "train_wall_seconds_total": float(t.train_wall_seconds_total),
+            "platform_identity": self.platform_identity,
         }
         payload["adaptive_sampler_state"] = t.env.adaptive_sampler.state_dict()
         payload["torch_rng_state"] = torch.random.get_rng_state()
@@ -99,6 +164,17 @@ class Checkpointer:
                     "Checkpoint training semantics do not match the current config; "
                     "start a fresh run instead of crossing dataset/platform/recipe profiles."
                 )
+        saved_platform_identity = payload.get("platform_identity")
+        if saved_platform_identity is not None and self.platform_identity is not None:
+            if saved_platform_identity != self.platform_identity:
+                raise ValueError(
+                    "Checkpoint dataset/robot/action schema does not match the current platform."
+                )
+        else:
+            print(
+                "[CHECKPOINT] WARN: legacy checkpoint has no dataset/robot/action-schema hashes.",
+                flush=True,
+            )
         t.algo.policy.load_state_dict(payload["policy"])
         reset_optimizer = bool(t.train_cfg.reset_optimizer_on_resume)
         if reset_optimizer:

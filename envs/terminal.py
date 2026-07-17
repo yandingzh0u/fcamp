@@ -11,6 +11,11 @@ from .spec import (
 )
 
 
+BEYONDMIMIC_ANCHOR_Z_TERMINATION_THRESHOLD = 0.25
+BEYONDMIMIC_ANCHOR_ORI_TERMINATION_THRESHOLD = 0.8
+BEYONDMIMIC_EE_Z_TERMINATION_THRESHOLD = 0.25
+
+
 class MimicTerminationMixin:
     def _amp_ground_contact_forces_w(self) -> torch.Tensor:
         """Match MimicKit's IsaacLab ground-filtered contact forces."""
@@ -63,6 +68,41 @@ class MimicTerminationMixin:
         ee_z_error_max = ee_z_error.max(dim=-1).values
         ee_z_error_mean = ee_z_error.mean(dim=-1)
         time_out = self.episode_steps >= self.max_episode_steps
+
+        if getattr(self, "termination_mode", "tracking") == "beyondmimic":
+            # Official BeyondMimic uses only these three tracking failures.
+            # In particular, undesired contact contributes a reward penalty
+            # but is never a termination condition.
+            anchor_pos_bad = (
+                anchor_z_error > BEYONDMIMIC_ANCHOR_Z_TERMINATION_THRESHOLD
+            )
+            anchor_ori_bad = (
+                anchor_gravity_z_error
+                > BEYONDMIMIC_ANCHOR_ORI_TERMINATION_THRESHOLD
+            )
+            ee_body_bad = torch.any(
+                termination_z_error
+                > BEYONDMIMIC_EE_Z_TERMINATION_THRESHOLD,
+                dim=-1,
+            )
+            zeros = torch.zeros_like(time_out)
+            done = time_out | anchor_pos_bad | anchor_ori_bad | ee_body_bad
+            return done, {
+                "time_out": time_out,
+                "motion_complete": zeros,
+                "anchor_pos_bad": anchor_pos_bad,
+                "anchor_ori_bad": anchor_ori_bad,
+                "ee_body_bad": ee_body_bad,
+                "fall_contact": zeros,
+            }, {
+                "anchor_z_error": anchor_z_error,
+                "anchor_gravity_z_error": anchor_gravity_z_error,
+                "robot_anchor_height": robot_anchor_height,
+                "robot_anchor_tilt": robot_anchor_tilt,
+                "ee_z_error_max": ee_z_error_max,
+                "ee_z_error_mean": ee_z_error_mean,
+                "ee_z_error_by_body": ee_z_error,
+            }
 
         if getattr(self, "termination_mode", "tracking") == "add":
             ground_contact_forces = self._amp_ground_contact_forces_w()

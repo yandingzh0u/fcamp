@@ -13,6 +13,7 @@ from isaaclab.sim import SimulationContext
 from .spec import (
     G1SceneConfig,
     G1_MIMIC_ACTION_SCALE_VALUES,
+    BEYONDMIMIC_PUSH_INTERVAL_SECONDS,
     PUSH_INTERVAL_STEP_RANGE,
     STARTUP_BASE_COM_RANGE,
     STARTUP_JOINT_DEFAULT_POS_RANGE,
@@ -40,6 +41,9 @@ class G1Env:
         self._render_step_index = 0
         self.render = render
         self.render_every = max(1, int(render_every))
+        self._uses_beyondmimic_randomization_order = (
+            cfg.reset_phase_sampling == "beyondmimic"
+        )
 
         sim_cfg = sim_utils.SimulationCfg(
             device=cfg.device,
@@ -48,10 +52,13 @@ class G1Env:
         )
 
 
+        combine_mode = str(cfg.physics_material_combine_mode)
         sim_cfg.physics_material = sim_utils.RigidBodyMaterialCfg(
             static_friction=1.0,
             dynamic_friction=1.0,
             restitution=0.0,
+            friction_combine_mode=combine_mode,
+            restitution_combine_mode=combine_mode,
         )
         sim_cfg.physx.gpu_max_rigid_patch_count = 10 * 2**15
         self.sim = SimulationContext(sim_cfg)
@@ -73,11 +80,17 @@ class G1Env:
                         static_friction=1.0,
                         dynamic_friction=1.0,
                         restitution=0.0,
+                        friction_combine_mode=combine_mode,
+                        restitution_combine_mode=combine_mode,
                     ),
                 ),
             )
         scene_cfg.robot = make_g1_cfg("{ENV_REGEX_NS}/Robot", fix_root_link=cfg.fix_root_link)
-        scene_cfg.contact_forces.update_period = cfg.sim_dt
+        scene_cfg.contact_forces.update_period = (
+            self.physics_dt
+            if cfg.contact_sensor_update_period == "physics"
+            else cfg.sim_dt
+        )
         scene_cfg.contact_forces.debug_vis = contact_debug_vis
         self.scene = InteractiveScene(scene_cfg)
         if use_ground_filter:
@@ -90,8 +103,10 @@ class G1Env:
 
         self.sim.set_camera_view((2.5, 2.5, 1.6), (0.0, 0.0, 0.8))
         self.sim.reset()
+        self.startup_randomization_applied = False
         if cfg.startup_randomization:
             self._apply_official_startup_events()
+            self.startup_randomization_applied = True
 
         action_joint_ids = self.robot.find_joints(G1_29DOF_ACTION_NAMES, preserve_order=True)[0]
         self.action_joint_ids = torch.tensor(action_joint_ids, dtype=torch.long, device=self.sim.device)
@@ -107,19 +122,39 @@ class G1Env:
             device=self.device,
         ).unsqueeze(0)
         self._action_space = self._build_action_space()
-        min_push, max_push = PUSH_INTERVAL_STEP_RANGE
-        self.next_push_step = torch.randint(
-            min_push,
-            max_push + 1,
-            (self.num_envs,),
-            dtype=torch.long,
-            device=self.device,
+        self.beyondmimic_global_push_timer = (
+            cfg.reset_phase_sampling == "beyondmimic"
         )
+        self._push_interval_step_range = PUSH_INTERVAL_STEP_RANGE
+        self._push_interval_time_range = BEYONDMIMIC_PUSH_INTERVAL_SECONDS
+        min_push, max_push = self._push_interval_step_range
+        if self.beyondmimic_global_push_timer:
+            low, high = self._push_interval_time_range
+            self.push_time_left = low + (high - low) * torch.rand(
+                self.num_envs, device=self.device
+            )
+            # Kept only for the common validation-state schema. BeyondMimic
+            # schedules pushes exclusively with the continuous timer above.
+            self.next_push_step = torch.ceil(self.push_time_left / self.dt).long()
+        else:
+            self.push_time_left = torch.full(
+                (self.num_envs,), float("inf"), device=self.device
+            )
+            self.next_push_step = torch.randint(
+                min_push,
+                max_push + 1,
+                (self.num_envs,),
+                dtype=torch.long,
+                device=self.device,
+            )
         # per-env episode-step of the FIRST interval push (-1 = not yet pushed).
         # Used by validation to decompose the 50-100 cliff into "died before
         # push" (early collapse) vs "pushed then died" (push-recovery failure).
         self.first_push_step = torch.full(
             (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
+        self._last_interval_push_mask = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
         )
 
         self._reset_default_pose()
@@ -158,47 +193,47 @@ class G1Env:
         return joint_pos, joint_vel
 
     def _apply_official_startup_events(self) -> None:
-        self._randomize_joint_default_pos()
-        self._randomize_torso_com()
-        self._randomize_rigid_body_material()
+        if self._uses_beyondmimic_randomization_order:
+            # BeyondMimic's EventManager preserves EventCfg declaration order.
+            self._randomize_rigid_body_material()
+            self._randomize_joint_default_pos()
+            self._randomize_torso_com()
+        else:
+            self._randomize_joint_default_pos()
+            self._randomize_torso_com()
+            self._randomize_rigid_body_material()
 
     def _randomize_joint_default_pos(self) -> None:
         low, high = STARTUP_JOINT_DEFAULT_POS_RANGE
         self.robot.data.default_joint_pos += low + (high - low) * torch.rand_like(self.robot.data.default_joint_pos)
 
     def _randomize_torso_com(self) -> None:
-        try:
-            torso_id = self.robot.body_names.index("torso_link")
-            env_ids_cpu = torch.arange(self.num_envs, device="cpu")
-            body_ids_cpu = torch.tensor([torso_id], dtype=torch.int, device="cpu")
-            range_tensor = torch.tensor(STARTUP_BASE_COM_RANGE, dtype=torch.float32, device="cpu")
-            rand_samples = (
-                range_tensor[:, 0]
-                + (range_tensor[:, 1] - range_tensor[:, 0])
-                * torch.rand((self.num_envs, 3), device="cpu")
-            ).unsqueeze(1)
-            coms = self.robot.root_physx_view.get_coms().clone()
-            coms[env_ids_cpu[:, None], body_ids_cpu, :3] += rand_samples
-            self.robot.root_physx_view.set_coms(coms, env_ids_cpu)
-        except Exception as exc:
-            print(f"[WARN] Failed to apply official torso COM startup randomization: {exc}", flush=True)
+        torso_id = self.robot.body_names.index("torso_link")
+        env_ids_cpu = torch.arange(self.num_envs, device="cpu")
+        body_ids_cpu = torch.tensor([torso_id], dtype=torch.int, device="cpu")
+        range_tensor = torch.tensor(STARTUP_BASE_COM_RANGE, dtype=torch.float32, device="cpu")
+        rand_samples = (
+            range_tensor[:, 0]
+            + (range_tensor[:, 1] - range_tensor[:, 0])
+            * torch.rand((self.num_envs, 3), device="cpu")
+        ).unsqueeze(1)
+        coms = self.robot.root_physx_view.get_coms().clone()
+        coms[env_ids_cpu[:, None], body_ids_cpu, :3] += rand_samples
+        self.robot.root_physx_view.set_coms(coms, env_ids_cpu)
 
     def _randomize_rigid_body_material(self) -> None:
-        try:
-            env_ids_cpu = torch.arange(self.num_envs, device="cpu")
-            total_num_shapes = self.robot.root_physx_view.max_shapes
-            ranges = torch.tensor(
-                ((0.3, 1.6), (0.3, 1.2), (0.0, 0.5)),
-                dtype=torch.float32,
-                device="cpu",
-            )
-            buckets = ranges[:, 0] + (ranges[:, 1] - ranges[:, 0]) * torch.rand((64, 3), device="cpu")
-            bucket_ids = torch.randint(0, 64, (self.num_envs, total_num_shapes), device="cpu")
-            materials = self.robot.root_physx_view.get_material_properties()
-            materials[env_ids_cpu] = buckets[bucket_ids]
-            self.robot.root_physx_view.set_material_properties(materials, env_ids_cpu)
-        except Exception as exc:
-            print(f"[WARN] Failed to apply official rigid-body material startup randomization: {exc}", flush=True)
+        env_ids_cpu = torch.arange(self.num_envs, device="cpu")
+        total_num_shapes = self.robot.root_physx_view.max_shapes
+        ranges = torch.tensor(
+            ((0.3, 1.6), (0.3, 1.2), (0.0, 0.5)),
+            dtype=torch.float32,
+            device="cpu",
+        )
+        buckets = ranges[:, 0] + (ranges[:, 1] - ranges[:, 0]) * torch.rand((64, 3), device="cpu")
+        bucket_ids = torch.randint(0, 64, (self.num_envs, total_num_shapes), device="cpu")
+        materials = self.robot.root_physx_view.get_material_properties()
+        materials[env_ids_cpu] = buckets[bucket_ids]
+        self.robot.root_physx_view.set_material_properties(materials, env_ids_cpu)
 
     def get_observation(self) -> torch.Tensor:
         joint_pos, joint_vel = self.get_action_joint_state()

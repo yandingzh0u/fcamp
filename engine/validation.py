@@ -134,6 +134,7 @@ def _reset_alignment_metrics(env, prefix: str) -> dict[str, float]:
     }
 
 
+@torch.inference_mode()
 def run_validation_rollout(
     trainer, fixed_seed: int | None = None, start_phase_override: int | None = None
 ) -> dict[str, float]:

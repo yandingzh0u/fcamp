@@ -7,14 +7,13 @@ import torch
 from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
 from engine.config import EnvironmentConfig
 
-from .adaptive_sampling import AdaptiveTimestepsSampler
+from .adaptive_sampling import AdaptiveTimestepsSampler, BeyondMimicAdaptiveSampler
 from .imitation_data import G1_IMITATION_FRAME_DIM, G1_IMITATION_KEY_BODY_NAMES, g1_add_disc_frame_dim
 from .spec import (
     ADD_DISC_BODY_NAMES,
     CRITIC_OBS_DIM,
     OBS_DIM,
     PROJECT_ROOT,
-    PUSH_INTERVAL_STEP_RANGE,
     RESET_JOINT_POSITION_RANGE,
     RESET_ROOT_POSE_RANGE,
     VELOCITY_RANGE,
@@ -31,7 +30,7 @@ from .motion import (
     mimickit_full_motion_steps,
     sample_mimickit_phase,
 )
-from .observation import MimicObservationMixin
+from .observation import BEYONDMIMIC_POLICY_OBS_DIM, MimicObservationMixin
 from .reward import MimicRewardMixin
 from .robot import G1Env
 from .robots.g1 import G1_29DOF_ACTION_NAMES
@@ -182,6 +181,13 @@ class G1MimicEnv(
             kinematic_urdf_file=PROJECT_ROOT / "assets" / "robots" / "holosoma_g1" / "g1_29dof.urdf",
             motion_reference_mode=cfg.motion_reference_mode,
         )
+        self._beyondmimic_body_pos_relative_w = torch.zeros(
+            self.num_envs, len(self.track_body_names), 3, device=self.device
+        )
+        self._beyondmimic_body_quat_relative_w = torch.zeros(
+            self.num_envs, len(self.track_body_names), 4, device=self.device
+        )
+        self._beyondmimic_body_quat_relative_w[..., 0] = 1.0
         self._init_adaptive_motion_sampling()
 
 
@@ -206,11 +212,22 @@ class G1MimicEnv(
 
     @property
     def observation_dim(self) -> int:
+        observation_mode = getattr(
+            self,
+            "policy_observation_mode",
+            getattr(self.config, "policy_observation_mode", "tracking"),
+        )
+        if observation_mode == "beyondmimic":
+            return BEYONDMIMIC_POLICY_OBS_DIM
         return OBS_DIM
 
     @property
     def critic_observation_dim(self) -> int:
         return CRITIC_OBS_DIM
+
+    @property
+    def push_interval_step_range(self) -> tuple[int, int]:
+        return self._push_interval_step_range
 
     @property
     def imitation_frame_dim(self) -> int:
@@ -330,10 +347,21 @@ class G1MimicEnv(
         return self.reset_envs(env_ids=env_ids, phase_indices=phase_indices)
 
     def reset_envs(self, env_ids: torch.Tensor, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
+        self._reset_env_state(env_ids, phase_indices=phase_indices)
+        if env_ids.numel() == 0:
+            return torch.empty(0, self.observation_dim, device=self.device)
+        observation = self.get_observation()
+        return observation.index_select(0, env_ids)
+
+    def _reset_env_state(
+        self,
+        env_ids: torch.Tensor,
+        phase_indices: torch.Tensor | None = None,
+    ) -> None:
         if env_ids.ndim != 1:
             raise ValueError(f"env_ids must have shape (N,), got {tuple(env_ids.shape)}")
         if env_ids.numel() == 0:
-            return torch.empty(0, self.observation_dim, device=self.device)
+            return
         if phase_indices is None:
             phase_indices = self.sample_phase_indices(env_ids.numel(), horizon=1)
         if phase_indices.shape != (env_ids.numel(),):
@@ -356,15 +384,7 @@ class G1MimicEnv(
 
 
         self._failure_recorded[env_ids] = False
-        min_push, max_push = PUSH_INTERVAL_STEP_RANGE
-        self.next_push_step[env_ids] = torch.randint(
-            min_push,
-            max_push + 1,
-            (env_ids.numel(),),
-            dtype=torch.long,
-            device=self.device,
-        )
-        self.first_push_step[env_ids] = -1
+        self._reset_interval_push_schedule(env_ids)
 
         self.scene.reset(env_ids=env_ids)
         reference = self.motion.get_frame(phase_indices)
@@ -386,8 +406,6 @@ class G1MimicEnv(
             env_ids=env_ids,
         )
         self.scene.update(self.physics_dt)
-        observation = self.get_observation()
-        return observation.index_select(0, env_ids)
 
     def _uniform(self, ranges: tuple[tuple[float, float], ...], shape: tuple[int, int]) -> torch.Tensor:
         range_tensor = torch.tensor(ranges, dtype=torch.float32, device=self.device)
@@ -415,7 +433,16 @@ class G1MimicEnv(
         root_ang_vel += velocity_noise[:, 3:]
 
         joint_low, joint_high = RESET_JOINT_POSITION_RANGE
-        joint_pos += joint_low + (joint_high - joint_low) * torch.rand_like(joint_pos)
+        if self.reset_phase_sampling == "beyondmimic":
+            # MotionCommand samples all environments before selecting reset rows.
+            full_joint_noise = joint_low + (joint_high - joint_low) * torch.rand(
+                self.num_envs, self.action_dim, device=self.device
+            )
+            joint_pos += full_joint_noise.index_select(0, env_ids)
+        else:
+            joint_pos += joint_low + (joint_high - joint_low) * torch.rand_like(
+                joint_pos
+            )
         soft_limits = self.robot.data.soft_joint_pos_limits.index_select(0, env_ids)
         joint_pos[:] = torch.clamp(joint_pos, soft_limits[:, self.action_joint_ids, 0], soft_limits[:, self.action_joint_ids, 1])
 
@@ -432,22 +459,59 @@ class G1MimicEnv(
     def _init_adaptive_motion_sampling(self) -> None:
         self.reset_phase_sampling = str(self.config.reset_phase_sampling)
         self.rsi_keyframe_count = int(self.config.rsi_keyframe_count)
-        self.adaptive_motion_sampling = bool(
-            self.config.adaptive_motion_sampling and self.reset_phase_sampling == "adaptive"
+        env_fps = (
+            int(round(1.0 / float(self.config.sim_dt)))
+            if float(self.config.sim_dt) > 0
+            else 50
         )
-        self.adaptive_sampler = AdaptiveTimestepsSampler(
-            motion_time_step_total=int(self.motion.num_frames),
-            device=self.device,
-            num_bins=int(self.config.adaptive_num_bins),
-            env_fps=int(round(1.0 / float(self.config.sim_dt))) if float(self.config.sim_dt) > 0 else 50,
-            adaptive_alpha=float(self.config.adaptive_alpha),
-            adaptive_predecessor_ratio=float(self.config.adaptive_predecessor_ratio),
-            adaptive_predecessor_lookback_bins=int(self.config.adaptive_predecessor_lookback_bins),
-        )
+        if self.reset_phase_sampling == "beyondmimic":
+            # BeyondMimic's command sampler is an intrinsic part of the
+            # algorithm, not the predecessor-biased optional sampler used by
+            # the other methods.
+            self.adaptive_motion_sampling = True
+            self.adaptive_sampler = BeyondMimicAdaptiveSampler(
+                motion_time_step_total=int(self.motion.num_frames),
+                device=self.device,
+                env_fps=env_fps,
+                adaptive_alpha=float(self.config.adaptive_alpha),
+                adaptive_uniform_ratio=float(
+                    getattr(self.config, "adaptive_uniform_ratio", 0.1)
+                ),
+                adaptive_kernel_size=int(
+                    getattr(self.config, "adaptive_kernel_size", 1)
+                ),
+                adaptive_lambda=float(
+                    getattr(self.config, "adaptive_lambda", 0.8)
+                ),
+            )
+        else:
+            self.adaptive_motion_sampling = bool(
+                self.config.adaptive_motion_sampling
+                and self.reset_phase_sampling == "adaptive"
+            )
+            self.adaptive_sampler = AdaptiveTimestepsSampler(
+                motion_time_step_total=int(self.motion.num_frames),
+                device=self.device,
+                num_bins=int(self.config.adaptive_num_bins),
+                env_fps=env_fps,
+                adaptive_alpha=float(self.config.adaptive_alpha),
+                adaptive_predecessor_ratio=float(
+                    self.config.adaptive_predecessor_ratio
+                ),
+                adaptive_predecessor_lookback_bins=int(
+                    self.config.adaptive_predecessor_lookback_bins
+                ),
+            )
         self._failure_recorded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.record_motion_failures = True
         self.termination_mode = str(self.config.termination_mode)
         self.terminate_on_motion_end = bool(self.config.terminate_on_motion_end)
+        self.policy_observation_mode = str(
+            getattr(self.config, "policy_observation_mode", "tracking")
+        )
+        self.motion_end_behavior = str(
+            getattr(self.config, "motion_end_behavior", "hold_last")
+        )
         self.reset_noise = bool(self.config.reset_noise)
         self.interval_pushes = bool(self.config.interval_pushes)
 
@@ -472,9 +536,9 @@ class G1MimicEnv(
 
     def adaptive_sampling_stats(self) -> dict[str, float]:
         min_phase, max_phase = self._adaptive_phase_range(horizon=1)
-        if self.reset_phase_sampling == "adaptive":
+        if self.reset_phase_sampling in {"adaptive", "beyondmimic"}:
             stats = self.adaptive_sampler.stats(min_phase, max_phase)
-            stats["mode"] = 0.0
+            stats["mode"] = 4.0 if self.reset_phase_sampling == "beyondmimic" else 0.0
             return stats
         if self.reset_phase_sampling == "rsi":
             keyframes = self._rsi_keyframe_phases(min_phase, max_phase)

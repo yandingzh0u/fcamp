@@ -5,7 +5,7 @@ import torch
 
 def snapshot_env_state(env) -> dict[str, torch.Tensor]:
     robot = env.robot
-    return {
+    snapshot = {
         "root_pose_w": robot.data.root_link_pose_w.clone(),
         "root_velocity_w": env.get_mimic_root_velocity_w().clone(),
         "joint_pos": robot.data.joint_pos.clone(),
@@ -18,11 +18,32 @@ def snapshot_env_state(env) -> dict[str, torch.Tensor]:
         ),
         "last_action": env.last_action.clone(),
         "next_push_step": env.next_push_step.clone(),
+        "push_time_left": env.push_time_left.clone(),
         "first_push_step": env.first_push_step.clone(),
         "adaptive_bin_failed_count": env.adaptive_sampler.bin_failed_count.clone(),
         "adaptive_current_bin_failed_count": env.adaptive_sampler.current_bin_failed_count.clone(),
         "failure_recorded": env._failure_recorded.clone(),
+        "beyondmimic_body_pos_relative_w": env._beyondmimic_body_pos_relative_w.clone(),
+        "beyondmimic_body_quat_relative_w": env._beyondmimic_body_quat_relative_w.clone(),
     }
+    sensor = env.contact_sensor
+    snapshot["contact_timestamp"] = sensor._timestamp.clone()
+    snapshot["contact_timestamp_last_update"] = sensor._timestamp_last_update.clone()
+    snapshot["contact_is_outdated"] = sensor._is_outdated.clone()
+    for name in (
+        "net_forces_w",
+        "net_forces_w_history",
+        "force_matrix_w",
+        "force_matrix_w_history",
+        "last_air_time",
+        "current_air_time",
+        "last_contact_time",
+        "current_contact_time",
+    ):
+        value = getattr(sensor.data, name, None)
+        if torch.is_tensor(value):
+            snapshot[f"contact_{name}"] = value.clone()
+    return snapshot
 
 
 def restore_env_state(env, snapshot: dict[str, torch.Tensor]) -> None:
@@ -40,21 +61,46 @@ def restore_env_state(env, snapshot: dict[str, torch.Tensor]) -> None:
         joint_vel=snapshot["joint_vel"][:, env.action_joint_ids],
         env_ids=env_ids,
     )
-    env.phase_steps = snapshot["phase_steps"].clone()
-    env.episode_steps = snapshot["episode_steps"].clone()
+    env.phase_steps.copy_(snapshot["phase_steps"])
+    env.episode_steps.copy_(snapshot["episode_steps"])
     if "episode_ids" in snapshot:
-        env.episode_ids = snapshot["episode_ids"].clone()
+        env.episode_ids.copy_(snapshot["episode_ids"])
         env._next_episode_id = int(snapshot["next_episode_id"].item())
     else:
         env.episode_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
         env._next_episode_id = int(env.num_envs)
-    env.last_action = snapshot["last_action"].clone()
-    env.next_push_step = snapshot["next_push_step"].clone()
-    env.first_push_step = snapshot["first_push_step"].clone()
+    env.last_action.copy_(snapshot["last_action"])
+    env.next_push_step.copy_(snapshot["next_push_step"])
+    env.push_time_left.copy_(snapshot["push_time_left"])
+    env.first_push_step.copy_(snapshot["first_push_step"])
     sampler = env.adaptive_sampler
     sampler.bin_failed_count.copy_(snapshot["adaptive_bin_failed_count"].to(sampler.bin_failed_count))
     sampler.current_bin_failed_count.copy_(
         snapshot["adaptive_current_bin_failed_count"].to(sampler.current_bin_failed_count)
     )
-    env._failure_recorded = snapshot["failure_recorded"].clone()
+    env._failure_recorded.copy_(snapshot["failure_recorded"])
     env.scene.update(env.physics_dt)
+    env._beyondmimic_body_pos_relative_w.copy_(
+        snapshot["beyondmimic_body_pos_relative_w"]
+    )
+    env._beyondmimic_body_quat_relative_w.copy_(
+        snapshot["beyondmimic_body_quat_relative_w"]
+    )
+    sensor = env.contact_sensor
+    for name in (
+        "net_forces_w",
+        "net_forces_w_history",
+        "force_matrix_w",
+        "force_matrix_w_history",
+        "last_air_time",
+        "current_air_time",
+        "last_contact_time",
+        "current_contact_time",
+    ):
+        saved = snapshot.get(f"contact_{name}")
+        current = getattr(sensor.data, name, None)
+        if torch.is_tensor(saved) and torch.is_tensor(current):
+            current.copy_(saved)
+    sensor._timestamp.copy_(snapshot["contact_timestamp"])
+    sensor._timestamp_last_update.copy_(snapshot["contact_timestamp_last_update"])
+    sensor._is_outdated.copy_(snapshot["contact_is_outdated"])

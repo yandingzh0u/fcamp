@@ -38,6 +38,13 @@ class EnvironmentConfig:
     terminate_on_motion_end: bool
     motion_reference_mode: str
     root_velocity_mode: str
+    policy_observation_mode: str
+    motion_end_behavior: str
+    adaptive_uniform_ratio: float
+    adaptive_kernel_size: int
+    adaptive_lambda: float
+    physics_material_combine_mode: str
+    contact_sensor_update_period: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,7 +231,35 @@ class ADDConfig(AMPConfig):
     """MimicKit ADD uses AMP's PPO knobs with a diff discriminator."""
 
 
-MethodConfig: TypeAlias = FCAMPConfig | AdaMimicConfig | AMPConfig | ADDConfig
+@dataclass(frozen=True, slots=True)
+class BeyondMimicConfig:
+    """Official whole_body_tracking PPO recipe used by BeyondMimic."""
+
+    actor_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
+    activation: str
+    rollout_env_steps: int
+    num_learning_epochs: int
+    num_mini_batches: int
+    clip_param: float
+    gamma: float
+    lam: float
+    value_loss_coef: float
+    entropy_coef: float
+    learning_rate: float
+    max_grad_norm: float
+    use_clipped_value_loss: bool
+    schedule: str
+    desired_kl: float
+    empirical_normalization: bool
+    init_at_random_ep_len: bool
+    init_noise_std: float
+    noise_std_type: str
+    state_dependent_std: bool
+    normalize_advantage_per_mini_batch: bool
+
+
+MethodConfig: TypeAlias = FCAMPConfig | AdaMimicConfig | AMPConfig | ADDConfig | BeyondMimicConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +303,7 @@ METHOD_CONFIGS = {
     "adamimic": AdaMimicConfig,
     "amp": AMPConfig,
     "add": ADDConfig,
+    "beyondmimic": BeyondMimicConfig,
 }
 
 
@@ -308,6 +344,8 @@ def _construct_method_config(method: str, values: dict[str, Any], source_path: P
         nested = dict(values)
         nested["checkpoint_path"] = _resolve_path(str(nested.get("checkpoint_path", "")), source_path)
         return _construct(AdaMimicConfig, nested)
+    if method == "beyondmimic":
+        return _construct(BeyondMimicConfig, dict(values))
     if method != "fcamp":
         raise ValueError(f"Unknown method {method!r}. Add method/{method}.py and register its config schema.")
     nested = dict(values)
@@ -368,6 +406,13 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
     environment_values.setdefault("terminate_on_motion_end", False)
     environment_values.setdefault("motion_reference_mode", "frame")
     environment_values.setdefault("root_velocity_mode", "com")
+    environment_values.setdefault("policy_observation_mode", "tracking")
+    environment_values.setdefault("motion_end_behavior", "hold_last")
+    environment_values.setdefault("adaptive_uniform_ratio", 0.1)
+    environment_values.setdefault("adaptive_kernel_size", 1)
+    environment_values.setdefault("adaptive_lambda", 0.8)
+    environment_values.setdefault("physics_material_combine_mode", "average")
+    environment_values.setdefault("contact_sensor_update_period", "control")
     training_values = dict(normalized["training"])
     training_values.setdefault("official_reset_every", 0)
     training_values["resume"] = _resolve_path(str(training_values["resume"]), source_path)
@@ -403,21 +448,42 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError("environment.decimation must be positive")
     if env.platform_profile not in {"custom", "g1_largebox_50hz"}:
         raise ValueError("environment.platform_profile must be custom or g1_largebox_50hz")
-    if env.reset_phase_sampling not in {"adaptive", "uniform", "continuous_uniform", "rsi", "zero"}:
+    if env.reset_phase_sampling not in {
+        "adaptive",
+        "beyondmimic",
+        "uniform",
+        "continuous_uniform",
+        "rsi",
+        "zero",
+    }:
         raise ValueError(
             "environment.reset_phase_sampling must be one of "
-            "adaptive/uniform/continuous_uniform/rsi/zero"
+            "adaptive/beyondmimic/uniform/continuous_uniform/rsi/zero"
         )
     if env.rsi_keyframe_count < 1:
         raise ValueError("environment.rsi_keyframe_count must be positive")
-    if env.adaptive_motion_sampling != (env.reset_phase_sampling == "adaptive"):
-        raise ValueError("environment.adaptive_motion_sampling must match reset_phase_sampling=adaptive")
-    if env.termination_mode not in {"tracking", "amp", "add"}:
-        raise ValueError("environment.termination_mode must be one of tracking/amp/add")
+    if env.adaptive_motion_sampling != (env.reset_phase_sampling in {"adaptive", "beyondmimic"}):
+        raise ValueError(
+            "environment.adaptive_motion_sampling must match an adaptive reset_phase_sampling mode"
+        )
+    if env.termination_mode not in {"tracking", "amp", "add", "beyondmimic"}:
+        raise ValueError("environment.termination_mode must be one of tracking/amp/add/beyondmimic")
     if env.motion_reference_mode not in {"frame", "mimickit_add"}:
         raise ValueError("environment.motion_reference_mode must be frame or mimickit_add")
     if env.root_velocity_mode not in {"com", "link"}:
         raise ValueError("environment.root_velocity_mode must be com or link")
+    if env.policy_observation_mode not in {"tracking", "beyondmimic"}:
+        raise ValueError("environment.policy_observation_mode must be tracking or beyondmimic")
+    if env.motion_end_behavior not in {"hold_last", "resample_command"}:
+        raise ValueError("environment.motion_end_behavior must be hold_last or resample_command")
+    if env.physics_material_combine_mode not in {"average", "multiply"}:
+        raise ValueError("environment.physics_material_combine_mode must be average or multiply")
+    if env.contact_sensor_update_period not in {"control", "physics"}:
+        raise ValueError("environment.contact_sensor_update_period must be control or physics")
+    if not (0.0 < env.adaptive_uniform_ratio <= 1.0):
+        raise ValueError("environment.adaptive_uniform_ratio must be in (0, 1]")
+    if env.adaptive_kernel_size < 1 or not (0.0 < env.adaptive_lambda <= 1.0):
+        raise ValueError("environment adaptive kernel settings are invalid")
     if env.platform_profile == "g1_largebox_50hz":
         if env.task != "largebox_plane":
             raise ValueError("g1_largebox_50hz requires environment.task=largebox_plane")
@@ -452,6 +518,24 @@ def _validate(config: ExperimentConfig) -> None:
         if env.reset_phase_sampling != "continuous_uniform":
             raise ValueError("ADD follows MimicKit's continuous uniform motion-time reset")
         _validate_add(config.parameters)
+    elif config.method == "beyondmimic":
+        if env.policy_observation_mode != "beyondmimic":
+            raise ValueError("BeyondMimic requires its official default 160D policy observation")
+        if env.motion_end_behavior != "resample_command" or env.terminate_on_motion_end:
+            raise ValueError("BeyondMimic resamples the motion command instead of terminating at motion end")
+        if env.termination_mode != "beyondmimic":
+            raise ValueError("BeyondMimic requires its paper-native termination profile")
+        if env.reset_phase_sampling != "beyondmimic":
+            raise ValueError("BeyondMimic requires its official failure-adaptive sampler")
+        if env.motion_reference_mode != "frame" or env.root_velocity_mode != "com":
+            raise ValueError("BeyondMimic requires integer motion frames and COM root velocity semantics")
+        if not (env.startup_randomization and env.reset_noise and env.interval_pushes and env.observation_noise):
+            raise ValueError("BeyondMimic requires its official startup, reset, push and observation randomization")
+        if env.physics_material_combine_mode != "multiply":
+            raise ValueError("BeyondMimic requires multiply friction/restitution material combining")
+        if env.contact_sensor_update_period != "physics":
+            raise ValueError("BeyondMimic requires contact sensing at every physics step")
+        _validate_beyondmimic(config.parameters)
     else:
         raise ValueError(f"Unsupported method {config.method!r}")
 
@@ -630,3 +714,60 @@ def _validate_add(params: ADDConfig) -> None:
     _validate_amp(params, method_label="ADD", min_disc_obs_steps=1)
     if params.disc_obs_steps != 1:
         raise ValueError("ADD follows MimicKit add_g1_env.yaml: parameters.disc_obs_steps must be 1")
+
+
+def _validate_beyondmimic(params: BeyondMimicConfig) -> None:
+    if not params.actor_hidden_dims or not params.critic_hidden_dims:
+        raise ValueError("BeyondMimic actor/critic hidden dims cannot be empty")
+    if params.rollout_env_steps < 2:
+        raise ValueError("BeyondMimic rollout_env_steps must be at least 2")
+    if params.num_learning_epochs < 1 or params.num_mini_batches < 1:
+        raise ValueError("BeyondMimic PPO epochs/minibatches must be positive")
+    if not (0.0 < params.clip_param < 1.0):
+        raise ValueError("BeyondMimic clip_param must be in (0, 1)")
+    if not (0.0 < params.gamma <= 1.0) or not (0.0 <= params.lam <= 1.0):
+        raise ValueError("BeyondMimic gamma/lam are invalid")
+    if params.value_loss_coef < 0.0 or params.entropy_coef < 0.0:
+        raise ValueError("BeyondMimic loss coefficients must be non-negative")
+    if params.learning_rate <= 0.0 or params.max_grad_norm <= 0.0 or params.init_noise_std <= 0.0:
+        raise ValueError("BeyondMimic optimizer/noise settings must be positive")
+    if params.schedule not in {"fixed", "adaptive"}:
+        raise ValueError("BeyondMimic schedule must be fixed or adaptive")
+    if params.desired_kl <= 0.0:
+        raise ValueError("BeyondMimic desired_kl must be positive")
+    if params.noise_std_type not in {"scalar", "log"}:
+        raise ValueError("BeyondMimic noise_std_type must be scalar or log")
+    official = {
+        "actor_hidden_dims": (512, 256, 128),
+        "critic_hidden_dims": (512, 256, 128),
+        "activation": "elu",
+        "rollout_env_steps": 24,
+        "num_learning_epochs": 5,
+        "num_mini_batches": 4,
+        "clip_param": 0.2,
+        "gamma": 0.99,
+        "lam": 0.95,
+        "value_loss_coef": 1.0,
+        "entropy_coef": 0.005,
+        "learning_rate": 1.0e-3,
+        "max_grad_norm": 1.0,
+        "use_clipped_value_loss": True,
+        "schedule": "adaptive",
+        "desired_kl": 0.01,
+        "empirical_normalization": True,
+        "init_at_random_ep_len": True,
+        "init_noise_std": 1.0,
+        "noise_std_type": "scalar",
+        "state_dependent_std": False,
+        "normalize_advantage_per_mini_batch": False,
+    }
+    mismatches = [
+        f"{name}={getattr(params, name)!r} (expected {expected!r})"
+        for name, expected in official.items()
+        if getattr(params, name) != expected
+    ]
+    if mismatches:
+        raise ValueError(
+            "BeyondMimic config must match the official PPO recipe: "
+            + ", ".join(mismatches)
+        )

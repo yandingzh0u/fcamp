@@ -24,6 +24,9 @@ from .imitation_data import (
 from .motion import ADD_TARGET_OBS_STEPS, add_target_phase_offsets
 
 
+BEYONDMIMIC_POLICY_OBS_DIM = 160
+
+
 class MimicObservationMixin:
     def get_amp_policy_observation(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         """MimicKit AMP actor/critic observation: character state, not disc state."""
@@ -247,11 +250,15 @@ class MimicObservationMixin:
         robot_anchor_pos_w = self.robot.data.body_pos_w[:, self.anchor_body_id]
         robot_anchor_quat_w = self.robot.data.body_quat_w[:, self.anchor_body_id]
 
-        body_pos_relative_w, body_quat_relative_w = self._compute_relative_reference_bodies(
-            reference,
-            robot_anchor_pos_w,
-            robot_anchor_quat_w,
-        )
+        if getattr(self, "termination_mode", "tracking") == "beyondmimic":
+            body_pos_relative_w = self._beyondmimic_body_pos_relative_w
+            body_quat_relative_w = self._beyondmimic_body_quat_relative_w
+        else:
+            body_pos_relative_w, body_quat_relative_w = self._compute_relative_reference_bodies(
+                reference,
+                robot_anchor_pos_w,
+                robot_anchor_quat_w,
+            )
         return {
             "reference": reference,
             "robot_joint_pos": robot_joint_pos,
@@ -266,6 +273,19 @@ class MimicObservationMixin:
             "body_quat_relative_w": body_quat_relative_w,
         }
 
+    def _update_beyondmimic_relative_targets(self) -> None:
+        """Mirror MotionCommand's cached targets after command advancement."""
+        reference = self.get_reference_state()
+        robot_anchor_pos_w = self.robot.data.body_pos_w[:, self.anchor_body_id]
+        robot_anchor_quat_w = self.robot.data.body_quat_w[:, self.anchor_body_id]
+        body_pos_relative_w, body_quat_relative_w = self._compute_relative_reference_bodies(
+            reference,
+            robot_anchor_pos_w,
+            robot_anchor_quat_w,
+        )
+        self._beyondmimic_body_pos_relative_w.copy_(body_pos_relative_w)
+        self._beyondmimic_body_quat_relative_w.copy_(body_quat_relative_w)
+
     def _motion_anchor_observation_terms(
         self,
         robot_anchor_pos_w: torch.Tensor,
@@ -278,14 +298,98 @@ class MimicObservationMixin:
             reference["anchor_pos_w"],
             reference["anchor_quat_w"],
         )
-        motion_anchor_ori_b = matrix_from_quat(motion_anchor_ori)[..., :2].reshape(self.num_envs, -1)
+        motion_anchor_ori_b = matrix_from_quat(motion_anchor_ori)[..., :2].reshape(
+            robot_anchor_pos_w.shape[0], -1
+        )
         return motion_anchor_pos_b, motion_anchor_ori_b
 
     def get_observation(self) -> torch.Tensor:
+        if getattr(self, "policy_observation_mode", "tracking") == "beyondmimic":
+            return self.get_beyondmimic_policy_observation()
         return self.build_observation()
 
     def get_critic_observation(self) -> torch.Tensor:
         return self.build_critic_observation()
+
+    def get_beyondmimic_policy_observation(
+        self, env_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Official default G1 policy observation.
+
+        The order exactly follows ``G1FlatEnvCfg`` from official BeyondMimic
+        at commit ``cd651720``:
+
+        ``reference q/dq (58), anchor position (3), anchor orientation rot6d
+        (6), base linear/angular velocity (3+3), joint position/velocity
+        relative to default (29+29), previous action (29)``.
+        """
+        observation = self.build_beyondmimic_policy_observation()
+        if env_ids is None:
+            return observation
+        if env_ids.ndim != 1:
+            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
+        return observation.index_select(0, env_ids)
+
+    def get_beyondmimic_critic_observation(
+        self, env_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Return the clean official 286-D privileged observation."""
+        observation = self.build_critic_observation()
+        if env_ids is None:
+            return observation
+        if env_ids.ndim != 1:
+            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
+        return observation.index_select(0, env_ids)
+
+    def build_beyondmimic_policy_observation(self) -> torch.Tensor:
+        context = self.get_tracking_context()
+        reference = context["reference"]
+        reference_joint_state = torch.cat(
+            [reference["joint_pos"], reference["joint_vel"]], dim=-1
+        )
+        motion_anchor_pos_b, motion_anchor_ori_b = self._motion_anchor_observation_terms(
+            context["robot_anchor_pos_w"],
+            context["robot_anchor_quat_w"],
+            reference,
+        )
+        joint_pos_rel = context["robot_joint_pos"] - self.default_action_joint_pos
+        joint_vel_rel = context["robot_joint_vel"] - self.default_action_joint_vel
+
+        # Reference command and last action stay clean.  The remaining terms
+        # use the exact corruption ranges of official Tracking-Flat-G1-v0.
+        motion_anchor_pos_b = self._add_uniform_noise(
+            motion_anchor_pos_b, -0.25, 0.25
+        )
+        motion_anchor_ori_b = self._add_uniform_noise(
+            motion_anchor_ori_b, -0.05, 0.05
+        )
+        base_lin_vel = self._add_uniform_noise(
+            self.robot.data.root_lin_vel_b, -0.5, 0.5
+        )
+        base_ang_vel = self._add_uniform_noise(
+            self.robot.data.root_ang_vel_b, -0.2, 0.2
+        )
+        joint_pos_rel = self._add_uniform_noise(joint_pos_rel, -0.01, 0.01)
+        joint_vel_rel = self._add_uniform_noise(joint_vel_rel, -0.5, 0.5)
+        observation = torch.cat(
+            [
+                reference_joint_state,
+                motion_anchor_pos_b,
+                motion_anchor_ori_b,
+                base_lin_vel,
+                base_ang_vel,
+                joint_pos_rel,
+                joint_vel_rel,
+                self.last_action,
+            ],
+            dim=-1,
+        )
+        if observation.shape[-1] != BEYONDMIMIC_POLICY_OBS_DIM:
+            raise RuntimeError(
+                "Expected BeyondMimic policy observation dim "
+                f"{BEYONDMIMIC_POLICY_OBS_DIM}, got {observation.shape[-1]}"
+            )
+        return observation
 
     def build_observation(self) -> torch.Tensor:
         context = self.get_tracking_context()
