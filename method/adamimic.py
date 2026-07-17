@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import time
 from collections import deque
 from pathlib import Path
@@ -10,39 +9,31 @@ from torch import nn
 from muon import SingleDeviceMuonWithAuxAdam
 
 from components.optim.kl_scheduler import adaptive_lr_from_kl
+from envs.adamimic import AdaMimicEnvironment
 from method.base import Algorithm
 from models.adamimic_policy import AdaMimicActorCritic
-from models.mlp_actor_critic import EmpiricalNormalization
 
 
 class AdaMimic(Algorithm):
-    """AdaMimic-style adaptive-time tracking policy.
-
-    This is a native implementation for the refactored project layout.  It keeps
-    AdaMimic's two-level action distribution and optional stage-2 residual actor,
-    while using the current G1MimicEnv reward.  The final policy action is
-    passed to the environment as a variable reference-time step.
-    """
+    """Official AdaMimic two-stage PPO adapted to this project's robot/task."""
     uses_reference_dt = True
+    num_critics = 2
 
     def build(self) -> None:
         cfg = self.cfg
         env = self.env
-        self.actor_obs_dim = env.observation_dim
-        self.critic_obs_dim = env.critic_observation_dim
+        self.adam_env = AdaMimicEnvironment(env, cfg)
+        self.actor_obs_dim = self.adam_env.observation_dim
+        self.critic_obs_dim = self.adam_env.critic_observation_dim
         self.control_action_dim = env.action_dim
         self.policy_action_dim = self.control_action_dim + 1
         self.rollout_steps = int(cfg.rollout_env_steps)
         if self.rollout_steps <= 1:
             raise ValueError("AdaMimic requires rollout_env_steps > 1")
-
-        self.empirical_normalization = bool(cfg.empirical_normalization)
-        if self.empirical_normalization:
-            self.actor_obs_normalizer: nn.Module = EmpiricalNormalization(self.actor_obs_dim, env.device)
-            self.critic_obs_normalizer: nn.Module = EmpiricalNormalization(self.critic_obs_dim, env.device)
-        else:
-            self.actor_obs_normalizer = nn.Identity()
-            self.critic_obs_normalizer = nn.Identity()
+        if len(cfg.reward_group_weights) != 2 or any(
+            len(weights) != self.num_critics for weights in cfg.reward_group_weights
+        ):
+            raise ValueError("AdaMimic reward_group_weights must have shape [2, 2]")
 
         self._model = AdaMimicActorCritic(
             actor_obs_dim=self.actor_obs_dim,
@@ -56,6 +47,7 @@ class AdaMimic(Algorithm):
             actor_time_scale_range=tuple(cfg.actor_time_scale_range),
             fixed_dt=float(cfg.fixed_dt),
             time_min_std=float(cfg.time_min_std),
+            num_critics=self.num_critics,
             residual_delta=bool(cfg.residual_delta),
             residual_time_threshold=float(cfg.residual_time_threshold),
         ).to(env.device)
@@ -68,13 +60,7 @@ class AdaMimic(Algorithm):
         self.optimizer_impl = self._build_official_optimizer()
         self.min_lr = 5.0e-4
         self.max_lr = 1.0e-2
-        self._policy_module = nn.ModuleDict(
-            {
-                "model": self._model,
-                "actor_obs_normalizer": self.actor_obs_normalizer,
-                "critic_obs_normalizer": self.critic_obs_normalizer,
-            }
-        )
+        self._policy_module = nn.ModuleDict({"model": self._model})
         self._init_train_episode_stats()
 
     def _build_official_optimizer(self) -> torch.optim.Optimizer:
@@ -83,20 +69,20 @@ class AdaMimic(Algorithm):
         if cfg.residual_delta and cfg.freeze_base:
             modules: list[nn.Module | None] = [
                 self._model.actor_time,
-                self._model.critic_high,
+                self._model.critics_time,
                 self._model.actor_delta,
-                self._model.critic_delta,
+                self._model.critics_delta,
             ]
         elif cfg.residual_delta:
             modules = [
                 self._model.actor,
                 self._model.actor_time,
-                self._model.critic_high,
+                self._model.critics_time,
                 self._model.actor_delta,
-                self._model.critic_delta,
+                self._model.critics_delta,
             ]
         else:
-            modules = [self._model.actor, self._model.critic_low]
+            modules = [self._model.actor, self._model.critics]
 
         params: list[nn.Parameter] = [self._model.std]
         for module in modules:
@@ -112,7 +98,6 @@ class AdaMimic(Algorithm):
                     "use_muon": False,
                     "lr": self.learning_rate,
                     "betas": (0.9, 0.95),
-                    "eps": 1.0e-10,
                     "weight_decay": weight_decay,
                 },
                 {
@@ -139,9 +124,8 @@ class AdaMimic(Algorithm):
     def extra_checkpoint_state(self) -> dict:
         return {
             "learning_rate": float(self.learning_rate),
-            "actor_obs_normalizer": self.actor_obs_normalizer.state_dict() if self.empirical_normalization else None,
-            "critic_obs_normalizer": self.critic_obs_normalizer.state_dict() if self.empirical_normalization else None,
-            "adamimic_schema_version": 1,
+            "adamimic_environment": self.adam_env.state_dict(),
+            "adamimic_schema_version": 2,
         }
 
     def load_extra_checkpoint_state(self, payload: dict, reset_optimizer: bool = False) -> None:
@@ -151,13 +135,8 @@ class AdaMimic(Algorithm):
             self.learning_rate = float(payload.get("learning_rate", self.learning_rate))
         for group in self.optimizer_impl.param_groups:
             group["lr"] = self.learning_rate
-        if not payload:
-            return
-        if self.empirical_normalization:
-            if payload.get("actor_obs_normalizer") is not None:
-                self.actor_obs_normalizer.load_state_dict(payload["actor_obs_normalizer"])
-            if payload.get("critic_obs_normalizer") is not None:
-                self.critic_obs_normalizer.load_state_dict(payload["critic_obs_normalizer"])
+        if payload and payload.get("adamimic_environment") is not None:
+            self.adam_env.load_state_dict(payload["adamimic_environment"])
 
     def _load_stage1_weights(self, path: Path) -> None:
         if not path.is_file():
@@ -167,58 +146,66 @@ class AdaMimic(Algorithm):
         if any(key.startswith("model.") for key in state):
             state = {key.removeprefix("model."): value for key, value in state.items() if key.startswith("model.")}
         current = self._model.state_dict()
+        expected = {key for key in current if key.startswith(("actor.", "critics."))}
         filtered = {
-            key: value
-            for key, value in state.items()
-            if (
-                key in current
-                and current[key].shape == value.shape
-                and not key.startswith("actor_delta.")
-                and not key.startswith("critic_delta.")
-                and key != "critic_high.0.weight"
-                and not key.startswith("critic_high.")
-            )
+            key: value for key, value in state.items()
+            if key in expected and current[key].shape == value.shape
         }
+        missing = sorted(expected - filtered.keys())
+        if missing:
+            raise ValueError(
+                f"AdaMimic stage1 checkpoint is missing/incompatible for {len(missing)} "
+                f"base actor/critic tensors; first={missing[:3]}"
+            )
         current.update(filtered)
         self._model.load_state_dict(current, strict=False)
-        print(f"[ADAMIMIC] loaded_stage1={path} tensors={len(filtered)}", flush=True)
-
-    def _norm_actor(self, obs: torch.Tensor, update: bool = True) -> torch.Tensor:
-        return self.actor_obs_normalizer(obs, update=update) if self.empirical_normalization else obs
-
-    def _norm_critic(self, obs: torch.Tensor, update: bool = True) -> torch.Tensor:
-        return self.critic_obs_normalizer(obs, update=update) if self.empirical_normalization else obs
+        print(
+            f"[ADAMIMIC] loaded_stage1={path} base_only=1 tensors={len(filtered)} "
+            f"std_preserved={float(self._model.std.mean().item()):.5f}",
+            flush=True,
+        )
 
     def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
-        actor_obs = self._norm_actor(obs, update=False)
-        return self._model.act_inference(actor_obs)[:, :-1]
+        return self._model.act_inference(obs)[:, :-1]
 
     def deployment_actions(self, obs: torch.Tensor) -> torch.Tensor:
-        actor_obs = self._norm_actor(obs, update=False)
-        return self._model.act_inference(actor_obs)
+        return self._model.act_inference(obs)
 
     def initial_reset(self) -> torch.Tensor:
-        phase0 = torch.zeros(self.env.num_envs, dtype=torch.long, device=self.env.device)
-        obs = self.env.reset(phase_indices=phase0)
-        zero_action = torch.zeros(self.env.num_envs, self.env.action_dim, device=self.env.device)
-        with torch.no_grad():
-            obs, _, _, _ = self.env.step(
-                zero_action,
-                auto_reset=False,
-                reference_dt=torch.full((self.env.num_envs,), float(self.cfg.fixed_dt), device=self.env.device),
-            )
+        initial_phases = torch.zeros(
+            self.env.num_envs, dtype=torch.float32, device=self.env.device
+        )
+        obs = self.adam_env.reset(phase_indices=initial_phases, warmup=True)
         if bool(self.cfg.init_at_random_ep_len) and self.env.max_episode_steps > 0:
             self.env.episode_steps = torch.randint_like(
                 self.env.episode_steps,
                 high=int(self.env.max_episode_steps),
             )
         self._obs = obs
-        self._critic_obs = self.env.get_critic_observation()
+        self._critic_obs = self.adam_env.get_critic_observation()
         return obs
 
     def reset_for_update(self, update_idx: int) -> torch.Tensor:
-        del update_idx
+        self.adam_env.set_update(update_idx)
         return self._obs
+
+    def evaluation_reset(self, phase_indices: torch.Tensor) -> torch.Tensor:
+        return self.adam_env.reset_evaluation(phase_indices)
+
+    def evaluation_step(
+        self,
+        actions: torch.Tensor,
+        reference_dt: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        if reference_dt is None:
+            raise ValueError("AdaMimic evaluation requires the policy time action")
+        return self.adam_env.step_evaluation(actions, reference_dt)
+
+    def snapshot_runtime_state(self):
+        return self.adam_env.snapshot_runtime_state()
+
+    def restore_runtime_state(self, state) -> None:
+        self.adam_env.restore_runtime_state(state)
 
     def _init_train_episode_stats(self) -> None:
         env = self.env
@@ -247,18 +234,20 @@ class AdaMimic(Algorithm):
         n_envs = env.num_envs
 
         actor_obs_buf = torch.zeros(steps, n_envs, self.actor_obs_dim, device=device)
-        next_actor_obs_buf = torch.zeros_like(actor_obs_buf)
-        critic_obs_buf = torch.zeros(steps, n_envs, self.critic_obs_dim, device=device)
-        next_critic_obs_buf = torch.zeros_like(critic_obs_buf)
+        critic_obs_low_buf = torch.zeros(steps, n_envs, self.critic_obs_dim + 1, device=device)
+        critic_obs_high_buf = torch.zeros(steps, n_envs, self.critic_obs_dim, device=device)
+        next_critic_obs_low_buf = torch.zeros_like(critic_obs_low_buf)
+        next_critic_obs_high_buf = torch.zeros_like(critic_obs_high_buf)
         actions_buf = torch.zeros(steps, n_envs, self.policy_action_dim, device=device)
-        values_low_buf = torch.zeros(steps, n_envs, device=device)
-        values_high_buf = torch.zeros(steps, n_envs, device=device)
+        values_low_buf = torch.zeros(steps, n_envs, self.num_critics, device=device)
+        values_high_buf = torch.zeros_like(values_low_buf)
         logp_low_buf = torch.zeros(steps, n_envs, device=device)
         logp_high_buf = torch.zeros(steps, n_envs, device=device)
         action_mean_buf = torch.zeros_like(actions_buf)
         action_std_buf = torch.zeros_like(actions_buf)
-        reward_low_buf = torch.zeros(steps, n_envs, device=device)
-        reward_high_buf = torch.zeros(steps, n_envs, device=device)
+        reward_low_buf = torch.zeros(steps, n_envs, self.num_critics, device=device)
+        reward_high_buf = torch.zeros_like(reward_low_buf)
+        storage_reward_low_buf = torch.zeros_like(reward_low_buf)
         done_buf = torch.zeros(steps, n_envs, dtype=torch.bool, device=device)
         timeout_buf = torch.zeros_like(done_buf)
         failure_buf = torch.zeros_like(done_buf)
@@ -281,53 +270,80 @@ class AdaMimic(Algorithm):
         critic_obs = self._critic_obs
         with torch.no_grad():
             for step_idx in range(steps):
-                actor_obs_n = self._norm_actor(obs)
-                critic_obs_n = self._norm_critic(critic_obs)
-                action_full = self._model.act(actor_obs_n)
+                action_full = self._model.act(obs)
                 low_logp, high_logp = self._model.get_actions_log_prob(action_full)
                 action_time = action_full[:, -1:]
-                value_low = self._model.evaluate_low(critic_obs_n, action_time)
-                value_high = self._model.evaluate_high(critic_obs_n)
+                critic_obs_low = torch.cat((critic_obs, action_time), dim=-1)
+                value_low = self._model.evaluate_low(critic_obs_low)
+                value_high = self._model.evaluate_high(critic_obs)
+                action_mean = self._model.action_mean.clone()
+                action_std = self._model.action_std.clone()
                 control_action = action_full[:, :-1]
-                next_obs, reward, done, info = env.step(
-                    control_action,
-                    auto_reset=True,
-                    reference_dt=action_time.squeeze(-1),
+                next_obs, reward_low, reward_high, done, info = self.adam_env.step_training(
+                    control_action, action_time.squeeze(-1)
                 )
-                next_critic_obs = env.get_critic_observation()
-                next_actor_obs_n = self._norm_actor(next_obs, update=False)
-                next_critic_obs_n = self._norm_critic(next_critic_obs, update=False)
+                expected_reward_shape = (n_envs, self.num_critics)
+                if tuple(reward_low.shape) != expected_reward_shape or tuple(reward_high.shape) != expected_reward_shape:
+                    raise ValueError(
+                        "AdaMimic wrapper must return low/high rewards with shape "
+                        f"{expected_reward_shape}, got {tuple(reward_low.shape)}/{tuple(reward_high.shape)}"
+                    )
+                next_critic_obs = self.adam_env.get_critic_observation()
+                done_bool = done.bool()
+                next_critic_obs_terminal = next_critic_obs.clone()
+                final_critic_obs = info.get("final_adamimic_critic_observation")
+                if torch.is_tensor(final_critic_obs) and bool(done_bool.any()):
+                    if final_critic_obs.shape[0] == n_envs:
+                        next_critic_obs_terminal[done_bool] = final_critic_obs[done_bool]
+                    elif final_critic_obs.shape[0] == int(done_bool.sum().item()):
+                        next_critic_obs_terminal[done_bool] = final_critic_obs
+                    else:
+                        raise ValueError("final_adamimic_critic_observation has an invalid batch dimension")
+                predicted_next_action = self._model.act(next_obs)
+                next_critic_obs_low = torch.cat(
+                    (next_critic_obs_terminal, predicted_next_action[:, -1:]), dim=-1
+                )
 
                 if step_idx == 0:
                     first_infos.append(info)
-                actor_obs_buf[step_idx] = actor_obs_n
-                next_actor_obs_buf[step_idx] = next_actor_obs_n
-                critic_obs_buf[step_idx] = critic_obs_n
-                next_critic_obs_buf[step_idx] = next_critic_obs_n
+                actor_obs_buf[step_idx] = obs
+                critic_obs_low_buf[step_idx] = critic_obs_low
+                critic_obs_high_buf[step_idx] = critic_obs
+                next_critic_obs_low_buf[step_idx] = next_critic_obs_low
+                next_critic_obs_high_buf[step_idx] = next_critic_obs_terminal
                 actions_buf[step_idx] = action_full
                 values_low_buf[step_idx] = value_low
                 values_high_buf[step_idx] = value_high
                 logp_low_buf[step_idx] = low_logp
                 logp_high_buf[step_idx] = high_logp
-                action_mean_buf[step_idx] = self._model.action_mean
-                action_std_buf[step_idx] = self._model.action_std
-                reward_low_buf[step_idx] = reward
-                reward_high_buf[step_idx] = reward * float(self.cfg.time_reward_scale)
-                done_bool = done.bool()
+                action_mean_buf[step_idx] = action_mean
+                action_std_buf[step_idx] = action_std
+                reward_low_buf[step_idx] = reward_low
+                reward_high_buf[step_idx] = reward_high
                 done_buf[step_idx] = done_bool
 
                 done_terms = info["done_terms"]
-                timeout = done_terms["time_out"].bool()
+                timeout_info = info.get("time_outs")
+                timeout = timeout_info.bool() if torch.is_tensor(timeout_info) else done_terms["time_out"].bool()
                 motion_complete = done_terms.get("motion_complete")
                 motion_complete = motion_complete.bool() if torch.is_tensor(motion_complete) else torch.zeros_like(timeout)
+                failure_info = info.get("adamimic_failure")
                 failure = (
-                    done_terms["anchor_pos_bad"].bool()
-                    | done_terms["anchor_ori_bad"].bool()
-                    | done_terms["ee_body_bad"].bool()
-                ) & (~timeout) & (~motion_complete)
+                    failure_info.bool()
+                    if torch.is_tensor(failure_info)
+                    else done_bool & (~timeout) & (~motion_complete)
+                )
                 timeout_buf[step_idx] = done_bool & timeout
                 failure_buf[step_idx] = done_bool & failure
                 motion_complete_buf[step_idx] = done_bool & motion_complete
+                storage_reward_low = reward_low.clone()
+                if bool(self.cfg.use_timeout_bootstrap):
+                    storage_reward_low += (
+                        float(self.cfg.discount_gamma)
+                        * value_low
+                        * timeout_buf[step_idx].to(dtype=value_low.dtype).unsqueeze(-1)
+                    )
+                storage_reward_low_buf[step_idx] = storage_reward_low
                 for key, value in done_terms.items():
                     b = value.bool()
                     done_terms_union[key] = b.clone() if key not in done_terms_union else done_terms_union[key] | b
@@ -342,7 +358,7 @@ class AdaMimic(Algorithm):
                     ever_done[ids] = True
 
                 rollout_info_items.append((info, torch.ones(n_envs, dtype=torch.bool, device=device)))
-                self._record_episode_stats(reward, done_bool)
+                self._record_episode_stats(reward_low.sum(dim=-1), done_bool)
                 action_abs_max = max(action_abs_max, float(control_action.abs().max().item()))
                 time_action_sum += action_time.sum()
                 time_action_sq_sum += (action_time * action_time).sum()
@@ -353,31 +369,25 @@ class AdaMimic(Algorithm):
                 obs = next_obs
                 critic_obs = next_critic_obs
 
-            final_actor_obs = self._norm_actor(obs, update=False)
-            final_critic_obs = self._norm_critic(critic_obs, update=False)
-            final_time = self._model.act_inference(final_actor_obs)[:, -1:]
-            last_value_low = self._model.evaluate_low(final_critic_obs, final_time)
-            last_value_high = self._model.evaluate_high(final_critic_obs)
+            final_action = self._model.act(obs)
+            last_value_low = self._model.evaluate_low(critic_obs, final_action[:, -1:])
+            last_value_high = self._model.evaluate_high(critic_obs)
 
         self._obs = obs
         self._critic_obs = critic_obs
         returns_low, adv_low = self._compute_returns(
-            rewards=reward_low_buf,
+            rewards=storage_reward_low_buf,
             values=values_low_buf,
             last_value=last_value_low,
             dones=done_buf,
-            timeout_mask=timeout_buf,
             gamma=float(self.cfg.discount_gamma),
-            timeout_bootstrap=bool(self.cfg.use_timeout_bootstrap),
         )
         returns_high, adv_high = self._compute_returns(
             rewards=reward_high_buf,
             values=values_high_buf,
             last_value=last_value_high,
             dones=done_buf,
-            timeout_mask=timeout_buf,
             gamma=float(self.cfg.time_discount_gamma),
-            timeout_bootstrap=False,
         )
         time_mean = time_action_sum / max(time_action_count, 1)
         time_var = time_action_sq_sum / max(time_action_count, 1) - time_mean.square()
@@ -385,16 +395,19 @@ class AdaMimic(Algorithm):
         frame_delta_var = frame_delta_sq_sum / max(time_action_count, 1) - frame_delta_mean.square()
         return {
             "actor_obs": actor_obs_buf,
-            "next_actor_obs": next_actor_obs_buf,
-            "critic_obs": critic_obs_buf,
-            "next_critic_obs": next_critic_obs_buf,
+            "critic_obs_low": critic_obs_low_buf,
+            "critic_obs_high": critic_obs_high_buf,
+            "next_critic_obs_low": next_critic_obs_low_buf,
+            "next_critic_obs_high": next_critic_obs_high_buf,
             "actions": actions_buf,
             "values_low": values_low_buf,
             "values_high": values_high_buf,
             "returns_low": returns_low,
             "returns_high": returns_high,
-            "advantages_low": self._normalize_advantages(adv_low, torch.ones_like(done_buf, dtype=torch.bool)),
-            "advantages_high": self._normalize_advantages(adv_high, torch.ones_like(done_buf, dtype=torch.bool)),
+            "advantages_low_by_group": self._normalize_advantages(adv_low),
+            "advantages_high_by_group": self._normalize_advantages(adv_high),
+            "advantages_low": self._combine_advantages(adv_low, 0),
+            "advantages_high": self._combine_advantages(adv_high, 1),
             "old_logp_low": logp_low_buf,
             "old_logp_high": logp_high_buf,
             "old_mu": action_mean_buf,
@@ -426,35 +439,38 @@ class AdaMimic(Algorithm):
         values: torch.Tensor,
         last_value: torch.Tensor,
         dones: torch.Tensor,
-        timeout_mask: torch.Tensor,
         gamma: float,
-        timeout_bootstrap: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         returns = torch.zeros_like(values)
-        advantages = torch.zeros_like(values)
         gae = torch.zeros_like(last_value)
         lam = float(self.cfg.gae_lambda)
         for step_idx in range(rewards.shape[0] - 1, -1, -1):
             next_value = last_value if step_idx == rewards.shape[0] - 1 else values[step_idx + 1]
-            nonterminal = (~dones[step_idx]).to(dtype=values.dtype)
-            reward = rewards[step_idx]
-            if timeout_bootstrap:
-                reward = reward + gamma * timeout_mask[step_idx].to(dtype=values.dtype) * next_value
-            delta = reward + gamma * nonterminal * next_value - values[step_idx]
+            nonterminal = (~dones[step_idx]).to(dtype=values.dtype).unsqueeze(-1)
+            delta = rewards[step_idx] + gamma * nonterminal * next_value - values[step_idx]
             gae = delta + gamma * lam * nonterminal * gae
-            advantages[step_idx] = gae
             returns[step_idx] = gae + values[step_idx]
-        return returns, advantages
+        return returns, returns - values
 
     @staticmethod
-    def _normalize_advantages(advantages: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        valid = advantages[mask]
-        if valid.numel() == 0:
-            return advantages * 0.0
-        return ((advantages - valid.mean()) / (valid.std(unbiased=False) + 1.0e-8)) * mask.to(dtype=advantages.dtype)
+    def _normalize_advantages(advantages: torch.Tensor) -> torch.Tensor:
+        # TrackRolloutStorage normalizes every reward-group critic separately.
+        mean = advantages.mean(dim=(0, 1), keepdim=True)
+        std = advantages.std(dim=(0, 1), keepdim=True)
+        return (advantages - mean) / (std + 1.0e-8)
+
+    def _combine_advantages(self, advantages: torch.Tensor, level: int) -> torch.Tensor:
+        weights = torch.as_tensor(
+            self.cfg.reward_group_weights[level],
+            device=advantages.device,
+            dtype=advantages.dtype,
+        )
+        if tuple(weights.shape) != (self.num_critics,):
+            raise ValueError("reward_group_weights must have shape [2, 2]")
+        return (self._normalize_advantages(advantages) * weights).sum(dim=-1)
 
     def _mini_batch_size(self, sample_count: int) -> int:
-        return max(1, math.ceil(sample_count / max(1, int(self.cfg.num_mini_batches))))
+        return max(1, sample_count // max(1, int(self.cfg.num_mini_batches)))
 
     def _micro_batch_size(self, batch_size: int) -> int:
         if int(self.cfg.micro_batch_size) <= 0:
@@ -484,8 +500,8 @@ class AdaMimic(Algorithm):
         new_sigma: torch.Tensor,
     ) -> torch.Tensor:
         return (
-            torch.log(new_sigma / old_sigma + 1.0e-8)
-            + (old_sigma.square() + (old_mu - new_mu).square()) / (2.0 * new_sigma.square().clamp(min=1.0e-8))
+            torch.log(new_sigma / old_sigma + 1.0e-5)
+            + (old_sigma.square() + (old_mu - new_mu).square()) / (2.0 * new_sigma.square())
             - 0.5
         ).sum(dim=-1)
 
@@ -499,17 +515,23 @@ class AdaMimic(Algorithm):
         batch_size = train_steps * n_envs
         actor_obs = rollout["actor_obs"][:train_steps].reshape(batch_size, self.actor_obs_dim)
         next_actor_obs = rollout["actor_obs"][1:steps].reshape(batch_size, self.actor_obs_dim)
-        critic_obs = rollout["critic_obs"][:train_steps].reshape(batch_size, self.critic_obs_dim)
-        next_critic_obs = rollout["critic_obs"][1:steps].reshape(batch_size, self.critic_obs_dim)
+        critic_obs_low = rollout["critic_obs_low"][:train_steps].reshape(batch_size, self.critic_obs_dim + 1)
+        next_critic_obs_low = rollout["next_critic_obs_low"][:train_steps].reshape(
+            batch_size, self.critic_obs_dim + 1
+        )
+        critic_obs_high = rollout["critic_obs_high"][:train_steps].reshape(batch_size, self.critic_obs_dim)
+        next_critic_obs_high = rollout["next_critic_obs_high"][:train_steps].reshape(
+            batch_size, self.critic_obs_dim
+        )
         actions = rollout["actions"][:train_steps].reshape(batch_size, self.policy_action_dim)
         old_logp_low = rollout["old_logp_low"][:train_steps].reshape(batch_size)
         old_logp_high = rollout["old_logp_high"][:train_steps].reshape(batch_size)
         old_mu = rollout["old_mu"][:train_steps].reshape(batch_size, self.policy_action_dim)
         old_sigma = rollout["old_sigma"][:train_steps].reshape(batch_size, self.policy_action_dim)
-        old_values_low = rollout["values_low"][:train_steps].reshape(batch_size)
-        old_values_high = rollout["values_high"][:train_steps].reshape(batch_size)
-        returns_low = rollout["returns_low"][:train_steps].reshape(batch_size)
-        returns_high = rollout["returns_high"][:train_steps].reshape(batch_size)
+        old_values_low = rollout["values_low"][:train_steps].reshape(batch_size, self.num_critics)
+        old_values_high = rollout["values_high"][:train_steps].reshape(batch_size, self.num_critics)
+        returns_low = rollout["returns_low"][:train_steps].reshape(batch_size, self.num_critics)
+        returns_high = rollout["returns_high"][:train_steps].reshape(batch_size, self.num_critics)
         adv_low = rollout["advantages_low"][:train_steps].reshape(batch_size)
         adv_high = rollout["advantages_high"][:train_steps].reshape(batch_size)
         cont = (~rollout["done"][:train_steps]).to(dtype=actor_obs.dtype).reshape(batch_size, 1)
@@ -542,10 +564,12 @@ class AdaMimic(Algorithm):
             "grad_norm": 0.0,
         }
         optimizer_steps = 0
+        usable = mini_batch_size * int(self.cfg.num_mini_batches)
+        permutation = torch.randperm(usable, device=device)
         for _epoch in range(int(self.cfg.policy_epochs)):
-            perm = torch.randperm(batch_size, device=device)
-            for mb_start in range(0, batch_size, mini_batch_size):
-                idx = perm[mb_start : mb_start + mini_batch_size]
+            for mb_idx in range(int(self.cfg.num_mini_batches)):
+                mb_start = mb_idx * mini_batch_size
+                idx = permutation[mb_start : mb_start + mini_batch_size]
                 if idx.numel() == 0:
                     continue
                 mb_size = int(idx.numel())
@@ -563,8 +587,7 @@ class AdaMimic(Algorithm):
                         -adv_low[sub] * ratio_low.clamp(clip_low, clip_high),
                     ).mean()
 
-                    action_time = actions[sub, -1:]
-                    value_low = self._model.evaluate_low(critic_obs[sub], action_time)
+                    value_low = self._model.evaluate_low(critic_obs_low[sub])
                     if bool(self.cfg.use_clipped_value_loss):
                         value_low_clipped = old_values_low[sub] + (value_low - old_values_low[sub]).clamp(
                             -float(self.cfg.clip_range), float(self.cfg.clip_range)
@@ -585,9 +608,9 @@ class AdaMimic(Algorithm):
                         ratio_high = torch.exp(logp_high - old_logp_high[sub])
                         loss_high = torch.maximum(
                             -adv_high[sub] * ratio_high,
-                            -adv_high[sub] * ratio_high.clamp(clip_low, clip_high),
+                            -adv_high[sub] * ratio_low.clamp(clip_low, clip_high),
                         ).mean()
-                        value_high = self._model.evaluate_high(critic_obs[sub])
+                        value_high = self._model.evaluate_high(critic_obs_high[sub])
                         if bool(self.cfg.use_clipped_value_loss):
                             value_high_clipped = old_values_high[sub] + (value_high - old_values_high[sub]).clamp(
                                 -float(self.cfg.clip_range), float(self.cfg.clip_range)
@@ -610,12 +633,14 @@ class AdaMimic(Algorithm):
                         value_smooth_coef = float(self.cfg.value_smoothness_coef) * policy_smooth_coef
                         mix = cont[sub] * (torch.rand(sub.numel(), 1, device=device, dtype=actor_obs.dtype) - 0.5) * 2.0
                         mixed_actor_obs = actor_obs[sub] + mix * (next_actor_obs[sub] - actor_obs[sub])
-                        mixed_critic_obs = critic_obs[sub] + mix * (next_critic_obs[sub] - critic_obs[sub])
+                        mixed_critic_obs = critic_obs_low[sub] + mix * (
+                            next_critic_obs_low[sub] - critic_obs_low[sub]
+                        )
                         current_mean = self._model.action_mean[:, :-1]
                         mixed_mean = self._model.act_inference(mixed_actor_obs)[:, :-1]
                         policy_smooth = (current_mean - mixed_mean).square().sum(dim=-1).mean()
-                        mixed_value = self._model.evaluate_low(mixed_critic_obs, action_time)
-                        value_smooth = (value_low - mixed_value).square().mean()
+                        mixed_value = self._model.evaluate_low(mixed_critic_obs)
+                        value_smooth = (value_low - mixed_value).norm(dim=-1).square().mean()
                         smooth_loss = policy_smooth_coef * policy_smooth + value_smooth_coef * value_smooth
 
                     entropy = self._model.entropy.mean()
@@ -692,9 +717,10 @@ class AdaMimic(Algorithm):
         timeouts = rollout["timeout"]
         motion_complete = rollout["motion_complete"]
         first_done_step = rollout["first_done_step"]
-        failed_first = (first_done_step < self.rollout_steps) & ~rollout["timeout"].any(dim=0) & ~rollout["motion_complete"].any(dim=0)
-        reward_step_mean = float(rewards.mean().item())
-        returns = rewards.sum(dim=0)
+        failed_first = failures.any(dim=0)
+        reward_per_step = rewards.sum(dim=-1)
+        reward_step_mean = float(reward_per_step.mean().item())
+        returns = reward_per_step.sum(dim=0)
         act_abs = actions.abs()
         metrics = {
             **update_metrics,
@@ -708,6 +734,22 @@ class AdaMimic(Algorithm):
             "rollout/motion_complete_frac": float(motion_complete.float().mean().item()),
             "rollout/success_frac": float((~failed_first).float().mean().item()),
             "rollout/first_done_step_mean": float(first_done_step.float().mean().item()),
+            "adamimic/reward_low_dense_mean": float(rewards[..., 0].mean().item()),
+            "adamimic/reward_low_sparse_mean": float(rewards[..., 1].mean().item()),
+            "adamimic/reward_high_dense_mean": float(rollout["reward_high"][..., 0].mean().item()),
+            "adamimic/reward_high_sparse_mean": float(rollout["reward_high"][..., 1].mean().item()),
+            "adamimic/adv_low_dense_std": float(
+                rollout["advantages_low_by_group"][..., 0].std(unbiased=False).item()
+            ),
+            "adamimic/adv_low_sparse_std": float(
+                rollout["advantages_low_by_group"][..., 1].std(unbiased=False).item()
+            ),
+            "adamimic/adv_high_dense_std": float(
+                rollout["advantages_high_by_group"][..., 0].std(unbiased=False).item()
+            ),
+            "adamimic/adv_high_sparse_std": float(
+                rollout["advantages_high_by_group"][..., 1].std(unbiased=False).item()
+            ),
             "phase/start_mean": float(rollout["collection_start_phases"].float().mean().item()),
             "phase/start_min": float(rollout["collection_start_phases"].min().item()),
             "phase/start_max": float(rollout["collection_start_phases"].max().item()),
@@ -812,6 +854,15 @@ class AdaMimic(Algorithm):
             flush=True,
         )
         print(
+            f"[ADAMIMIC_REWARD_GROUPS] "
+            f"low_dense={metrics['adamimic/reward_low_dense_mean']:.5f} "
+            f"low_sparse={metrics['adamimic/reward_low_sparse_mean']:.5f} "
+            f"high_dense={metrics['adamimic/reward_high_dense_mean']:.5f} "
+            f"high_sparse={metrics['adamimic/reward_high_sparse_mean']:.5f} "
+            f"weights={self.cfg.reward_group_weights}",
+            flush=True,
+        )
+        print(
             f"[DONE] timeout={metrics.get('done/time_out_frac', 0.0):.5f} "
             f"anchor_pos={metrics.get('done/anchor_pos_bad_frac', 0.0):.5f} "
             f"anchor_ori={metrics.get('done/anchor_ori_bad_frac', 0.0):.5f} "
@@ -835,7 +886,15 @@ class AdaMimic(Algorithm):
             f"[ARCH] actor_obs={self.actor_obs_dim} critic_obs={self.critic_obs_dim} "
             f"control_action={self.control_action_dim} policy_action={self.policy_action_dim} "
             f"hidden_actor={list(self.cfg.actor_hidden_dims)} hidden_critic={list(self.cfg.critic_hidden_dims)} "
+            f"critics={self.num_critics} normalization=0 "
             f"residual_delta={int(bool(self.cfg.residual_delta))}",
+            flush=True,
+        )
+        print(
+            f"[ADAMIMIC_STORAGE] rollout={self.rollout_steps} train_steps={self.rollout_steps - 1} "
+            f"reward_groups=dense,sparse weights={self.cfg.reward_group_weights} "
+            f"timeout_bootstrap_low={int(bool(self.cfg.use_timeout_bootstrap))} "
+            "timeout_bootstrap_high=0",
             flush=True,
         )
         print(

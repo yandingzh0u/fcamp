@@ -143,7 +143,7 @@ def main() -> None:
     horizon = algo.horizon
     reset_start_phase = environment.motion_start_phase
     reset_phases = torch.full((env.num_envs,), max(0, reset_start_phase), dtype=torch.long, device=env.device)
-    current_obs = env.reset(phase_indices=reset_phases)
+    current_obs = algo.evaluation_reset(reset_phases)
     cached_chunk: torch.Tensor | None = None
     chunk_index = horizon
     total_steps = 0
@@ -173,7 +173,7 @@ def main() -> None:
         action_payload = cached_chunk[:, chunk_index, :]
         action, reference_dt = _split_reference_action(algo, env, action_payload)
         chunk_index += 1
-        current_obs, reward, done, info = env.step(action, auto_reset=False, reference_dt=reference_dt)
+        current_obs, reward, done, info = algo.evaluation_step(action, reference_dt)
         total_steps += 1
 
         if use_real_time:
@@ -216,7 +216,7 @@ def main() -> None:
             need_reset, reason = True, "motion_end"
         if need_reset:
             print(f"[INFO] Reset at step {total_steps} ({reason}). phase={float(env.phase_steps[0].item()):.2f}", flush=True)
-            current_obs = env.reset(phase_indices=reset_phases)
+            current_obs = algo.evaluation_reset(reset_phases)
             cached_chunk = None
             chunk_index = horizon
 

@@ -45,6 +45,8 @@ class EnvironmentConfig:
     adaptive_lambda: float
     physics_material_combine_mode: str
     contact_sensor_update_period: str
+    adamimic_keyframe_phases: tuple[int, ...]
+    adamimic_special_keyframe_indices: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +162,6 @@ class AdaMimicConfig:
     entropy_coef: float
     policy_lr: float
     weight_decay: float
-    empirical_normalization: bool
     init_at_random_ep_len: bool
     max_grad_norm: float
     use_clipped_value_loss: bool
@@ -170,8 +171,47 @@ class AdaMimicConfig:
     time_min_std: float
     init_noise_std: float
     train_time: bool
-    time_reward_scale: float
     use_timeout_bootstrap: bool
+
+    # Paper-native observation, reward-group and keyframe-time semantics.
+    actor_observation_history: int
+    reward_group_weights: tuple[tuple[float, ...], ...]
+    apply_reward_scale: bool
+    sparse_global: bool
+    sparse_local: bool
+    special_scale: bool
+    special_scale_size: float
+
+    # AdaMimic's global perturbation schedule (one push every 20 s).
+    domain_randomization: bool
+    push_interval_seconds: float
+    max_push_velocity_xy: float
+
+    # Stage-specific curricula from the official stage1/stage2 recipes.
+    reverse_term_curriculum: bool
+    reverse_term_curriculum_iter: int
+    termination_curriculum: bool
+    termination_initial_threshold: float
+    termination_max_threshold: float
+    termination_min_threshold: float
+    termination_curriculum_degree: float
+    termination_level_down_threshold: float
+    termination_level_up_threshold: float
+    limit_curriculum: bool
+    limit_initial_soft_factor: float
+    limit_max_soft_factor: float
+    limit_min_soft_factor: float
+    limit_curriculum_degree: float
+    limit_level_down_threshold: float
+    limit_level_up_threshold: float
+    penalty_curriculum: bool
+    penalty_curriculum_degree: float
+    penalty_initial_scale: float
+    penalty_min_scale: float
+    penalty_max_scale: float
+    penalty_level_down_threshold: float
+    penalty_level_up_threshold: float
+
     use_smooth: bool
     smoothness_upper_bound: float
     smoothness_lower_bound: float
@@ -323,11 +363,18 @@ def _construct(cls, values: dict[str, Any]):
         "hidden_dims",
         "encoder_hidden_dims",
         "head_hidden_dims",
+        "adamimic_keyframe_phases",
+        "adamimic_special_keyframe_indices",
     ):
         if name in converted:
             converted[name] = tuple(int(value) for value in converted[name])
     if "actor_time_scale_range" in converted:
         converted["actor_time_scale_range"] = tuple(float(value) for value in converted["actor_time_scale_range"])
+    if "reward_group_weights" in converted:
+        converted["reward_group_weights"] = tuple(
+            tuple(float(value) for value in group)
+            for group in converted["reward_group_weights"]
+        )
     return cls(**converted)
 
 
@@ -413,6 +460,8 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
     environment_values.setdefault("adaptive_lambda", 0.8)
     environment_values.setdefault("physics_material_combine_mode", "average")
     environment_values.setdefault("contact_sensor_update_period", "control")
+    environment_values.setdefault("adamimic_keyframe_phases", ())
+    environment_values.setdefault("adamimic_special_keyframe_indices", ())
     training_values = dict(normalized["training"])
     training_values.setdefault("official_reset_every", 0)
     training_values["resume"] = _resolve_path(str(training_values["resume"]), source_path)
@@ -466,8 +515,11 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError(
             "environment.adaptive_motion_sampling must match an adaptive reset_phase_sampling mode"
         )
-    if env.termination_mode not in {"tracking", "amp", "add", "beyondmimic"}:
-        raise ValueError("environment.termination_mode must be one of tracking/amp/add/beyondmimic")
+    if env.termination_mode not in {"tracking", "amp", "add", "adamimic", "beyondmimic"}:
+        raise ValueError(
+            "environment.termination_mode must be one of "
+            "tracking/amp/add/adamimic/beyondmimic"
+        )
     if env.motion_reference_mode not in {"frame", "mimickit_add"}:
         raise ValueError("environment.motion_reference_mode must be frame or mimickit_add")
     if env.root_velocity_mode not in {"com", "link"}:
@@ -507,6 +559,32 @@ def _validate(config: ExperimentConfig) -> None:
             raise ValueError("AdaMimic stage1 follows official RSI reset sampling")
         if config.parameters.stage == "stage2" and env.reset_phase_sampling != "zero":
             raise ValueError("AdaMimic stage2 follows official rsi=false zero reset sampling")
+        if env.termination_mode != "adamimic" or not env.terminate_on_motion_end:
+            raise ValueError("AdaMimic requires keyframe termination and motion-time terminal semantics")
+        if env.motion_end_behavior != "hold_last":
+            raise ValueError("AdaMimic holds the final reference while emitting its motion terminal")
+        if env.motion_reference_mode != "frame" or env.root_velocity_mode != "com":
+            raise ValueError("AdaMimic requires frame references and COM root velocity semantics")
+        if env.startup_randomization or env.reset_noise or env.interval_pushes:
+            raise ValueError(
+                "AdaMimic disables shared randomizers and owns its paper-native randomization recipe"
+            )
+        if not env.observation_noise:
+            raise ValueError("AdaMimic requires the official observation noise")
+        phases = env.adamimic_keyframe_phases
+        if not phases or any(phase < 0 for phase in phases):
+            raise ValueError("AdaMimic requires explicit non-negative keyframe phases")
+        if any(right <= left for left, right in zip(phases, phases[1:])):
+            raise ValueError("AdaMimic keyframe phases must be strictly increasing")
+        special = env.adamimic_special_keyframe_indices
+        if any(index < 0 or index >= len(phases) for index in special):
+            raise ValueError("AdaMimic special keyframe indices must index keyframe phases")
+        if len(set(special)) != len(special):
+            raise ValueError("AdaMimic special keyframe indices must be unique")
+        if any(right <= left for left, right in zip(special, special[1:])):
+            raise ValueError("AdaMimic special keyframe indices must be strictly increasing")
+        if env.rsi_keyframe_count != len(phases):
+            raise ValueError("AdaMimic rsi_keyframe_count must match its explicit keyframe metadata")
         _validate_adamimic(config.parameters)
     elif config.method == "amp":
         _validate_amp(config.parameters)
@@ -635,8 +713,20 @@ def _validate_adamimic(params: AdaMimicConfig) -> None:
         raise ValueError("AdaMimic actor_time_scale_range must be [low, high]")
     if params.fixed_dt <= 0.0 or params.time_min_std <= 0.0 or params.init_noise_std <= 0.0:
         raise ValueError("AdaMimic fixed_dt/time_min_std/init_noise_std must be positive")
-    if params.time_reward_scale < 0.0:
-        raise ValueError("AdaMimic time_reward_scale must be non-negative")
+    if params.actor_observation_history != 5:
+        raise ValueError("AdaMimic requires the official five-frame actor observation history")
+    if params.reward_group_weights != ((0.5, 1.0), (0.5, 1.0)):
+        raise ValueError("AdaMimic requires two [dense, sparse] critics weighted [0.5, 1.0]")
+    if not params.apply_reward_scale or not params.sparse_global or params.sparse_local:
+        raise ValueError("AdaMimic requires official global-sparse reward scaling")
+    if not params.special_scale or params.special_scale_size != 50.0:
+        raise ValueError("AdaMimic requires special keyframe reward scale 50")
+    if not params.domain_randomization:
+        raise ValueError("AdaMimic requires its paper-native domain randomization")
+    if params.push_interval_seconds != 20.0 or params.max_push_velocity_xy != 0.5:
+        raise ValueError("AdaMimic requires one global xy-velocity push every 20 seconds")
+    if not params.use_timeout_bootstrap:
+        raise ValueError("AdaMimic requires low-level timeout bootstrapping")
     if params.smoothness_upper_bound <= params.smoothness_lower_bound or params.smoothness_lower_bound <= 0.0:
         raise ValueError("AdaMimic smoothness bounds must satisfy upper > lower > 0")
     if params.value_smoothness_coef < 0.0:
@@ -662,6 +752,58 @@ def _validate_adamimic(params: AdaMimicConfig) -> None:
             raise ValueError("AdaMimic stage2 follows official freeze=true; set parameters.freeze_base=true")
         if params.use_smooth:
             raise ValueError("AdaMimic stage2 follows official use_smooth=false")
+
+    expected_curriculum = {
+        "stage1": {
+            "reverse_term_curriculum": True,
+            "termination_initial_threshold": 1.5,
+            "termination_max_threshold": 2.0,
+            "termination_min_threshold": 0.6,
+            "limit_initial_soft_factor": 1.15,
+            "limit_max_soft_factor": 1.25,
+            "limit_min_soft_factor": 0.98,
+            "penalty_initial_scale": 0.10,
+            "penalty_min_scale": 0.0,
+            "penalty_max_scale": 0.2,
+        },
+        "stage2": {
+            "reverse_term_curriculum": False,
+            "termination_initial_threshold": 2.0,
+            "termination_max_threshold": 2.0,
+            "termination_min_threshold": 2.0,
+            "limit_initial_soft_factor": 0.98,
+            "limit_max_soft_factor": 0.98,
+            "limit_min_soft_factor": 0.98,
+            "penalty_initial_scale": 0.20,
+            "penalty_min_scale": 0.20,
+            "penalty_max_scale": 0.2,
+        },
+    }[params.stage]
+    for name, expected in expected_curriculum.items():
+        if getattr(params, name) != expected:
+            raise ValueError(
+                f"AdaMimic {params.stage} requires official {name}={expected}"
+            )
+    common_curriculum = {
+        "reverse_term_curriculum_iter": 8000,
+        "termination_curriculum": True,
+        "termination_curriculum_degree": 2.5e-5,
+        "termination_level_down_threshold": 40.0,
+        "termination_level_up_threshold": 42.0,
+        "limit_curriculum": True,
+        "limit_curriculum_degree": 5.0e-7,
+        "limit_level_down_threshold": 40.0,
+        "limit_level_up_threshold": 42.0,
+        "penalty_curriculum": True,
+        "penalty_curriculum_degree": 3.0e-6,
+        "penalty_level_down_threshold": 40.0,
+        "penalty_level_up_threshold": 42.0,
+    }
+    for name, expected in common_curriculum.items():
+        if getattr(params, name) != expected:
+            raise ValueError(
+                f"AdaMimic requires official curriculum parameter {name}={expected}"
+            )
 
 
 def _validate_amp(params: AMPConfig, *, method_label: str = "AMP", min_disc_obs_steps: int = 2) -> None:

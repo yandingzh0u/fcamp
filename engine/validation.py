@@ -148,6 +148,7 @@ def run_validation_rollout(
     was_training = policy.training
     policy.eval()
     training_snapshot = snapshot_env_state(env)
+    algorithm_snapshot = algo.snapshot_runtime_state()
     training_observation = trainer.current_observation
     env_device = torch.device(env.device)
     cpu_rng_state = torch.random.get_rng_state()
@@ -173,7 +174,12 @@ def run_validation_rollout(
 
 
     original_max_episode_steps = env.max_episode_steps
-    env.max_episode_steps = env.full_motion_control_steps() + 1
+    max_steps = validation_max_steps(tcfg, env)
+    env.max_episode_steps = (
+        max_steps + 1
+        if bool(getattr(algo, "uses_reference_dt", False))
+        else env.full_motion_control_steps() + 1
+    )
     if torch.cuda.is_available() and env_device.type == "cuda":
         cuda_rng_state = torch.cuda.get_rng_state(env_device)
     if fixed_seed is not None:
@@ -187,7 +193,7 @@ def run_validation_rollout(
     )
     reset_t0 = time.perf_counter()
     print("[VALIDATION_RESET_START]", flush=True)
-    current_obs = env.reset(phase_indices=validation_phase)
+    current_obs = algo.evaluation_reset(validation_phase)
     print(f"[VALIDATION_RESET_DONE] time={time.perf_counter() - reset_t0:.3f}s", flush=True)
     reset_metrics = _reset_alignment_metrics(env, "validation")
 
@@ -278,7 +284,6 @@ def run_validation_rollout(
     diag_accum = {key: torch.zeros(num_envs, device=env.device) for key in diag_keys}
     diag_steps = torch.zeros(num_envs, device=env.device)
 
-    max_steps = validation_max_steps(tcfg, env)
     try:
         rollout_t0 = time.perf_counter()
         with torch.no_grad():
@@ -298,10 +303,9 @@ def run_validation_rollout(
                 active_mask = ~done
                 action_target = env.default_action_joint_pos + env.action_scale * torch.clamp(action, -100.0, 100.0)
 
-                current_obs, reward, step_done, info = env.step(
+                current_obs, reward, step_done, info = algo.evaluation_step(
                     action,
-                    auto_reset=False,
-                    reference_dt=reference_dt,
+                    reference_dt,
                 )
                 latest_phase_steps = info["termination_phase_steps"].float().clone()
                 ref_now = env.motion.get_frame(info["phase_start_steps"])["joint_pos"]
@@ -421,6 +425,7 @@ def run_validation_rollout(
         env.terminate_on_motion_end = original_terminate_on_motion_end
         env.max_episode_steps = original_max_episode_steps
         restore_env_state(env, training_snapshot)
+        algo.restore_runtime_state(algorithm_snapshot)
         trainer.current_observation = training_observation
         torch.random.set_rng_state(cpu_rng_state)
         if cuda_rng_state is not None:

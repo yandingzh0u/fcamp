@@ -89,3 +89,31 @@ class Algorithm(ABC):
     def deployment_actions(self, obs: torch.Tensor) -> torch.Tensor:
         """Deterministic action payload used by validation and playback."""
         return self.deterministic_actions(obs)
+
+    def evaluation_reset(self, phase_indices: torch.Tensor) -> torch.Tensor:
+        """Reset for validation/playback and return this method's policy observation."""
+        return self.env.reset(phase_indices=phase_indices)
+
+    def evaluation_step(
+        self,
+        actions: torch.Tensor,
+        reference_dt: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        """Advance one clean evaluator transition.
+
+        Methods with private observation state (AdaMimic history, for example)
+        override this while retaining the shared evaluator reward/termination.
+        """
+        return self.env.step(
+            actions,
+            auto_reset=False,
+            reference_dt=reference_dt,
+        )
+
+    def snapshot_runtime_state(self):
+        """Return method-owned rollout state that validation must restore."""
+        return None
+
+    def restore_runtime_state(self, state) -> None:
+        """Restore state returned by :meth:`snapshot_runtime_state`."""
+        del state

@@ -42,6 +42,8 @@ _RESUME_ENV_KEYS = (
     "action_rate_weight",
     "physics_material_combine_mode",
     "contact_sensor_update_period",
+    "adamimic_keyframe_phases",
+    "adamimic_special_keyframe_indices",
 )
 
 _RESUME_ENV_DEFAULTS = {
@@ -52,6 +54,8 @@ _RESUME_ENV_DEFAULTS = {
     "motion_end_behavior": "hold_last",
     "physics_material_combine_mode": "average",
     "contact_sensor_update_period": "control",
+    "adamimic_keyframe_phases": (),
+    "adamimic_special_keyframe_indices": (),
 }
 
 

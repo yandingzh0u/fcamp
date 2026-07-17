@@ -12,10 +12,21 @@ class MimicStepMixin:
         auto_reset: bool = False,
         reset_horizon: int = 1,
         reference_dt: torch.Tensor | float | None = None,
+        physics_substep_actions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         previous_action = self.last_action.clone()
-        self._apply_action_targets(actions)
-        for _ in range(self.decimation):
+        if physics_substep_actions is not None:
+            expected_shape = (self.decimation, self.num_envs, self.action_dim)
+            if tuple(physics_substep_actions.shape) != expected_shape:
+                raise ValueError(
+                    f"Expected physics_substep_actions {expected_shape}, "
+                    f"got {tuple(physics_substep_actions.shape)}"
+                )
+        else:
+            self._apply_action_targets(actions)
+        for substep in range(self.decimation):
+            if physics_substep_actions is not None:
+                self._apply_action_targets(physics_substep_actions[substep])
             self.scene.write_data_to_sim()
             self.sim.step(render=False)
             self.scene.update(self.physics_dt)
