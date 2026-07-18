@@ -164,7 +164,7 @@ class BeyondMimicAdaptiveSampler:
             )
         failed_sum = float(self.bin_failed_count.sum().item())
         peak_bin = int(torch.argmax(self.bin_failed_count).item()) if failed_sum > 0.0 else -1
-        return {
+        stats = {
             "bin_count": float(self.num_bins),
             "top_bin": float(top_bin.item()),
             "top_prob": float(top_prob.item()),
@@ -175,6 +175,12 @@ class BeyondMimicAdaptiveSampler:
             "kernel_size": float(self.adaptive_kernel_size),
             "adaptive_lambda": float(self.adaptive_lambda),
         }
+        for index, (probability, failure) in enumerate(
+            zip(probabilities, self.bin_failed_count, strict=True)
+        ):
+            stats[f"bin_{index}_prob"] = float(probability.item())
+            stats[f"bin_{index}_failure_ema"] = float(failure.item())
+        return stats
 
 
 class AdaptiveTimestepsSampler:
@@ -322,7 +328,7 @@ class AdaptiveTimestepsSampler:
             entropy = torch.ones_like(entropy)
         failed_sum = float(self.bin_failed_count.sum().item())
         peak_bin = int(torch.argmax(self.bin_failed_count).item()) if failed_sum > 0.0 else -1
-        return {
+        stats = {
             "bin_count": float(self.num_bins),
             "top_bin": float(top_bin.item()),
             "top_prob": float(top_prob.item()),
@@ -332,3 +338,9 @@ class AdaptiveTimestepsSampler:
             "predecessor_ratio": float(self.adaptive_predecessor_ratio),
             "predecessor_lookback_bins": float(self.adaptive_predecessor_lookback_bins),
         }
+        for index, (probability, failure) in enumerate(
+            zip(probabilities, self.bin_failed_count, strict=True)
+        ):
+            stats[f"bin_{index}_prob"] = float(probability.item())
+            stats[f"bin_{index}_failure_ema"] = float(failure.item())
+        return stats

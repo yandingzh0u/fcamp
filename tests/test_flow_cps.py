@@ -338,6 +338,72 @@ def test_causal_action_no_future_gradient_leak() -> None:
         assert leak <= 1e-6, f"causal action frame {k} leaks future grad: {leak}"
 
 
+def test_causal_velocity_is_order_sensitive_after_swapped_prefix() -> None:
+    """Swapping z0/z1 must change v1 and every later conditional velocity.
+
+    A commutative prefix aggregation fails this invariant: after both tokens
+    have entered the prefix it cannot distinguish [z0, z1] from [z1, z0].
+    """
+    torch.manual_seed(11)
+    horizon, action_dim = 4, 3
+    pol = FlowMatchingPolicy(
+        obs_dim=5,
+        action_dim=action_dim,
+        horizon=horizon,
+        hidden_dims=(24, 16),
+        activation="elu",
+        causal_velocity=True,
+    )
+    obs = torch.randn(2, pol.obs_dim)
+    time = torch.full((2,), 0.37)
+    chunk = torch.randn(2, horizon, action_dim)
+    chunk[:, 0] -= 2.0
+    chunk[:, 1] += 2.0
+    swapped = chunk.clone()
+    swapped[:, [0, 1]] = swapped[:, [1, 0]]
+
+    vel = pol.velocity_field(obs, chunk.reshape(2, -1), time).view(2, horizon, action_dim)
+    vel_swapped = pol.velocity_field(obs, swapped.reshape(2, -1), time).view(2, horizon, action_dim)
+    mean_abs_delta = (vel - vel_swapped).abs().mean(dim=(0, 2))
+
+    for frame_idx in range(1, horizon):
+        assert float(mean_abs_delta[frame_idx].item()) > 1.0e-5, (
+            f"velocity frame {frame_idx} is not order-sensitive: "
+            f"mean_abs_delta={float(mean_abs_delta[frame_idx].item())}"
+        )
+
+
+def test_causal_velocity_future_token_does_not_change_earlier_frames() -> None:
+    """Changing z_j must leave all conditional velocities v_k, k < j, exact."""
+    torch.manual_seed(17)
+    horizon, action_dim = 4, 3
+    pol = FlowMatchingPolicy(
+        obs_dim=5,
+        action_dim=action_dim,
+        horizon=horizon,
+        hidden_dims=(24, 16),
+        activation="elu",
+        causal_velocity=True,
+    )
+    obs = torch.randn(2, pol.obs_dim)
+    time = torch.full((2,), 0.61)
+    chunk = torch.randn(2, horizon, action_dim)
+    future_changed = chunk.clone()
+    future_changed[:, 3] += 10.0 * torch.randn_like(future_changed[:, 3])
+
+    vel = pol.velocity_field(obs, chunk.reshape(2, -1), time).view(2, horizon, action_dim)
+    changed_vel = pol.velocity_field(obs, future_changed.reshape(2, -1), time).view(
+        2, horizon, action_dim
+    )
+
+    assert torch.equal(vel[:, :3], changed_vel[:, :3]), (
+        "changing future token z3 changed an earlier conditional velocity"
+    )
+    assert not torch.equal(vel[:, 3], changed_vel[:, 3]), (
+        "changing z3 should change its own conditional velocity"
+    )
+
+
 def test_causal_action_no_future_gradient_leak_absolute() -> None:
     """v5 absolute transform: a_k = scale*tanh(raw_k/scale) depends only on
     z_k, so per-frame causality (and thus per-frame clipped-ratio legality) is

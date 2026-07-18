@@ -13,6 +13,9 @@ from .metrics_logger import MetricsLogger
 from envs.g1_mimic import G1MimicEnv
 
 
+VALIDATION_PROTOCOL_VERSION = 4.0
+
+
 class CoreTrainer:
     def __init__(self, simulation_app, cfg: ExperimentConfig, algo_factory, checkpoint_dir: Path):
         self.simulation_app = simulation_app
@@ -53,13 +56,16 @@ class CoreTrainer:
             if not self.simulation_app.is_running():
                 break
             t0 = time.perf_counter()
+            self.env.begin_reset_phase_diagnostics()
             current_obs = self.algo.reset_for_update(update_idx)
             self.current_observation = current_obs
             rollout = self.algo.collect(current_obs)
+            reset_metrics = self.env.finish_reset_phase_diagnostics()
             self.current_observation = rollout["next_observation"]
             collect_time = time.perf_counter() - t0
 
             metrics = self.algo.update(rollout, collect_time)
+            metrics.update(reset_metrics)
             iteration_s = time.perf_counter() - t0
             transitions_update = int(self.env_cfg.num_envs) * int(self.algo_cfg.rollout_env_steps)
             self.env_transitions_total += transitions_update
@@ -86,6 +92,17 @@ class CoreTrainer:
             if update_idx % tcfg.log_every == 0:
                 self.algo.log(update_idx, tcfg.max_updates, metrics)
                 print(
+                    "[TRAIN_RESET] "
+                    f"count={metrics.get('train_reset/all/count', 0.0):.0f} "
+                    f"phase0_frac={metrics.get('train_reset/all/start_fraction', 0.0):.4f} "
+                    f"p50={metrics.get('train_reset/all/phase_p50', -1.0):.1f} "
+                    f"p95={metrics.get('train_reset/all/phase_p95', -1.0):.1f} "
+                    f"target_count={metrics.get('train_reset/phase0/count', 0.0):.0f} "
+                    f"target_nonzero={metrics.get('train_reset/phase0/nonstart_count', 0.0):.0f} "
+                    f"curriculum_p50={metrics.get('train_reset/curriculum/phase_p50', -1.0):.1f}",
+                    flush=True,
+                )
+                print(
                     f"[PROGRESS] env_steps={self.env_transitions_total} "
                     f"iteration={iteration_s:.3f}s throughput={metrics['perf/env_transitions_per_s']:.1f}",
                     flush=True,
@@ -106,7 +123,7 @@ class CoreTrainer:
                 )
                 vt0 = time.perf_counter()
                 metrics["validation/fixed_seed"] = float(fixed_seed)
-                metrics["validation/protocol_version"] = 3.0
+                metrics["validation/protocol_version"] = VALIDATION_PROTOCOL_VERSION
                 metrics["validation/max_steps"] = float(val_max_steps)
                 metrics.update(run_validation_rollout(self, fixed_seed=fixed_seed))
                 dir_phase = tcfg.validation_directional_start_phase
@@ -164,7 +181,7 @@ class CoreTrainer:
         )
         metrics = run_validation_rollout(self, fixed_seed=fixed_seed)
         metrics["validation/fixed_seed"] = float(fixed_seed)
-        metrics["validation/protocol_version"] = 3.0
+        metrics["validation/protocol_version"] = VALIDATION_PROTOCOL_VERSION
         metrics["validation/max_steps"] = float(validation_max_steps(self.train_cfg, self.env))
         log_validation_metrics(self.env, metrics)
         self.metrics_logger.write_validation_summary(self.start_update - 1, metrics)

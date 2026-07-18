@@ -86,7 +86,9 @@ parameters:
     amp_weight: 1.0
     # Current handcrafted task reward is already multiplied by dt.
     integrate_amp_reward_dt: true
-    advantage_normalization: per_offset
+    # Form the weighted task/style advantage first, then normalize that single
+    # scalar objective once over the fixed 10/90 training measure.
+    advantage_normalization: global
     ratio_mode: joint_path
 
   critics:
@@ -95,6 +97,12 @@ parameters:
     sharing: encoder
     task_loss_weight: 1.0
     amp_loss_weight: 1.0
+
+  # Ten percent of the interaction/optimizer budget persistently attempts full
+  # episodes from phase 0.  A trajectory is counted complete only when the
+  # environment emits motion_complete; reset-at-zero is never called success.
+  streams:
+    phase0_fraction: 0.10
 
 training:
   seed: 0
@@ -109,5 +117,4 @@ training:
   validation_start_phase: 0
   validation_directional_start_phase: -1
   validation_fixed_seed: 0
-  validation_done_frac_early_stop: 0.98
   target_validation_steps: 0

@@ -41,6 +41,7 @@ class FrameTrajectoryReplay:
         self._reference_time = torch.full((self.capacity,), -1, dtype=torch.long)
         self._age = torch.full((self.capacity,), -1, dtype=torch.long)
         self._update = torch.full((self.capacity,), -1, dtype=torch.long)
+        self._stream = torch.full((self.capacity,), -1, dtype=torch.int8)
         self._predecessor = torch.full((self.capacity,), -1, dtype=torch.long)
         self._last_slot_by_env = torch.full((self.num_envs,), -1, dtype=torch.long)
         self._last_episode_by_env = torch.full((self.num_envs,), -1, dtype=torch.long)
@@ -63,6 +64,7 @@ class FrameTrajectoryReplay:
         self._reference_time.fill_(-1)
         self._age.fill_(-1)
         self._update.fill_(-1)
+        self._stream.fill_(-1)
         self._predecessor.fill_(-1)
         self._last_slot_by_env.fill_(-1)
         self._last_episode_by_env.fill_(-1)
@@ -83,9 +85,8 @@ class FrameTrajectoryReplay:
         reference_times: torch.Tensor,
         ages: torch.Tensor,
         update: int,
-        stream: int = 0,
+        stream: int | torch.Tensor = 0,
     ) -> None:
-        del stream
         if frames.ndim != 2 or frames.shape[1] != self.frame_dim:
             raise ValueError(
                 f"frames must have shape [B,{self.frame_dim}], got {tuple(frames.shape)}"
@@ -93,18 +94,34 @@ class FrameTrajectoryReplay:
         count = int(frames.shape[0])
         if count == 0:
             return
+        if isinstance(stream, torch.Tensor):
+            if stream.ndim != 1 or int(stream.shape[0]) != count:
+                raise ValueError(f"stream must have shape [{count}], got {tuple(stream.shape)}")
+            if torch.is_floating_point(stream) or torch.is_complex(stream):
+                raise TypeError("stream tensor must use an integer dtype")
+        elif not isinstance(stream, int):
+            raise TypeError("stream must be an int or a 1-D tensor")
         if count > self.capacity:
             frames = frames[-self.capacity :]
             env_ids = env_ids[-self.capacity :]
             episode_ids = episode_ids[-self.capacity :]
             reference_times = reference_times[-self.capacity :]
             ages = ages[-self.capacity :]
+            if isinstance(stream, torch.Tensor):
+                stream = stream[-self.capacity :]
             count = self.capacity
         cpu_frames = frames.detach().to(device="cpu", dtype=torch.float32)
         cpu_env = env_ids.detach().to(device="cpu", dtype=torch.long)
         cpu_episode = episode_ids.detach().to(device="cpu", dtype=torch.long)
         cpu_time = reference_times.detach().to(device="cpu", dtype=torch.long)
         cpu_age = ages.detach().to(device="cpu", dtype=torch.long)
+        if isinstance(stream, torch.Tensor):
+            cpu_stream_long = stream.detach().to(device="cpu", dtype=torch.long)
+        else:
+            cpu_stream_long = torch.full((count,), int(stream), dtype=torch.long)
+        if bool((cpu_stream_long < -128).any()) or bool((cpu_stream_long > 127).any()):
+            raise ValueError("stream values must fit in int8")
+        cpu_stream = cpu_stream_long.to(dtype=torch.int8)
         if not bool(torch.isfinite(cpu_frames).all()):
             raise ValueError("frame replay frames contain non-finite values")
         if bool((cpu_env < 0).any()) or bool((cpu_env >= self.num_envs).any()):
@@ -120,6 +137,7 @@ class FrameTrajectoryReplay:
             & (self._last_episode_by_env.index_select(0, cpu_env) == cpu_episode)
             & (self._last_time_by_env.index_select(0, cpu_env) + 1 == cpu_time)
             & (self._last_age_by_env.index_select(0, cpu_env) + 1 == cpu_age)
+            & (self._stream.index_select(0, prev.clamp_min(0)) == cpu_stream)
         )
         predecessor = torch.where(contiguous, prev, torch.full_like(prev, -1))
 
@@ -131,6 +149,7 @@ class FrameTrajectoryReplay:
         self._reference_time[slots] = cpu_time
         self._age[slots] = cpu_age
         self._update[slots] = int(update)
+        self._stream[slots] = cpu_stream
         self._predecessor[slots] = predecessor
         self._last_slot_by_env[cpu_env] = slots
         self._last_episode_by_env[cpu_env] = cpu_episode
@@ -151,6 +170,7 @@ class FrameTrajectoryReplay:
         end_episode = int(self._episode_id[endpoint].item())
         end_time = int(self._reference_time[endpoint].item())
         end_age = int(self._age[endpoint].item())
+        end_stream = int(self._stream[endpoint].item())
         for offset in range(history_len):
             if slot < 0 or not bool(self._valid[slot].item()):
                 return None
@@ -159,6 +179,7 @@ class FrameTrajectoryReplay:
                 or int(self._episode_id[slot].item()) != end_episode
                 or int(self._reference_time[slot].item()) != end_time - offset
                 or int(self._age[slot].item()) != end_age - offset
+                or int(self._stream[slot].item()) != end_stream
                 or int(self._age[slot].item()) <= 0
             ):
                 return None
@@ -181,6 +202,7 @@ class FrameTrajectoryReplay:
         end_episode = self._episode_id.index_select(0, endpoints)
         end_time = self._reference_time.index_select(0, endpoints)
         end_age = self._age.index_select(0, endpoints)
+        end_stream = self._stream.index_select(0, endpoints)
         slots = endpoints
         columns: list[torch.Tensor] = []
         valid = torch.ones(endpoints.shape[0], dtype=torch.bool)
@@ -193,6 +215,7 @@ class FrameTrajectoryReplay:
                 & (self._episode_id.index_select(0, safe) == end_episode)
                 & (self._reference_time.index_select(0, safe) == end_time - offset)
                 & (self._age.index_select(0, safe) == end_age - offset)
+                & (self._stream.index_select(0, safe) == end_stream)
                 & (self._age.index_select(0, safe) > 0)
             )
             valid &= slot_valid
@@ -208,10 +231,18 @@ class FrameTrajectoryReplay:
         history_len: int,
         *,
         generator: torch.Generator | None = None,
+        stream_id: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        candidates = torch.where(self._valid & self._eligible & (self._age >= int(history_len)))[0]
+        candidate_mask = self._valid & self._eligible & (self._age >= int(history_len))
+        if stream_id is not None:
+            if not isinstance(stream_id, int):
+                raise TypeError("stream_id must be an int or None")
+            if stream_id < -128 or stream_id > 127:
+                raise ValueError("stream_id must fit in int8")
+            candidate_mask &= self._stream == int(stream_id)
+        candidates = torch.where(candidate_mask)[0]
         if candidates.numel() == 0:
             self._last_rejected_sample_count = 0
             return (
@@ -260,8 +291,12 @@ class FrameTrajectoryReplay:
     def statistics(self, *, current_step: int | None = None) -> dict[str, float]:
         del current_step
         memory_bytes = self.capacity * (
-            self.frame_dim * 4 + 7 * torch.tensor([], dtype=torch.long).element_size() + 2
+            self.frame_dim * torch.tensor([], dtype=torch.float32).element_size()
+            + 6 * torch.tensor([], dtype=torch.long).element_size()
+            + 2 * torch.tensor([], dtype=torch.bool).element_size()
+            + torch.tensor([], dtype=torch.int8).element_size()
         )
+        memory_bytes += self.num_envs * 4 * torch.tensor([], dtype=torch.long).element_size()
         valid = self._valid
         eligible = valid & self._eligible
         metrics = {
@@ -285,6 +320,13 @@ class FrameTrajectoryReplay:
                     "replay/episode_count": float(torch.unique(self._episode_id[valid]).numel()),
                 }
             )
+        stream_ids = torch.unique(self._stream[valid]).tolist() if bool(valid.any()) else []
+        for stream_id in sorted({0, 1, *(int(value) for value in stream_ids)}):
+            stream_valid = valid & (self._stream == stream_id)
+            metrics[f"replay/stream_{stream_id}_size"] = float(stream_valid.sum().item())
+            metrics[f"replay/stream_{stream_id}_eligible_endpoints"] = float(
+                (stream_valid & self._eligible).sum().item()
+            )
         return metrics
 
     def state_dict(self) -> dict:
@@ -300,6 +342,7 @@ class FrameTrajectoryReplay:
             "reference_time": self._reference_time.clone(),
             "age": self._age.clone(),
             "update": self._update.clone(),
+            "stream": self._stream.clone(),
             "predecessor": self._predecessor.clone(),
             "last_slot_by_env": self._last_slot_by_env.clone(),
             "last_episode_by_env": self._last_episode_by_env.clone(),
@@ -329,6 +372,11 @@ class FrameTrajectoryReplay:
             self._reference_time.copy_(state["reference_time"].to(dtype=torch.long, device="cpu"))
             self._age.copy_(state["age"].to(dtype=torch.long, device="cpu"))
             self._update.copy_(state["update"].to(dtype=torch.long, device="cpu"))
+            if "stream" in state:
+                self._stream.copy_(state["stream"].to(dtype=torch.int8, device="cpu"))
+            else:
+                self._stream.fill_(-1)
+                self._stream[self._valid] = 0
             self._predecessor.copy_(state["predecessor"].to(dtype=torch.long, device="cpu"))
             self._last_slot_by_env.copy_(state["last_slot_by_env"].to(dtype=torch.long, device="cpu"))
             self._last_episode_by_env.copy_(state["last_episode_by_env"].to(dtype=torch.long, device="cpu"))

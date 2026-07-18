@@ -43,7 +43,8 @@ class FlowCPSBase(Algorithm):
             )
 
         self.num_act = env.action_dim
-        self.actor_obs_dim = env.observation_dim
+        self.base_actor_obs_dim = int(env.observation_dim)
+        self.actor_obs_dim = self.base_actor_obs_dim
         self.critic_obs_dim = env.critic_observation_dim
         self.horizon_h = int(cfg.horizon)
         self.action_chunk_dim = self.horizon_h * self.num_act
@@ -1530,8 +1531,10 @@ class FlowCPSBase(Algorithm):
 
     def _add_sampler_metrics(self, metrics: dict) -> None:
         stats = self.env.adaptive_sampling_stats()
-        for key in ("top_bin", "top_prob", "failed_sum", "entropy", "peak_bin"):
-            metrics[f"sampler/{key}"] = float(stats.get(key, float("nan")))
+        for key, value in stats.items():
+            value = float(value)
+            if math.isfinite(value):
+                metrics[f"sampler/{key}"] = value
 
     def _add_reward_weighted_metrics(self, metrics: dict) -> None:
         reward_weights = {

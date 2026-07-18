@@ -44,6 +44,16 @@ class Algorithm(ABC):
     def initial_reset(self) -> torch.Tensor:
         ...
 
+    def reset_after_resume(self) -> torch.Tensor | None:
+        """Optionally rebuild method-owned rollout state after checkpoint restore.
+
+        The checkpointer invokes this only after the adaptive sampler and random
+        number generator states have been restored.  Returning an observation
+        replaces the trainer's current observation; returning ``None`` keeps the
+        observation produced by :meth:`initial_reset`.
+        """
+        return None
+
     @abstractmethod
     def collect(self, obs: torch.Tensor) -> dict:
         ...

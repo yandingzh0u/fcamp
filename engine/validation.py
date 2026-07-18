@@ -5,9 +5,15 @@ import time
 import torch
 from isaaclab.utils.math import quat_error_magnitude
 
+from components.evaluation import (
+    DemoFeatureNormalizer,
+    PhaseMatchedWindowMMD,
+    sanitize_reference_phases,
+)
 from envs.spec import EE_Z_TERMINATION_THRESHOLD
 from method.base import classify_mimickit_done_terms
 from .env_state import restore_env_state, snapshot_env_state
+from .validation_metrics import terminal_phase_metrics
 
 
 def short_body_name(body_name: str) -> str:
@@ -197,6 +203,19 @@ def run_validation_rollout(
     print(f"[VALIDATION_RESET_DONE] time={time.perf_counter() - reset_t0:.3f}s", flush=True)
     reset_metrics = _reset_alignment_metrics(env, "validation")
 
+    demo_frame_indices = torch.arange(
+        env.motion.num_frames, dtype=torch.long, device=env.device
+    )
+    motion_metric = PhaseMatchedWindowMMD(
+        num_envs=num_envs,
+        normalizer=DemoFeatureNormalizer.fit(
+            env.motion.get_imitation_frame_at_times(demo_frame_indices.float())
+        ),
+        device=env.device,
+        reference_phase_start=float(max(0, int(start_phase))),
+        reference_phase_end=float(env.motion_end_phase),
+    )
+
     cached_chunk: torch.Tensor | None = None
     chunk_index = horizon
     done = torch.zeros(num_envs, dtype=torch.bool, device=env.device)
@@ -307,6 +326,30 @@ def run_validation_rollout(
                     action,
                     reference_dt,
                 )
+                metric_env_ids = motion_metric.env_ids
+                policy_imitation_frame = env.get_evaluator_imitation_policy_frame(
+                    metric_env_ids
+                )
+                metric_phases_raw = info["imitation_frame_phase_steps"].index_select(
+                    0, metric_env_ids
+                )
+                metric_phases, phase_valid = sanitize_reference_phases(
+                    metric_phases_raw,
+                    num_frames=env.motion.num_frames,
+                )
+                demo_imitation_frame = env.motion.get_imitation_frame_at_times(metric_phases)
+                motion_resample_mask = info.get("motion_resample_mask")
+                if torch.is_tensor(motion_resample_mask):
+                    phase_valid &= ~motion_resample_mask.index_select(0, metric_env_ids).bool()
+                # Terminal post-action states are excluded. Every legal window
+                # therefore contains W consecutive states that remained alive,
+                # in range, and on the same unwrapped motion trajectory.
+                motion_metric.update_selected(
+                    policy_imitation_frame,
+                    demo_imitation_frame,
+                    (active_mask & ~step_done).index_select(0, metric_env_ids) & phase_valid,
+                    metric_phases,
+                )
                 latest_phase_steps = info["termination_phase_steps"].float().clone()
                 ref_now = env.motion.get_frame(info["phase_start_steps"])["joint_pos"]
                 ref_next = env.motion.get_frame(info["reference_phase_steps"])["joint_pos"]
@@ -409,9 +452,6 @@ def run_validation_rollout(
                         f"elapsed={time.perf_counter() - rollout_t0:.3f}s",
                         flush=True,
                     )
-                if done_frac >= float(tcfg.validation_done_frac_early_stop):
-                    print(f"[VALIDATION_EARLY_STOP] step={step_idx + 1} done_frac={done_frac:.4f}", flush=True)
-                    break
                 if bool(done.all()):
                     break
         validation_first_push_step = env.first_push_step.clone()
@@ -459,6 +499,7 @@ def run_validation_rollout(
         "validation/reference_progress_p95": float(torch.quantile(reference_progress, 0.95).item()),
         "validation/full_motion_control_steps": float(env.full_motion_control_steps()),
     }
+    metrics.update(motion_metric.metrics())
     metrics.update(reset_metrics)
     timeout, motion_complete, failure = classify_mimickit_done_terms(done, done_term_record)
     metrics.update({
@@ -470,6 +511,31 @@ def run_validation_rollout(
         "validation/anchor_ori_bad_frac": float(done_term_record["anchor_ori_bad"].float().mean().item()),
         "validation/ee_body_bad_frac": float(done_term_record["ee_body_bad"].float().mean().item()),
     })
+    outcome_masks = {
+        "failure": failure,
+        "time_out": timeout,
+        "motion_complete": motion_complete,
+    }
+    cause_masks = {
+        name: done_term_record[name]
+        for name in (
+            "anchor_pos_bad",
+            "anchor_ori_bad",
+            "ee_body_bad",
+            "fall_contact",
+            "pose_fail",
+        )
+        if name in done_term_record
+    }
+    for name, mask in {**outcome_masks, **cause_masks}.items():
+        metrics.update(
+            terminal_phase_metrics(
+                f"validation/terminal/{name}",
+                death_phase_record,
+                mask,
+                motion_end_phase=float(env.motion_end_phase),
+            )
+        )
     if "fall_contact" in done_term_record:
         metrics["validation/fall_contact_frac"] = float(done_term_record["fall_contact"].float().mean().item())
     if "pose_fail" in done_term_record:

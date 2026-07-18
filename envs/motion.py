@@ -489,6 +489,31 @@ class MimicMotionReference:
         result = torch.where(sin_half_theta.abs() < 0.001, 0.5 * q0 + 0.5 * q1, result)
         return torch.where(cos_half_theta >= 1.0, q0, result)
 
+    def _interpolate_quat_shortest(
+        self,
+        values: torch.Tensor,
+        time_steps: torch.Tensor,
+    ) -> torch.Tensor:
+        """Mode-independent shortest-path SLERP for external evaluation."""
+
+        t = self.clamp_time_steps(time_steps.to(device=self.device, dtype=torch.float32))
+        lo = torch.floor(t).to(dtype=torch.long)
+        hi = torch.clamp(lo + 1, max=self.num_frames - 1)
+        q0 = F.normalize(values.index_select(0, lo), dim=-1)
+        q1 = F.normalize(values.index_select(0, hi), dim=-1)
+        dot = (q0 * q1).sum(dim=-1, keepdim=True)
+        q1 = torch.where(dot < 0.0, -q1, q1)
+        dot = dot.abs().clamp(max=1.0)
+        theta = torch.acos(dot)
+        sin_theta = torch.sin(theta)
+        weight = (t - lo.to(dtype=t.dtype)).view(-1, *([1] * (values.ndim - 1)))
+        slerp = (
+            torch.sin((1.0 - weight) * theta) / sin_theta.clamp_min(1.0e-8) * q0
+            + torch.sin(weight * theta) / sin_theta.clamp_min(1.0e-8) * q1
+        )
+        linear = q0 * (1.0 - weight) + q1 * weight
+        return F.normalize(torch.where(sin_theta > 1.0e-6, slerp, linear), dim=-1)
+
     def _interpolate_velocity(self, values: torch.Tensor, time_steps: torch.Tensor) -> torch.Tensor:
         if getattr(self, "motion_reference_mode", "frame") != "mimickit_add":
             return self._interpolate(values, time_steps)
@@ -589,6 +614,45 @@ class MimicMotionReference:
             root_lin_vel=self.body_lin_vel_full_w[time_steps, self.root_body_id],
             root_ang_vel=self.body_ang_vel_full_w[time_steps, self.root_body_id],
             joint_vel=self.joint_vel[time_steps],
+        )
+
+    def get_imitation_frame_at_times(self, time_steps: torch.Tensor) -> torch.Tensor:
+        """Return evaluator-only frames at exact fractional motion phases.
+
+        Unlike the paper-native training reference path, this method ignores
+        ``motion_reference_mode`` completely. It always uses the dataset's raw
+        root-link body velocities and joint velocities plus one shortest-path
+        quaternion interpolation rule. Thus ADD and non-ADD checkpoints are
+        evaluated against exactly the same demonstration distribution.
+        """
+
+        if not torch.is_tensor(time_steps):
+            raise TypeError("time_steps must be a torch.Tensor")
+        phases = time_steps.to(device=self.device)
+        if phases.ndim != 1:
+            raise ValueError(f"time_steps must be 1-D, got {tuple(phases.shape)}")
+        if not bool(torch.isfinite(phases).all()):
+            raise ValueError("time_steps contain non-finite values")
+        if bool((phases < 0).any()) or bool((phases > self.num_frames - 1).any()):
+            raise ValueError(f"imitation frame times must lie in [0, {self.num_frames - 1}]")
+        phases = phases.to(dtype=torch.float32)
+        root_pos = self._interpolate(self.body_pos_full_w[:, self.root_body_id], phases)
+        return build_g1_imitation_frame(
+            root_pos=root_pos,
+            root_quat_wxyz=self._interpolate_quat_shortest(
+                self.body_quat_full_w[:, self.root_body_id], phases
+            ),
+            joint_pos=self._interpolate(self.joint_pos, phases),
+            key_body_pos=self._interpolate(
+                self.body_pos_full_w[:, self.imitation_key_body_ids], phases
+            ),
+            root_lin_vel=self._interpolate(
+                self.body_lin_vel_full_w[:, self.root_body_id], phases
+            ),
+            root_ang_vel=self._interpolate(
+                self.body_ang_vel_full_w[:, self.root_body_id], phases
+            ),
+            joint_vel=self._interpolate(self.joint_vel, phases),
         )
 
     def get_add_disc_frame(

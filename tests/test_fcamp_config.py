@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from engine.config import FCAMPConfig, FlowCPSConfig, load_config, config_from_dict
+from engine.config import FCAMPConfig, FlowCPSConfig, TrainingConfig, load_config, config_from_dict
 from envs.tasks import TASKS
 
 
@@ -27,7 +27,25 @@ def test_fcamp_config_is_h4_w16_flow_cps() -> None:
     assert cfg.parameters.policy_lr == 0.0003
     assert cfg.parameters.value_lr == 0.0003
     assert cfg.parameters.style_prior.obs_steps == 16
+    assert cfg.parameters.credit.advantage_normalization == "global"
+    assert cfg.parameters.credit.integrate_amp_reward_dt is True
+    assert cfg.parameters.streams.phase0_fraction == 0.10
     assert cfg.training.max_updates == 500
+
+
+def test_validation_has_no_fractional_early_stop() -> None:
+    assert "validation_done_frac_early_stop" not in {
+        field.name for field in fields(TrainingConfig)
+    }
+    for name in (
+        "amp_largebox.yaml",
+        "add_largebox.yaml",
+        "fcamp_largebox.yaml",
+        "beyondmimic_largebox.yaml",
+        "adamimic_stage1_largebox.yaml",
+        "adamimic_stage2_largebox.yaml",
+    ):
+        load_config(ROOT / "configs" / name)
 
 
 def test_flow_cps_config_has_no_legacy_algorithm_fields() -> None:

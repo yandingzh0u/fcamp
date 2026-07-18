@@ -52,9 +52,13 @@ class FlowMatchingPolicy(nn.Module):
         if not self.hidden_dims:
             raise ValueError("hidden_dims must contain at least one layer")
         self.causal_velocity = bool(causal_velocity)
-        self.causal_arch = str(causal_arch)
-        if self.causal_velocity and self.causal_arch != "prefix_cumsum":
-            raise ValueError(f"Unsupported causal_arch: {self.causal_arch}")
+        requested_causal_arch = str(causal_arch)
+        if self.causal_velocity and requested_causal_arch not in {"causal_gru", "prefix_cumsum"}:
+            raise ValueError(f"Unsupported causal_arch: {requested_causal_arch}")
+        # ``prefix_cumsum`` is retained as a constructor compatibility alias.
+        # The old sum-based implementation was permutation-invariant inside a
+        # prefix, so it did not represent an ordered conditional trajectory.
+        self.causal_arch = "causal_gru" if self.causal_velocity else requested_causal_arch
         if not self.causal_velocity:
             # Full-chunk MLP: v_k depends on the whole z_0..z_{h-1} (non-causal).
             layers: list[nn.Module] = []
@@ -66,21 +70,29 @@ class FlowMatchingPolicy(nn.Module):
             layers.append(nn.Linear(in_dim, self.chunk_dim))
             self.velocity_net = nn.Sequential(*layers)
         else:
-            # Causal prefix-cumsum velocity: v_k depends only on z_0..z_k.
+            # Ordered causal velocity: v_k depends only on z_0..z_k, while a
+            # GRU state preserves the order of that prefix. Token content and
+            # position are concatenated *before* nonlinear encoding so the
+            # association between z_i and its offset cannot be lost.
+            #
             # This makes logp_k a genuine conditional density
             # log pi(u_k | s, u_0..u_{k-1}), so per-frame clipped-ratio is valid.
-            #   obs_h   = obs_encoder([obs, time])              (shared)
-            #   frame_h_i = frame_encoder(z_i) + frame_pos_i    (per-frame)
-            #   prefix_h_k = sum_{i<=k} frame_h_i + prefix_pos_k  (causal cumsum)
-            #   v_k = vel_head([obs_h, prefix_h_k])
+            #   obs_h    = obs_encoder([obs, time])
+            #   token_i  = token_encoder([z_i, frame_pos_i])
+            #   state_i  = GRUCell(token_i, state_{i-1}), state_-1 = obs_h
+            #   v_i      = vel_head([obs_h, state_i])
             hidden = int(hidden_dims[-1])
             self._causal_hidden = hidden
             self.obs_encoder = _build_mlp(self.obs_dim + 1, tuple(hidden_dims), hidden, activation)
-            self.frame_encoder = _build_mlp(self.action_dim, tuple(hidden_dims), hidden, activation)
             self.frame_pos_embed = nn.Parameter(torch.zeros(self.horizon, hidden))
-            self.prefix_pos_embed = nn.Parameter(torch.zeros(self.horizon, hidden))
             nn.init.normal_(self.frame_pos_embed, std=0.02)
-            nn.init.normal_(self.prefix_pos_embed, std=0.02)
+            self.token_encoder = _build_mlp(
+                self.action_dim + hidden,
+                tuple(hidden_dims),
+                hidden,
+                activation,
+            )
+            self.causal_cell = nn.GRUCell(hidden, hidden)
             self.vel_head = _build_mlp(hidden * 2, tuple(hidden_dims), self.action_dim, activation)
         if action_squash_scale <= 0.0:
             raise ValueError(f"action_squash_scale must be > 0, got {action_squash_scale}")
@@ -141,15 +153,19 @@ class FlowMatchingPolicy(nn.Module):
         if not self.causal_velocity:
             net_input = torch.cat([observation, noisy_actions, time.unsqueeze(-1)], dim=-1)
             return self.velocity_net(net_input)
-        # Causal prefix-cumsum velocity: v_k depends only on z_0..z_k.
+        # Ordered causal-GRU velocity: v_k depends only on z_0..z_k.
         # noisy_actions: [B, chunk_dim] -> [B, h, A]
         b = observation.shape[0]
         chunk = noisy_actions.view(b, self.horizon, self.action_dim)
         obs_h = self.obs_encoder(torch.cat([observation, time.unsqueeze(-1)], dim=-1))  # [B, H]
-        frame_h = self.frame_encoder(chunk) + self.frame_pos_embed.unsqueeze(0)  # [B, h, H]
-        prefix_h = torch.cumsum(frame_h, dim=1) + self.prefix_pos_embed.unsqueeze(0)  # [B, h, H]
-        obs_h_exp = obs_h.unsqueeze(1).expand(-1, self.horizon, -1)  # [B, h, H]
-        vel = self.vel_head(torch.cat([obs_h_exp, prefix_h], dim=-1))  # [B, h, A]
+        frame_pos = self.frame_pos_embed.unsqueeze(0).expand(b, -1, -1)
+        token_h = self.token_encoder(torch.cat([chunk, frame_pos], dim=-1))  # [B, h, H]
+        state = obs_h
+        velocity_frames: list[torch.Tensor] = []
+        for frame_idx in range(self.horizon):
+            state = self.causal_cell(token_h[:, frame_idx], state)
+            velocity_frames.append(self.vel_head(torch.cat([obs_h, state], dim=-1)))
+        vel = torch.stack(velocity_frames, dim=1)  # [B, h, A]
         return vel.reshape(b, self.chunk_dim)
 
     def _action_transform(self, action_value: torch.Tensor, prev_action: torch.Tensor | None = None) -> torch.Tensor:

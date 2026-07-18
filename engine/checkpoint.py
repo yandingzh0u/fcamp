@@ -179,6 +179,9 @@ class Checkpointer:
                 "[CHECKPOINT] WARN: legacy checkpoint has no dataset/robot/action-schema hashes.",
                 flush=True,
             )
+        preflight = getattr(t.algo, "validate_checkpoint_payload", None)
+        if callable(preflight):
+            preflight(payload)
         t.algo.policy.load_state_dict(payload["policy"])
         reset_optimizer = bool(t.train_cfg.reset_optimizer_on_resume)
         if reset_optimizer:
@@ -208,6 +211,12 @@ class Checkpointer:
                 torch.cuda.set_rng_state(payload["cuda_rng_state"].cpu(), t.env.device)
         except Exception as exc:
             print(f"[CHECKPOINT] WARN: could not restore RNG state: {exc}", flush=True)
+
+        reset_after_resume = getattr(t.algo, "reset_after_resume", None)
+        if callable(reset_after_resume):
+            resumed_observation = reset_after_resume()
+            if resumed_observation is not None:
+                t.current_observation = resumed_observation
 
         t.start_update = int(payload.get("update_idx", 0)) + 1
         completed_updates = t.start_update - 1

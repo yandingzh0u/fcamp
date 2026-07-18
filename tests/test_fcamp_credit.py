@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
 import torch
 
 from components.credit.temporal_credit import (
     compute_dual_channel_gae,
+    normalize_actor_mixture,
     resolve_terminal_masks,
     with_chunk_shared_actor_credit,
 )
 from models.dual_flow_critic import SharedEncoderDualFlowCritic
+from components.rollout.training_streams import Phase0CurriculumStreams
+from method.fcamp import FCAMP
 
 
 def _credit(
@@ -114,33 +120,193 @@ def test_invalid_steps_are_zero_and_break_trace() -> None:
     torch.testing.assert_close(result.normalized_advantages[1, 0], torch.zeros(2))
 
 
-def test_per_channel_per_offset_normalization() -> None:
+def test_actor_uses_one_weighted_global_advantage_normalizer() -> None:
     rewards = torch.tensor(
         [
-            [[1.0, 10.0]],
-            [[2.0, 20.0]],
-            [[3.0, 30.0]],
-            [[4.0, 40.0]],
+            [[1.0, 0.1], [4.0, 0.3]],
+            [[2.0, 0.4], [3.0, 0.2]],
+            [[5.0, 0.2], [2.0, 0.6]],
+            [[3.0, 0.5], [8.0, 0.1]],
         ]
     )
-    # lambda=0 makes advantages equal rewards and isolates normalization.
-    result = compute_dual_channel_gae(
+    valid = torch.ones(4, 2, dtype=torch.bool)
+    raw = compute_dual_channel_gae(
         rewards,
         torch.zeros_like(rewards),
         torch.zeros_like(rewards),
-        torch.ones(4, 1),
-        torch.ones(4, 1),
-        torch.ones(4, 1, dtype=torch.bool),
+        torch.ones(4, 2),
+        torch.ones(4, 2),
+        valid,
         gamma=1.0,
         gae_lambda=0.0,
         chunk_horizon=2,
-        normalization="per_channel_per_offset",
-        actor_weights=(1.0, 1.0),
+        normalization="none",
+        actor_weights=(1.0, 0.2),
     )
-    expected = torch.tensor(
-        [[[-1.0, -1.0]], [[-1.0, -1.0]], [[1.0, 1.0]], [[1.0, 1.0]]]
+    # Match a 10/90 actor objective: each stream's valid samples share its mass.
+    sample_weights = torch.tensor(
+        [[0.025, 0.225], [0.025, 0.225], [0.025, 0.225], [0.025, 0.225]]
     )
-    torch.testing.assert_close(result.normalized_advantages, expected)
+    result = normalize_actor_mixture(raw, valid, sample_weights)
+
+    raw_components = raw.actor_advantage_components
+    component_mean = (
+        sample_weights.unsqueeze(-1) * raw_components
+    ).sum(dim=(0, 1))
+    centered_components = raw_components - component_mean
+    centered_mixed = centered_components.sum(dim=-1)
+    inv_std = torch.rsqrt(
+        (sample_weights * centered_mixed.square()).sum() + 1.0e-8
+    )
+    expected_components = centered_components * inv_std
+    expected_actor = expected_components.sum(dim=-1)
+
+    torch.testing.assert_close(
+        result.actor_advantage_components,
+        expected_components,
+    )
+    torch.testing.assert_close(result.actor_advantage, expected_actor)
+    torch.testing.assert_close(
+        result.actor_advantage_components.sum(dim=-1),
+        result.actor_advantage,
+    )
+    assert abs(float((sample_weights * result.actor_advantage).sum())) < 1.0e-6
+    assert abs(
+        float(
+            (sample_weights * result.actor_advantage.square()).sum()
+        )
+        - 1.0
+    ) < 1.0e-5
+    # AMP retains its physical 0.2 scale; it is not independently inflated to
+    # unit variance.
+    assert (
+        result.actor_advantage_components[..., 1].std(unbiased=False)
+        < result.actor_advantage_components[..., 0].std(unbiased=False)
+    )
+
+
+def test_fcamp_assign_credit_has_one_normalizer_across_10_90_streams() -> None:
+    algo = object.__new__(FCAMP)
+    algo.cfg = SimpleNamespace(
+        credit=SimpleNamespace(
+            advantage_normalization="global",
+            task_weight=1.0,
+            amp_weight=1.0,
+            mode="causal_frame",
+        ),
+        discount_gamma=0.0,
+        gae_lambda=0.0,
+        streams=SimpleNamespace(phase0_fraction=0.10),
+    )
+    algo.training_streams = Phase0CurriculumStreams.create(
+        10,
+        phase0_fraction=0.10,
+        phase0_start=0,
+        device="cpu",
+    )
+    task = torch.tensor(
+        [
+            [
+                [10.0, 12.0],
+                [0.0, 1.0],
+                [1.0, 2.0],
+                [2.0, 3.0],
+                [3.0, 4.0],
+                [4.0, 5.0],
+                [5.0, 6.0],
+                [6.0, 7.0],
+                [7.0, 8.0],
+                [8.0, 9.0],
+            ]
+        ]
+    )
+    valid = torch.ones(1, 10, 2, dtype=torch.bool)
+    rollout = {
+        "task_reward": task,
+        "amp_reward_credit": torch.zeros_like(task),
+        "values": torch.zeros(1, 10, 2, 2),
+        "next_values": torch.zeros(1, 10, 2, 2),
+        "bootstrap_mask": valid,
+        "trace_mask": valid,
+        "valid": valid,
+    }
+
+    algo._assign_credit(rollout)
+    actor = rollout["advantages"]
+    phase0_mean = actor[:, :1].mean()
+    curriculum_mean = actor[:, 1:].mean()
+    objective_mean = 0.10 * phase0_mean + 0.90 * curriculum_mean
+    objective_square_mean = (
+        0.10 * actor[:, :1].square().mean()
+        + 0.90 * actor[:, 1:].square().mean()
+    )
+
+    assert abs(float(phase0_mean)) > 0.1
+    assert abs(float(curriculum_mean)) > 0.1
+    assert abs(float(objective_mean)) < 1.0e-6
+    assert abs(float(objective_square_mean) - 1.0) < 1.0e-5
+    torch.testing.assert_close(
+        rollout["mixed_advantage"],
+        rollout["channel_advantages"].sum(dim=-1),
+    )
+
+
+def test_actor_weights_change_only_mixed_actor_credit() -> None:
+    rewards = torch.randn(5, 3, 2)
+    values = torch.randn_like(rewards)
+    next_values = torch.randn_like(rewards)
+    common = dict(
+        rewards=rewards,
+        values=values,
+        next_values=next_values,
+        bootstrap_mask=torch.ones(5, 3),
+        trace_mask=torch.ones(5, 3),
+        valid_mask=torch.ones(5, 3, dtype=torch.bool),
+        gamma=0.97,
+        gae_lambda=0.91,
+        chunk_horizon=2,
+        normalization="none",
+    )
+    task_only = compute_dual_channel_gae(
+        **common,
+        actor_weights=(1.0, 0.0),
+    )
+    mixed = compute_dual_channel_gae(
+        **common,
+        actor_weights=(1.0, 0.25),
+    )
+
+    torch.testing.assert_close(task_only.td_errors, mixed.td_errors)
+    torch.testing.assert_close(task_only.advantages, mixed.advantages)
+    torch.testing.assert_close(task_only.value_targets, mixed.value_targets)
+    torch.testing.assert_close(
+        mixed.mixed_advantage,
+        mixed.advantages[..., 0] + 0.25 * mixed.advantages[..., 1],
+    )
+    assert not torch.allclose(task_only.mixed_advantage, mixed.mixed_advantage)
+
+
+@pytest.mark.parametrize(
+    "legacy_mode",
+    ["per_offset", "per_channel_per_offset", "per_channel_global"],
+)
+def test_multi_normalizer_actor_credit_modes_are_rejected(
+    legacy_mode: str,
+) -> None:
+    rewards = torch.ones(2, 1, 2)
+    with pytest.raises(ValueError, match="global.*none"):
+        compute_dual_channel_gae(
+            rewards,
+            torch.zeros_like(rewards),
+            torch.zeros_like(rewards),
+            torch.ones(2, 1),
+            torch.ones(2, 1),
+            torch.ones(2, 1, dtype=torch.bool),
+            gamma=1.0,
+            gae_lambda=0.0,
+            chunk_horizon=2,
+            normalization=legacy_mode,
+        )
 
 
 def test_chunk_shared_ablation_broadcasts_start_credit_only_to_actor() -> None:
@@ -170,6 +336,57 @@ def test_chunk_shared_ablation_broadcasts_start_credit_only_to_actor() -> None:
     # ablation isolates actor credit assignment rather than changing critics.
     torch.testing.assert_close(shared.value_targets, primitive.value_targets)
     torch.testing.assert_close(shared.advantages, primitive.advantages)
+
+
+def test_chunk_shared_uses_the_same_single_scalar_normalizer() -> None:
+    rewards = torch.tensor(
+        [
+            [[1.0, 10.0], [2.0, 40.0]],
+            [[3.0, 5.0], [4.0, 7.0]],
+            [[8.0, 20.0], [5.0, 15.0]],
+            [[2.0, 1.0], [6.0, 3.0]],
+        ]
+    )
+    primitive = compute_dual_channel_gae(
+        rewards,
+        torch.zeros_like(rewards),
+        torch.zeros_like(rewards),
+        torch.ones(4, 2),
+        torch.ones(4, 2),
+        torch.ones(4, 2, dtype=torch.bool),
+        gamma=1.0,
+        gae_lambda=0.0,
+        chunk_horizon=2,
+        normalization="none",
+        actor_weights=(1.0, 1.0),
+    )
+    shared_raw = with_chunk_shared_actor_credit(
+        primitive,
+        torch.ones(4, 2, dtype=torch.bool),
+        chunk_horizon=2,
+        normalization="none",
+        actor_weights=(2.0, 0.5),
+    )
+    valid = torch.ones(4, 2, dtype=torch.bool)
+    shared = normalize_actor_mixture(
+        shared_raw,
+        valid,
+        torch.full((4, 2), 1.0 / 8.0),
+    )
+
+    # Every frame receives its chunk-start credit and both reward components use
+    # one common scalar normalizer.
+    torch.testing.assert_close(shared.actor_advantage[0], shared.actor_advantage[1])
+    torch.testing.assert_close(shared.actor_advantage[2], shared.actor_advantage[3])
+    torch.testing.assert_close(
+        shared.actor_advantage,
+        shared.normalized_advantages.sum(dim=-1),
+    )
+    assert abs(float(shared.actor_advantage.mean())) < 1.0e-6
+    assert abs(
+        float(shared.actor_advantage.square().mean()) - 1.0
+    ) < 1.0e-5
+    torch.testing.assert_close(shared.value_targets, primitive.value_targets)
 
 
 def test_dual_flow_critic_shares_encoder_but_not_heads() -> None:

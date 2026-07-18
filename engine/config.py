@@ -128,12 +128,20 @@ class FCAMPCriticConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class FCAMPStreamsConfig:
+    """Fixed phase-zero trajectory-attempt/curriculum mixture used by FCAMP."""
+
+    phase0_fraction: float
+
+
+@dataclass(frozen=True, slots=True)
 class FCAMPConfig(FlowCPSConfig):
     """Full causal Flow-CPS + temporal discriminator training path."""
 
     style_prior: StylePriorConfig
     credit: FCAMPCreditConfig
     critics: FCAMPCriticConfig
+    streams: FCAMPStreamsConfig
 
     @property
     def amp(self) -> StylePriorConfig:
@@ -317,7 +325,6 @@ class TrainingConfig:
     validation_start_phase: int
     validation_directional_start_phase: int
     validation_fixed_seed: int
-    validation_done_frac_early_stop: float
     target_validation_steps: int
 
 
@@ -402,6 +409,7 @@ def _construct_method_config(method: str, values: dict[str, Any], source_path: P
         nested["style_prior"] = _construct(StylePriorConfig, dict(nested["style_prior"]))
         nested["credit"] = _construct(FCAMPCreditConfig, dict(nested["credit"]))
         nested["critics"] = _construct(FCAMPCriticConfig, dict(nested["critics"]))
+        nested["streams"] = _construct(FCAMPStreamsConfig, dict(nested["streams"]))
     except KeyError as exc:
         raise KeyError(f"FCAMPConfig missing nested section: {exc.args[0]}") from exc
     return _construct(FCAMPConfig, nested)
@@ -641,6 +649,9 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
     style = params.style_prior
     credit = params.credit
     critics = params.critics
+    streams = params.streams
+    if not (0.0 < streams.phase0_fraction < 1.0):
+        raise ValueError("FCAMP streams.phase0_fraction must be in (0, 1)")
     if not style.enabled:
         raise ValueError("FCAMP requires parameters.style_prior.enabled=true")
     if style.obs_steps < 2:
@@ -665,14 +676,16 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError("FCAMP style_prior.replay_device must be cpu or cuda")
     if credit.mode not in {"causal_frame", "chunk_shared"}:
         raise ValueError("FCAMP credit.mode must be causal_frame or chunk_shared")
-    if credit.advantage_normalization not in {
-        "per_offset",
-        "global",
-        "per_channel_per_offset",
-        "per_channel_global",
-        "none",
-    }:
-        raise ValueError("Unsupported FCAMP advantage normalization")
+    if credit.advantage_normalization != "global":
+        raise ValueError(
+            "FCAMP actor advantage must normalize the weighted reward mixture "
+            "once globally"
+        )
+    if not credit.integrate_amp_reward_dt:
+        raise ValueError(
+            "FCAMP requires credit.integrate_amp_reward_dt=true so the style "
+            "reward has the same control-frequency semantics as task reward"
+        )
     if credit.ratio_mode != "joint_path":
         raise ValueError("FCAMP requires credit.ratio_mode=joint_path")
     if credit.task_weight < 0.0 or credit.amp_weight < 0.0:

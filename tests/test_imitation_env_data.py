@@ -155,6 +155,43 @@ def test_motion_reference_interpolates_fractional_frames() -> None:
     )
 
 
+def test_imitation_reference_interpolates_exact_fractional_phases() -> None:
+    motion = _fake_motion(num_frames=5)
+    frame = motion.get_imitation_frame_at_times(torch.tensor([1.5, 3.25]))
+
+    assert frame.shape == (2, G1_IMITATION_FRAME_DIM)
+    torch.testing.assert_close(frame[:, 0], torch.tensor([1.5, 3.25]))
+    torch.testing.assert_close(frame[:, 1], torch.tensor([0.0, -3.5]))
+    torch.testing.assert_close(frame[:, 2], torch.tensor([0.715, 0.7325]))
+    # Joint positions are converted to the common rot6d representation, so
+    # interpolation must change the final frame rather than floor to 1 and 3.
+    floored = motion.get_imitation_frame(torch.tensor([1, 3]))
+    assert not torch.allclose(frame, floored)
+
+
+def test_evaluator_demo_frame_is_independent_of_add_motion_semantics() -> None:
+    motion = _fake_motion(num_frames=5)
+    motion.add_joint_vel = torch.full_like(motion.joint_vel, 123.0)
+    motion.add_root_link_lin_vel = torch.full((5, 3), 456.0)
+    motion.add_root_link_ang_vel = torch.full((5, 3), 789.0)
+    # Opposite quaternion signs encode the same physical rotation. Evaluator
+    # interpolation must follow the common shortest path in either mode.
+    motion.body_quat_full_w[2] *= -1.0
+    phases = torch.tensor([1.5, 2.25, 3.75])
+
+    motion.motion_reference_mode = "frame"
+    frame_mode = motion.get_imitation_frame_at_times(phases)
+    motion.motion_reference_mode = "mimickit_add"
+    add_mode = motion.get_imitation_frame_at_times(phases)
+
+    torch.testing.assert_close(frame_mode, add_mode)
+    assert bool(torch.isfinite(add_mode).all())
+    # Raw dataset velocities are zero/root and one/joint in _fake_motion; the
+    # ADD forward-difference buffers above must never leak into evaluation.
+    torch.testing.assert_close(add_mode[:, -35:-32], torch.zeros(3, 3))
+    torch.testing.assert_close(add_mode[:, -29:], torch.ones(3, 29))
+
+
 def _write_minimal_holosoma_motion(path: Path) -> None:
     num_frames = 2
     body_pos = np.zeros((num_frames, 2, 3), dtype=np.float32)

@@ -146,6 +146,41 @@ class MimicObservationMixin:
             joint_vel=joint_vel.index_select(0, env_ids),
         )
 
+    def get_evaluator_imitation_policy_frame(
+        self,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return the method-independent policy frame used only by validation.
+
+        Training imitation features intentionally preserve each paper's native
+        root-velocity convention. Cross-method evaluation must not: it always
+        uses the physical root-link pose/velocity exposed by Isaac Lab, so ADD's
+        link convention and the other methods' COM convention cannot change the
+        external metric for an identical simulator state.
+        """
+
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+        if env_ids.ndim != 1:
+            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
+        joint_pos, joint_vel = self.get_action_joint_state()
+        root_pos = self.robot.data.root_link_pos_w.index_select(0, env_ids)
+        root_quat = self.robot.data.root_link_quat_w.index_select(0, env_ids)
+        root_velocity = self.robot.data.root_link_vel_w.index_select(0, env_ids)
+        env_origins = self.scene.env_origins.index_select(0, env_ids)
+        key_body_pos = self.robot.data.body_pos_w.index_select(0, env_ids)[
+            ..., self.imitation_key_body_ids, :
+        ]
+        return build_g1_imitation_frame(
+            root_pos=root_pos - env_origins,
+            root_quat_wxyz=root_quat,
+            joint_pos=joint_pos.index_select(0, env_ids),
+            key_body_pos=key_body_pos - env_origins.unsqueeze(-2),
+            root_lin_vel=root_velocity[:, :3],
+            root_ang_vel=root_velocity[:, 3:],
+            joint_vel=joint_vel.index_select(0, env_ids),
+        )
+
     def get_add_policy_disc_frame(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         """Return MimicKit ADD's full-body policy discriminator frame."""
         if env_ids is None:

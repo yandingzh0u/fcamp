@@ -816,8 +816,8 @@ class AdaMimic(Algorithm):
 
     def _add_sampler_metrics(self, metrics: dict) -> None:
         stats = self.env.adaptive_sampling_stats()
-        for key in ("mode", "top_bin", "top_prob", "failed_sum", "entropy", "peak_bin", "rsi_keyframe_count"):
-            metrics[f"sampler/{key}"] = float(stats.get(key, float("nan")))
+        for key, value in stats.items():
+            metrics[f"sampler/{key}"] = float(value)
 
     def log(self, update_idx: int, max_updates: int, metrics: dict) -> None:
         print(

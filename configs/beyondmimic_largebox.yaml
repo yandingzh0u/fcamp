@@ -73,5 +73,4 @@ training:
   validation_start_phase: 0
   validation_directional_start_phase: -1
   validation_fixed_seed: 1
-  validation_done_frac_early_stop: 1.0
   target_validation_steps: 0

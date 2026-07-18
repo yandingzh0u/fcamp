@@ -74,3 +74,37 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
         f"steps_p50={metrics.get(f'{prefix}/steps_p50', float('nan')):.0f}",
         flush=True,
     )
+    print(
+        f"[{label}_PHASE] "
+        f"failure_p50={metrics.get(f'{prefix}/terminal/failure/phase_p50', float('nan')):.1f} "
+        f"failure_p95={metrics.get(f'{prefix}/terminal/failure/phase_p95', float('nan')):.1f} "
+        f"anchor_pos_p50={metrics.get(f'{prefix}/terminal/anchor_pos_bad/phase_p50', float('nan')):.1f} "
+        f"anchor_ori_p50={metrics.get(f'{prefix}/terminal/anchor_ori_bad/phase_p50', float('nan')):.1f} "
+        f"ee_body_p50={metrics.get(f'{prefix}/terminal/ee_body_bad/phase_p50', float('nan')):.1f} "
+        f"fall_contact_p50={metrics.get(f'{prefix}/terminal/fall_contact/phase_p50', float('nan')):.1f} "
+        f"motion_complete_p50={metrics.get(f'{prefix}/terminal/motion_complete/phase_p50', float('nan')):.1f}",
+        flush=True,
+    )
+    print(
+        f"[{label}_MOTION] "
+        f"window_mmd2_w16={metrics.get(f'{prefix}/window_mmd2_w16', float('nan')):.7f} "
+        f"window_mmd2_w32={metrics.get(f'{prefix}/window_mmd2_w32', float('nan')):.7f} "
+        f"raw_w16={metrics.get(f'{prefix}/window_mmd2_raw_w16', float('nan')):.7f} "
+        f"raw_w32={metrics.get(f'{prefix}/window_mmd2_raw_w32', float('nan')):.7f} "
+        f"pairs_w16={metrics.get(f'{prefix}/window_mmd_pairs_w16', 0.0):.0f} "
+        f"pairs_w32={metrics.get(f'{prefix}/window_mmd_pairs_w32', 0.0):.0f} "
+        f"gap_w16={metrics.get(f'{prefix}/window_mmd_pair_gap_min_w16', 0.0):.0f} "
+        f"gap_w32={metrics.get(f'{prefix}/window_mmd_pair_gap_min_w32', 0.0):.0f} "
+        f"phase_mean_w16={metrics.get(f'{prefix}/window_phase_endpoint_mean_w16', float('nan')):.2f} "
+        f"phase_max_w16={metrics.get(f'{prefix}/window_phase_endpoint_max_w16', float('nan')):.2f} "
+        f"phase_mean_w32={metrics.get(f'{prefix}/window_phase_endpoint_mean_w32', float('nan')):.2f} "
+        f"phase_max_w32={metrics.get(f'{prefix}/window_phase_endpoint_max_w32', float('nan')):.2f} "
+        f"progress_max_w16={metrics.get(f'{prefix}/window_reference_progress_max_w16', float('nan')):.4f} "
+        f"progress_max_w32={metrics.get(f'{prefix}/window_reference_progress_max_w32', float('nan')):.4f} "
+        f"progress_span_w16={metrics.get(f'{prefix}/window_reference_progress_span_w16', float('nan')):.4f} "
+        f"progress_span_w32={metrics.get(f'{prefix}/window_reference_progress_span_w32', float('nan')):.4f} "
+        f"samples_w16={metrics.get(f'{prefix}/window_mmd_samples_w16', 0.0):.0f} "
+        f"samples_w32={metrics.get(f'{prefix}/window_mmd_samples_w32', 0.0):.0f} "
+        f"selected_envs={metrics.get(f'{prefix}/window_mmd_selected_envs', 0.0):.0f}",
+        flush=True,
+    )

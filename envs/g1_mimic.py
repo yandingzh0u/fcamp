@@ -5,6 +5,7 @@ import math
 import torch
 
 from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
+from components.rollout.reset_diagnostics import ResetPhaseRecorder
 from engine.config import EnvironmentConfig
 
 from .adaptive_sampling import AdaptiveTimestepsSampler, BeyondMimicAdaptiveSampler
@@ -208,6 +209,11 @@ class G1MimicEnv(
         else:
             self.motion_end_phase = max(self.motion_start_phase, min(int(cfg.motion_end_phase), self.motion.num_frames - 1))
 
+        self.reset_phase_recorder = ResetPhaseRecorder(
+            self.motion.num_frames,
+            start_phase=self.motion_start_phase,
+            device=self.device,
+        )
         self.reset()
 
     @property
@@ -342,12 +348,29 @@ class G1MimicEnv(
         ).round().to(dtype=torch.long)
         return torch.unique_consecutive(phases)
 
-    def reset(self, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
+    def reset(
+        self,
+        phase_indices: torch.Tensor | None = None,
+        reset_stream_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-        return self.reset_envs(env_ids=env_ids, phase_indices=phase_indices)
+        return self.reset_envs(
+            env_ids=env_ids,
+            phase_indices=phase_indices,
+            reset_stream_ids=reset_stream_ids,
+        )
 
-    def reset_envs(self, env_ids: torch.Tensor, phase_indices: torch.Tensor | None = None) -> torch.Tensor:
-        self._reset_env_state(env_ids, phase_indices=phase_indices)
+    def reset_envs(
+        self,
+        env_ids: torch.Tensor,
+        phase_indices: torch.Tensor | None = None,
+        reset_stream_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        self._reset_env_state(
+            env_ids,
+            phase_indices=phase_indices,
+            reset_stream_ids=reset_stream_ids,
+        )
         if env_ids.numel() == 0:
             return torch.empty(0, self.observation_dim, device=self.device)
         observation = self.get_observation()
@@ -357,6 +380,7 @@ class G1MimicEnv(
         self,
         env_ids: torch.Tensor,
         phase_indices: torch.Tensor | None = None,
+        reset_stream_ids: torch.Tensor | None = None,
     ) -> None:
         if env_ids.ndim != 1:
             raise ValueError(f"env_ids must have shape (N,), got {tuple(env_ids.shape)}")
@@ -370,6 +394,9 @@ class G1MimicEnv(
             )
 
         phase_indices = self.motion.clamp_time_steps(phase_indices)
+        if reset_stream_ids is not None and reset_stream_ids.shape != phase_indices.shape:
+            raise ValueError("reset_stream_ids must match phase_indices")
+        self.reset_phase_recorder.record(phase_indices, reset_stream_ids)
         self.phase_steps[env_ids] = phase_indices.to(dtype=self.phase_steps.dtype)
         self.episode_steps[env_ids] = 0
         new_episode_ids = torch.arange(
@@ -406,6 +433,12 @@ class G1MimicEnv(
             env_ids=env_ids,
         )
         self.scene.update(self.physics_dt)
+
+    def begin_reset_phase_diagnostics(self) -> None:
+        self.reset_phase_recorder.begin()
+
+    def finish_reset_phase_diagnostics(self) -> dict[str, float]:
+        return self.reset_phase_recorder.finish(self.adaptive_sampler)
 
     def _uniform(self, ranges: tuple[tuple[float, float], ...], shape: tuple[int, int]) -> torch.Tensor:
         range_tensor = torch.tensor(ranges, dtype=torch.float32, device=self.device)
@@ -503,6 +536,11 @@ class G1MimicEnv(
                 ),
             )
         self._failure_recorded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.adaptive_failure_eligibility_mask = torch.ones(
+            self.num_envs,
+            dtype=torch.bool,
+            device=self.device,
+        )
         self.record_motion_failures = True
         self.termination_mode = str(self.config.termination_mode)
         self.terminate_on_motion_end = bool(self.config.terminate_on_motion_end)
@@ -515,6 +553,15 @@ class G1MimicEnv(
         self.reset_noise = bool(self.config.reset_noise)
         self.interval_pushes = bool(self.config.interval_pushes)
 
+    def set_adaptive_failure_eligibility(self, mask: torch.Tensor) -> None:
+        mask = mask.to(device=self.device, dtype=torch.bool)
+        if mask.shape != (self.num_envs,):
+            raise ValueError(
+                "adaptive failure eligibility must have shape "
+                f"{(self.num_envs,)}, got {tuple(mask.shape)}"
+            )
+        self.adaptive_failure_eligibility_mask.copy_(mask)
+
     def _record_adaptive_failures(
         self,
         tracking_failure: torch.Tensor,
@@ -523,7 +570,11 @@ class G1MimicEnv(
 
         if not self.adaptive_motion_sampling or not self.record_motion_failures:
             return
-        failure = tracking_failure & (~self._failure_recorded)
+        failure = (
+            tracking_failure
+            & self.adaptive_failure_eligibility_mask
+            & (~self._failure_recorded)
+        )
         if bool(failure.any()):
             self.adaptive_sampler.update_current_failure_count(death_phase_steps[failure])
             self._failure_recorded |= failure
@@ -589,6 +640,7 @@ class G1MimicEnv(
         joint_vel = reference["joint_vel"].clone()
         if self.reset_noise:
             self._apply_official_reset_noise(env_ids, root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos)
+        self.reset_phase_recorder.record(phase_indices)
         self._write_robot_state(
             root_pos=root_pos,
             root_quat=root_quat,

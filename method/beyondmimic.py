@@ -607,19 +607,7 @@ class Beyondmimic(Algorithm):
 
     def _add_sampler_metrics(self, metrics: dict[str, float]) -> None:
         stats = self.env.adaptive_sampling_stats()
-        for key in (
-            "mode",
-            "top_bin",
-            "top_prob",
-            "failed_sum",
-            "entropy",
-            "peak_bin",
-            "bin_count",
-            "rsi_keyframe_count",
-        ):
-            value = stats.get(key)
-            if value is None:
-                continue
+        for key, value in stats.items():
             value_f = float(value)
             if math.isfinite(value_f):
                 metrics[f"sampler/{key}"] = value_f

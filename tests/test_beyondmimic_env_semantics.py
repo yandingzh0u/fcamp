@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import torch
 
 from envs.adaptive_sampling import BeyondMimicAdaptiveSampler
+from envs.imitation_data import build_g1_imitation_frame
 
 # The semantics below are pure tensor code.  Stub the simulator-heavy spec
 # module during collection so these tests stay CPU-only and do not launch
@@ -27,6 +28,64 @@ from envs.terminal import MimicTerminationMixin
 sys.modules.pop("envs.spec", None)
 
 CRITIC_OBS_DIM = 286
+
+
+def test_evaluator_policy_frame_is_independent_of_add_velocity_modes() -> None:
+    class _EvaluatorEnv(MimicObservationMixin):
+        pass
+
+    env = _EvaluatorEnv()
+    env.num_envs = 2
+    env.device = torch.device("cpu")
+    env.imitation_key_body_ids = torch.tensor([0, 1, 2, 3, 4])
+    joint_pos = torch.randn(2, 29)
+    joint_vel = torch.randn(2, 29)
+    env.get_action_joint_state = lambda: (joint_pos, joint_vel)
+    root_quat = torch.zeros(2, 4)
+    root_quat[:, 0] = 1.0
+    root_link_velocity = torch.tensor(
+        [
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+        ]
+    )
+    env.robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_pos_w=torch.tensor(
+                [[10.0, 20.0, 0.8], [30.0, 40.0, 0.9]]
+            ),
+            root_link_quat_w=root_quat,
+            root_link_vel_w=root_link_velocity,
+            # Deliberately incompatible COM velocity: method configuration
+            # must never select it in the external evaluator.
+            root_vel_w=torch.full((2, 6), 999.0),
+            body_pos_w=torch.randn(2, 5, 3),
+        )
+    )
+    env.scene = SimpleNamespace(
+        env_origins=torch.tensor([[10.0, 20.0, 0.0], [30.0, 40.0, 0.0]])
+    )
+    env.config = SimpleNamespace(
+        root_velocity_mode="com",
+        motion_reference_mode="frame",
+    )
+
+    frame_default = env.get_evaluator_imitation_policy_frame()
+    env.config.root_velocity_mode = "link"
+    env.config.motion_reference_mode = "mimickit_add"
+    frame_add = env.get_evaluator_imitation_policy_frame()
+
+    torch.testing.assert_close(frame_default, frame_add)
+    expected = build_g1_imitation_frame(
+        root_pos=env.robot.data.root_link_pos_w - env.scene.env_origins,
+        root_quat_wxyz=root_quat,
+        joint_pos=joint_pos,
+        key_body_pos=env.robot.data.body_pos_w - env.scene.env_origins.unsqueeze(1),
+        root_lin_vel=root_link_velocity[:, :3],
+        root_ang_vel=root_link_velocity[:, 3:],
+        joint_vel=joint_vel,
+    )
+    torch.testing.assert_close(frame_add, expected)
 
 
 class _BeyondMimicObservationFixture(MimicObservationMixin):
