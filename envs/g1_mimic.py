@@ -33,7 +33,7 @@ from .motion import (
 )
 from .observation import BEYONDMIMIC_POLICY_OBS_DIM, MimicObservationMixin
 from .reward import MimicRewardMixin
-from .robot import G1Env
+from .robot import G1Env, RootVelocityFrame
 from .robots.g1 import G1_29DOF_ACTION_NAMES
 from .step import MimicStepMixin
 from .terminal import MimicTerminationMixin
@@ -352,12 +352,15 @@ class G1MimicEnv(
         self,
         phase_indices: torch.Tensor | None = None,
         reset_stream_ids: torch.Tensor | None = None,
+        *,
+        root_velocity_frame: RootVelocityFrame | None = None,
     ) -> torch.Tensor:
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         return self.reset_envs(
             env_ids=env_ids,
             phase_indices=phase_indices,
             reset_stream_ids=reset_stream_ids,
+            root_velocity_frame=root_velocity_frame,
         )
 
     def reset_envs(
@@ -365,11 +368,14 @@ class G1MimicEnv(
         env_ids: torch.Tensor,
         phase_indices: torch.Tensor | None = None,
         reset_stream_ids: torch.Tensor | None = None,
+        *,
+        root_velocity_frame: RootVelocityFrame | None = None,
     ) -> torch.Tensor:
         self._reset_env_state(
             env_ids,
             phase_indices=phase_indices,
             reset_stream_ids=reset_stream_ids,
+            root_velocity_frame=root_velocity_frame,
         )
         if env_ids.numel() == 0:
             return torch.empty(0, self.observation_dim, device=self.device)
@@ -381,6 +387,8 @@ class G1MimicEnv(
         env_ids: torch.Tensor,
         phase_indices: torch.Tensor | None = None,
         reset_stream_ids: torch.Tensor | None = None,
+        *,
+        root_velocity_frame: RootVelocityFrame | None = None,
     ) -> None:
         if env_ids.ndim != 1:
             raise ValueError(f"env_ids must have shape (N,), got {tuple(env_ids.shape)}")
@@ -407,9 +415,6 @@ class G1MimicEnv(
         )
         self.episode_ids[env_ids] = new_episode_ids
         self._next_episode_id += int(env_ids.numel())
-        self.last_action[env_ids] = 0.0
-
-
         self._failure_recorded[env_ids] = False
         self._reset_interval_push_schedule(env_ids)
 
@@ -431,7 +436,12 @@ class G1MimicEnv(
             joint_pos=joint_pos,
             joint_vel=joint_vel,
             env_ids=env_ids,
+            root_velocity_frame=root_velocity_frame,
         )
+        # Reset starts a new policy recurrence.  The state writer above does
+        # not execute a policy action (there is no physics step), so it must not
+        # be misrepresented as the previous action.
+        self.last_action[env_ids] = 0.0
         self.scene.update(self.physics_dt)
 
     def begin_reset_phase_diagnostics(self) -> None:
@@ -479,15 +489,32 @@ class G1MimicEnv(
         soft_limits = self.robot.data.soft_joint_pos_limits.index_select(0, env_ids)
         joint_pos[:] = torch.clamp(joint_pos, soft_limits[:, self.action_joint_ids, 0], soft_limits[:, self.action_joint_ids, 1])
 
-    def _apply_action_targets(self, actions: torch.Tensor) -> None:
+    def _apply_action_targets(self, actions: torch.Tensor) -> torch.Tensor:
 
 
         if actions.shape != (self.num_envs, self.action_dim):
             raise ValueError(f"Expected action shape {(self.num_envs, self.action_dim)}, got {tuple(actions.shape)}")
 
-        clipped_actions = torch.clamp(actions, -100.0, 100.0)
-        action_targets = self.default_action_joint_pos + self.action_scale * clipped_actions
+        if self._strict_action_contract:
+            self.validate_policy_actions(actions)
+            applied_actions = actions
+            action_targets = (
+                self.default_action_joint_pos
+                + self.action_scale * applied_actions
+            )
+        else:
+            # Compatibility path for paper-specific adapters that own their
+            # action transform. FCAMP explicitly enables the strict path.
+            clipped_actions = torch.clamp(actions, -100.0, 100.0)
+            action_targets = (
+                self.default_action_joint_pos
+                + self.action_scale * clipped_actions
+            )
+            # Exactly preserve 2db reward/observation history semantics outside
+            # FCAMP: only the simulator target writer sees the legacy clamp.
+            applied_actions = actions
         self.robot.set_joint_position_target(action_targets, joint_ids=self.action_joint_ids)
+        return applied_actions
 
     def _init_adaptive_motion_sampling(self) -> None:
         self.reset_phase_sampling = str(self.config.reset_phase_sampling)

@@ -54,6 +54,20 @@ class Algorithm(ABC):
         """
         return None
 
+    def pre_training_warmup(
+        self,
+        current_observation: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float], int]:
+        """Optionally run work before the first formal training update.
+
+        The returned tuple contains the observation from which formal training
+        should continue, method-specific metrics, and the exact number of
+        environment transitions consumed by the warm-up.  The trainer accounts
+        those transitions and the elapsed wall time without advancing the formal
+        update index.  Checkpoint resumes deliberately skip this hook.
+        """
+        return current_observation, {}, 0
+
     @abstractmethod
     def collect(self, obs: torch.Tensor) -> dict:
         ...

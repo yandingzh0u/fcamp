@@ -517,8 +517,11 @@ class _BeyondMimicStepFixture(MimicStepMixin):
     def _fold_adaptive_sampler(self) -> None:
         pass
 
-    def _apply_interval_pushes(self) -> None:
-        pass
+    def _apply_interval_pushes(
+        self, eligible_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        del eligible_mask
+        return self._last_interval_push_mask.clone()
 
     def _update_beyondmimic_relative_targets(self) -> None:
         self.relative_target_update_phase_seen = self.phase_steps.clone()

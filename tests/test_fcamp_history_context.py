@@ -203,6 +203,8 @@ def test_discriminator_update_cannot_change_deterministic_actor_action() -> None
 
 def test_fcamp_rejects_discriminator_conditioned_checkpoint_before_load() -> None:
     algo = object.__new__(FCAMP)
+    algo.action_low = torch.tensor([-5.0, -5.0])
+    algo.action_high = torch.tensor([5.0, 5.0])
 
     with pytest.raises(ValueError, match="reward-only"):
         algo.validate_checkpoint_payload(
@@ -212,7 +214,7 @@ def test_fcamp_rejects_discriminator_conditioned_checkpoint_before_load() -> Non
         algo.validate_checkpoint_payload(
             {
                 "algo_state": {
-                    "fcamp_schema_version": 6,
+                    "fcamp_schema_version": 8,
                     "discriminator_policy_conditioning": True,
                 }
             }
@@ -220,11 +222,24 @@ def test_fcamp_rejects_discriminator_conditioned_checkpoint_before_load() -> Non
     algo.validate_checkpoint_payload(
         {
             "algo_state": {
-                "fcamp_schema_version": 6,
+                "fcamp_schema_version": 8,
                 "discriminator_policy_conditioning": False,
+                "action_low": algo.action_low.clone(),
+                "action_high": algo.action_high.clone(),
             }
         }
     )
+    with pytest.raises(ValueError, match="action_high differs"):
+        algo.validate_checkpoint_payload(
+            {
+                "algo_state": {
+                    "fcamp_schema_version": 8,
+                    "discriminator_policy_conditioning": False,
+                    "action_low": algo.action_low.clone(),
+                    "action_high": algo.action_high + 0.01,
+                }
+            }
+        )
 
 
 def test_rollout_snapshot_optimizes_actor_and_critic_before_discriminator() -> None:
@@ -301,23 +316,22 @@ def test_no_current_disc_window_does_not_skip_actor_or_critic() -> None:
 
 def test_discriminator_trains_on_old_normalizer_then_commits_next_snapshot() -> None:
     class TwoStreamReplay:
-        def sample_windows(
+        def sample(
             self,
             batch_size,
-            history_len,
             *,
             stream_id,
         ):
             return (
                     torch.full(
-                        (batch_size, history_len, 3),
+                        (batch_size, 1, 3),
                     4.0 + float(stream_id),
                 ),
                 torch.full((batch_size,), stream_id + 1, dtype=torch.long),
             )
 
-        def statistics(self, current_step):
-            del current_step
+        def statistics(self, current_update):
+            del current_update
             return {}
 
     algo = object.__new__(FCAMP)
@@ -339,7 +353,7 @@ def test_discriminator_trains_on_old_normalizer_then_commits_next_snapshot() -> 
     algo.imitation_pipeline = TemporalWindowPipeline(1, 3)
     algo.discriminator = StyleDiscriminator(3, hidden_dims=(4,))
     algo.disc_optimizer = torch.optim.SGD(algo.discriminator.parameters(), lr=1.0e-3)
-    algo.disc_frame_replay = TwoStreamReplay()
+    algo.disc_window_replay = TwoStreamReplay()
     algo.disc_version = 4
     algo.disc_normalizer = RunningNormalizer(3, device="cpu", clip=100.0)
     algo.disc_normalizer.count.fill_(1.0)

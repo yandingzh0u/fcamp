@@ -22,6 +22,7 @@ from .imitation_data import (
     quat_wxyz_to_tan_norm,
 )
 from .motion import ADD_TARGET_OBS_STEPS, add_target_phase_offsets
+from .contracts import select_imitation_root_domain
 
 
 BEYONDMIMIC_POLICY_OBS_DIM = 160
@@ -121,13 +122,27 @@ class MimicObservationMixin:
         return observation
 
     def get_imitation_policy_frame(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-        """Return clean post-action robot state for imitation, without task reference data."""
+        """Return the native method-specific post-action imitation frame."""
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
         if env_ids.ndim != 1:
             raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
         joint_pos, joint_vel = self.get_action_joint_state()
-        root_pos = self.robot.data.root_pos_w.index_select(0, env_ids)
+        fcamp_contract = bool(
+            getattr(self, "_strict_action_contract", False)
+        )
+        root_pos_source, root_quat_source, root_velocity_source = (
+            select_imitation_root_domain(
+                strict_fcamp=fcamp_contract,
+                legacy_root_pos=self.robot.data.root_pos_w,
+                legacy_root_quat=self.robot.data.root_quat_w,
+                legacy_root_velocity=self.get_mimic_root_velocity_w(),
+                root_link_pos=self.robot.data.root_link_pos_w,
+                root_link_quat=self.robot.data.root_link_quat_w,
+                root_link_velocity=self.robot.data.root_link_vel_w,
+            )
+        )
+        root_pos = root_pos_source.index_select(0, env_ids)
         env_origins = self.scene.env_origins.index_select(0, env_ids)
         key_body_pos = self.robot.data.body_pos_w.index_select(0, env_ids)[..., self.imitation_key_body_ids, :]
         # Scene origins are translations only.  Subtracting them from both root
@@ -135,14 +150,35 @@ class MimicObservationMixin:
         # the vectorized-environment grid from the discriminator input.
         root_pos_local = root_pos - env_origins
         key_body_pos_local = key_body_pos - env_origins.unsqueeze(-2)
-        root_velocity = self.get_mimic_root_velocity_w().index_select(0, env_ids)
+        # FCAMP expert data is explicitly reconstructed in the root-link
+        # domain. Other methods retain their exact 2db configured convention.
+        root_velocity = root_velocity_source.index_select(0, env_ids)
         return build_g1_imitation_frame(
             root_pos=root_pos_local,
-            root_quat_wxyz=self.robot.data.root_quat_w.index_select(0, env_ids),
+            root_quat_wxyz=root_quat_source.index_select(0, env_ids),
             joint_pos=joint_pos.index_select(0, env_ids),
             key_body_pos=key_body_pos_local,
             root_lin_vel=root_velocity[:, :3],
             root_ang_vel=root_velocity[:, 3:],
+            joint_vel=joint_vel.index_select(0, env_ids),
+        )
+
+    def get_fcamp_fk_aligned_policy_frame(
+        self, env_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Rebuild the same simulator state through FCAMP's expert FK path."""
+
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+        if env_ids.ndim != 1:
+            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
+        joint_pos, joint_vel = self.get_action_joint_state()
+        origins = self.scene.env_origins.index_select(0, env_ids)
+        return self.motion.build_fcamp_frame_from_robot_state(
+            root_pos=self.robot.data.root_link_pos_w.index_select(0, env_ids) - origins,
+            root_quat=self.robot.data.root_link_quat_w.index_select(0, env_ids),
+            joint_pos=joint_pos.index_select(0, env_ids),
+            root_link_velocity=self.robot.data.root_link_vel_w.index_select(0, env_ids),
             joint_vel=joint_vel.index_select(0, env_ids),
         )
 

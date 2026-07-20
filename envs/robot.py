@@ -20,6 +20,11 @@ from .spec import (
 )
 from .robots.g1 import G1_29DOF_ACTION_NAMES, make_g1_cfg
 from .tasks import TaskSpec
+from .contracts import (
+    RootVelocityFrame,
+    resolve_root_velocity_frame,
+    validate_actions_in_bounds,
+)
 from engine.config import EnvironmentConfig
 
 
@@ -121,6 +126,12 @@ class G1Env:
             dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)
+        # FCAMP explicitly installs its algorithmic command domain after the
+        # policy is built.  Joint-position metadata never defines that domain:
+        # normalized actions are PD target commands, not physical joint poses.
+        self._strict_action_contract = False
+        self._policy_action_low: torch.Tensor | None = None
+        self._policy_action_high: torch.Tensor | None = None
         self._action_space = self._build_action_space()
         self.beyondmimic_global_push_timer = (
             cfg.reset_phase_sampling == "beyondmimic"
@@ -179,13 +190,66 @@ class G1Env:
         return self._action_space
 
     def _build_action_space(self) -> spaces.Box:
-        joint_limits = self.robot.data.joint_pos_limits[0].index_select(0, self.action_joint_ids)
-        target_bound = 1.4 * torch.maximum(joint_limits[:, 0].abs(), joint_limits[:, 1].abs())
+        joint_limits = self.robot.data.joint_pos_limits[0].index_select(
+            0, self.action_joint_ids
+        )
+        target_bound = 1.4 * torch.maximum(
+            joint_limits[:, 0].abs(), joint_limits[:, 1].abs()
+        )
         default = self.default_action_joint_pos[0]
         scale = self.action_scale[0]
-        low = ((-target_bound - default) / scale).detach().cpu().numpy().astype(np.float32)
-        high = ((target_bound - default) / scale).detach().cpu().numpy().astype(np.float32)
+        low = (
+            (-target_bound - default) / scale
+        ).detach().cpu().numpy().astype(np.float32)
+        high = (
+            (target_bound - default) / scale
+        ).detach().cpu().numpy().astype(np.float32)
         return spaces.Box(low=low, high=high, dtype=np.float32)
+
+    def enable_strict_action_contract(
+        self,
+        low: torch.Tensor,
+        high: torch.Tensor,
+    ) -> None:
+        """Install the policy-owned command domain used by FCAMP.
+
+        This domain is deliberately independent of URDF joint-position limits.
+        The simulator writer maps the command to a PD target without projection.
+        """
+
+        low = torch.as_tensor(low, device=self.device, dtype=torch.float32)
+        high = torch.as_tensor(high, device=self.device, dtype=torch.float32)
+        if low.shape != (self.action_dim,) or high.shape != (self.action_dim,):
+            raise ValueError(
+                f"Policy action bounds must have shape {(self.action_dim,)}"
+            )
+        validate_actions_in_bounds(
+            torch.stack((low, high)), low, high, tolerance=0.0
+        )
+        if bool((low >= high).any()):
+            raise ValueError("Every policy action lower bound must be below its upper bound")
+        self._policy_action_low = low.detach().clone()
+        self._policy_action_high = high.detach().clone()
+        self._strict_action_contract = True
+
+    def validate_policy_actions(
+        self,
+        actions: torch.Tensor,
+        *,
+        tolerance: float = 1.0e-6,
+    ) -> None:
+        if (
+            not self._strict_action_contract
+            or self._policy_action_low is None
+            or self._policy_action_high is None
+        ):
+            raise RuntimeError("No strict policy action contract is installed")
+        validate_actions_in_bounds(
+            actions,
+            self._policy_action_low,
+            self._policy_action_high,
+            tolerance=float(tolerance),
+        )
 
     def get_action_joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         joint_pos = self.robot.data.joint_pos.index_select(1, self.action_joint_ids)
@@ -239,10 +303,35 @@ class G1Env:
         joint_pos, joint_vel = self.get_action_joint_state()
         return torch.cat([joint_pos, joint_vel], dim=-1)
 
-    def get_mimic_root_velocity_w(self) -> torch.Tensor:
-        if self.config.root_velocity_mode == "link":
+    def _resolve_root_velocity_frame(
+        self, velocity_frame: RootVelocityFrame | None
+    ) -> RootVelocityFrame:
+        return resolve_root_velocity_frame(
+            str(self.config.root_velocity_mode), velocity_frame
+        )
+
+    def get_mimic_root_velocity_w(
+        self, *, velocity_frame: RootVelocityFrame | None = None
+    ) -> torch.Tensor:
+        if self._resolve_root_velocity_frame(velocity_frame) == "link":
             return self.robot.data.root_link_vel_w
         return self.robot.data.root_vel_w
+
+    def write_mimic_root_velocity_to_sim(
+        self,
+        root_velocity: torch.Tensor,
+        env_ids: torch.Tensor,
+        *,
+        velocity_frame: RootVelocityFrame | None = None,
+    ) -> None:
+        """Write velocity using an explicit COM/link semantic contract."""
+
+        if self._resolve_root_velocity_frame(velocity_frame) == "link":
+            self.robot.write_root_link_velocity_to_sim(
+                root_velocity, env_ids=env_ids
+            )
+        else:
+            self.robot.write_root_velocity_to_sim(root_velocity, env_ids=env_ids)
 
     def _write_robot_state(
         self,
@@ -253,6 +342,8 @@ class G1Env:
         joint_pos: torch.Tensor,
         joint_vel: torch.Tensor,
         env_ids: torch.Tensor | None = None,
+        *,
+        root_velocity_frame: RootVelocityFrame | None = None,
     ) -> None:
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
@@ -271,10 +362,11 @@ class G1Env:
         sim_joint_vel[:, self.action_joint_ids] = joint_vel
 
         self.robot.write_root_pose_to_sim(root_state[:, :7], env_ids=env_ids)
-        if self.config.root_velocity_mode == "link":
-            self.robot.write_root_link_velocity_to_sim(root_state[:, 7:], env_ids=env_ids)
-        else:
-            self.robot.write_root_velocity_to_sim(root_state[:, 7:], env_ids=env_ids)
+        self.write_mimic_root_velocity_to_sim(
+            root_state[:, 7:],
+            env_ids,
+            velocity_frame=root_velocity_frame,
+        )
         self.robot.write_joint_state_to_sim(sim_joint_pos, sim_joint_vel, env_ids=env_ids)
         self.robot.set_joint_position_target(sim_joint_pos, env_ids=env_ids)
         self.scene.write_data_to_sim()

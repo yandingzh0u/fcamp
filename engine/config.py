@@ -106,6 +106,7 @@ class StylePriorConfig:
     normalizer_clip: float
     reward_eval_batch_size: int
     max_updates_per_iteration: int
+    discriminator_warmup_rollouts: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,7 +407,11 @@ def _construct_method_config(method: str, values: dict[str, Any], source_path: P
     if "style_prior" not in nested and "amp" in nested:
         nested["style_prior"] = nested.pop("amp")
     try:
-        nested["style_prior"] = _construct(StylePriorConfig, dict(nested["style_prior"]))
+        style_prior = dict(nested["style_prior"])
+        # Preserve compatibility with configs written before the explicit
+        # discriminator warm-up lifecycle was introduced.
+        style_prior.setdefault("discriminator_warmup_rollouts", 0)
+        nested["style_prior"] = _construct(StylePriorConfig, style_prior)
         nested["credit"] = _construct(FCAMPCreditConfig, dict(nested["credit"]))
         nested["critics"] = _construct(FCAMPCriticConfig, dict(nested["critics"]))
         nested["streams"] = _construct(FCAMPStreamsConfig, dict(nested["streams"]))
@@ -561,6 +566,10 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError("training.official_reset_every must be non-negative")
     resolve_task(env.task)
     if config.method == "fcamp":
+        if env.num_envs < 2:
+            raise ValueError("FCAMP requires at least two environments for two streams")
+        if env.reset_phase_sampling == "continuous_uniform":
+            raise ValueError("FCAMP fixed-window reset history requires integer phases")
         _validate_fcamp(config.parameters)
     elif config.method == "adamimic":
         if config.parameters.stage == "stage1" and env.reset_phase_sampling != "rsi":
@@ -662,18 +671,43 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError("FCAMP style reward scale/epsilon are invalid")
     if style.optimizer.lower() not in {"sgd", "adam", "adamw"}:
         raise ValueError("FCAMP style_prior.optimizer must be sgd, adam, or adamw")
-    if style.learning_rate <= 0.0 or style.batch_size < 1 or style.epochs < 1:
+    if style.learning_rate <= 0.0 or style.batch_size < 2 or style.epochs < 1:
         raise ValueError("FCstyle discriminator optimizer/batch/epoch settings are invalid")
     if style.max_updates_per_iteration < 1:
         raise ValueError("FCAMP max_updates_per_iteration must be positive")
+    if style.discriminator_warmup_rollouts not in {0, 1}:
+        raise ValueError("FCAMP discriminator_warmup_rollouts must be 0 or 1")
     if style.current_buffer_size < style.batch_size:
         raise ValueError("FCAMP style_prior.current_buffer_size must be >= batch_size")
-    if style.replay_size < style.batch_size or style.replay_samples < 0:
-        raise ValueError("FCframe replay settings are invalid")
+    current_phase0 = int(
+        round(style.current_buffer_size * streams.phase0_fraction)
+    )
+    if not 0 < current_phase0 < style.current_buffer_size:
+        raise ValueError(
+            "FCAMP current discriminator buffer cannot realize both streams"
+        )
+    if (
+        style.replay_size < style.batch_size
+        or style.replay_samples <= 0
+        or style.replay_samples > style.replay_size
+    ):
+        raise ValueError("FCAMP complete-window replay settings are invalid")
     if style.replay_dtype.lower() != "float32":
         raise ValueError("FCAMP requires style_prior.replay_dtype=float32")
-    if style.replay_device.lower() not in {"cpu", "cuda"}:
-        raise ValueError("FCAMP style_prior.replay_device must be cpu or cuda")
+    if style.replay_device.lower() != "cpu":
+        raise ValueError("FCAMP complete-window replay must use replay_device=cpu")
+    phase0_capacity = int(round(style.replay_size * streams.phase0_fraction))
+    phase0_replace = int(round(style.replay_samples * streams.phase0_fraction))
+    if not (
+        0 < phase0_capacity < style.replay_size
+        and 0 < phase0_replace < style.replay_samples
+        and phase0_replace <= phase0_capacity
+        and style.replay_samples - phase0_replace
+        <= style.replay_size - phase0_capacity
+    ):
+        raise ValueError(
+            "FCAMP replay size/replacement quotas cannot realize both streams"
+        )
     if credit.mode not in {"causal_frame", "chunk_shared"}:
         raise ValueError("FCAMP credit.mode must be causal_frame or chunk_shared")
     if credit.advantage_normalization != "global":

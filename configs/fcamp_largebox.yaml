@@ -79,6 +79,8 @@ parameters:
     normalizer_clip: 10.0
     reward_eval_batch_size: 4096
     max_updates_per_iteration: 32
+    # Train the discriminator once on a discarded rollout before actor update 1.
+    discriminator_warmup_rollouts: 1
 
   credit:
     mode: causal_frame

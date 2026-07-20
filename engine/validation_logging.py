@@ -108,3 +108,64 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
         f"selected_envs={metrics.get(f'{prefix}/window_mmd_selected_envs', 0.0):.0f}",
         flush=True,
     )
+    print(
+        f"[{label}_CHUNK_ACTION] "
+        f"delta_boundary={metrics.get(f'{prefix}/chunk_action_delta_boundary_mean', float('nan')):.6f} "
+        f"delta_internal={metrics.get(f'{prefix}/chunk_action_delta_internal_mean', float('nan')):.6f} "
+        f"delta_ratio={metrics.get(f'{prefix}/chunk_action_delta_boundary_internal_ratio', float('nan')):.4f} "
+        f"delta_boundary_p95={metrics.get(f'{prefix}/chunk_action_delta_boundary_p95', float('nan')):.6f} "
+        f"delta_boundary_p99={metrics.get(f'{prefix}/chunk_action_delta_boundary_p99', float('nan')):.6f} "
+        f"delta_internal_p95={metrics.get(f'{prefix}/chunk_action_delta_internal_p95', float('nan')):.6f} "
+        f"delta_internal_p99={metrics.get(f'{prefix}/chunk_action_delta_internal_p99', float('nan')):.6f} "
+        f"d2_boundary={metrics.get(f'{prefix}/chunk_action_d2_boundary_mean', float('nan')):.6f} "
+        f"d2_internal={metrics.get(f'{prefix}/chunk_action_d2_internal_mean', float('nan')):.6f} "
+        f"d2_ratio={metrics.get(f'{prefix}/chunk_action_d2_boundary_internal_ratio', float('nan')):.4f} "
+        f"d2_boundary_p95={metrics.get(f'{prefix}/chunk_action_d2_boundary_p95', float('nan')):.6f} "
+        f"d2_boundary_p99={metrics.get(f'{prefix}/chunk_action_d2_boundary_p99', float('nan')):.6f} "
+        f"d2_internal_p95={metrics.get(f'{prefix}/chunk_action_d2_internal_p95', float('nan')):.6f} "
+        f"d2_internal_p99={metrics.get(f'{prefix}/chunk_action_d2_internal_p99', float('nan')):.6f}",
+        flush=True,
+    )
+    print(
+        f"[{label}_CHUNK_STATE] "
+        f"joint_vel_boundary={metrics.get(f'{prefix}/chunk_joint_vel_jump_boundary_mean', float('nan')):.6f} "
+        f"joint_vel_internal={metrics.get(f'{prefix}/chunk_joint_vel_jump_internal_mean', float('nan')):.6f} "
+        f"joint_vel_ratio={metrics.get(f'{prefix}/chunk_joint_vel_jump_boundary_internal_ratio', float('nan')):.4f} "
+        f"joint_vel_boundary_p95={metrics.get(f'{prefix}/chunk_joint_vel_jump_boundary_p95', float('nan')):.6f} "
+        f"joint_vel_boundary_p99={metrics.get(f'{prefix}/chunk_joint_vel_jump_boundary_p99', float('nan')):.6f} "
+        f"joint_vel_internal_p95={metrics.get(f'{prefix}/chunk_joint_vel_jump_internal_p95', float('nan')):.6f} "
+        f"joint_vel_internal_p99={metrics.get(f'{prefix}/chunk_joint_vel_jump_internal_p99', float('nan')):.6f} "
+        f"root_ang_boundary={metrics.get(f'{prefix}/chunk_root_ang_vel_jump_boundary_mean', float('nan')):.6f} "
+        f"root_ang_internal={metrics.get(f'{prefix}/chunk_root_ang_vel_jump_internal_mean', float('nan')):.6f} "
+        f"root_ang_ratio={metrics.get(f'{prefix}/chunk_root_ang_vel_jump_boundary_internal_ratio', float('nan')):.4f} "
+        f"root_ang_boundary_p95={metrics.get(f'{prefix}/chunk_root_ang_vel_jump_boundary_p95', float('nan')):.6f} "
+        f"root_ang_boundary_p99={metrics.get(f'{prefix}/chunk_root_ang_vel_jump_boundary_p99', float('nan')):.6f} "
+        f"root_ang_internal_p95={metrics.get(f'{prefix}/chunk_root_ang_vel_jump_internal_p95', float('nan')):.6f} "
+        f"root_ang_internal_p99={metrics.get(f'{prefix}/chunk_root_ang_vel_jump_internal_p99', float('nan')):.6f}",
+        flush=True,
+    )
+    print(
+        f"[{label}_CHUNK_RESET] "
+        f"action_delta={metrics.get(f'{prefix}/chunk_action_delta_reset_first_mean', float('nan')):.6f} "
+        f"action_delta_p95={metrics.get(f'{prefix}/chunk_action_delta_reset_first_p95', float('nan')):.6f} "
+        f"joint_vel_jump={metrics.get(f'{prefix}/chunk_joint_vel_jump_reset_first_mean', float('nan')):.6f} "
+        f"joint_vel_jump_p95={metrics.get(f'{prefix}/chunk_joint_vel_jump_reset_first_p95', float('nan')):.6f} "
+        f"root_ang_vel_jump={metrics.get(f'{prefix}/chunk_root_ang_vel_jump_reset_first_mean', float('nan')):.6f} "
+        f"root_ang_vel_jump_p95={metrics.get(f'{prefix}/chunk_root_ang_vel_jump_reset_first_p95', float('nan')):.6f} "
+        f"joint_pos_error={metrics.get(f'{prefix}/chunk_joint_pos_error_reset_first_mean', float('nan')):.6f} "
+        f"joint_vel_error={metrics.get(f'{prefix}/chunk_joint_vel_error_reset_first_mean', float('nan')):.6f} "
+        f"root_ang_vel_error={metrics.get(f'{prefix}/chunk_root_ang_vel_error_reset_first_mean', float('nan')):.6f}",
+        flush=True,
+    )
+    for offset in range(4):
+        print(
+            f"[{label}_OFFSET{offset}] "
+            f"joint_pos={metrics.get(f'{prefix}/chunk_offset{offset}_joint_pos_error_mean', float('nan')):.6f} "
+            f"joint_pos_p95={metrics.get(f'{prefix}/chunk_offset{offset}_joint_pos_error_p95', float('nan')):.6f} "
+            f"joint_vel={metrics.get(f'{prefix}/chunk_offset{offset}_joint_vel_error_mean', float('nan')):.6f} "
+            f"joint_vel_p95={metrics.get(f'{prefix}/chunk_offset{offset}_joint_vel_error_p95', float('nan')):.6f} "
+            f"root_ang_vel={metrics.get(f'{prefix}/chunk_offset{offset}_root_ang_vel_error_mean', float('nan')):.6f} "
+            f"root_ang_vel_p95={metrics.get(f'{prefix}/chunk_offset{offset}_root_ang_vel_error_p95', float('nan')):.6f} "
+            f"count={metrics.get(f'{prefix}/chunk_offset{offset}_joint_pos_error_count', 0.0):.0f}",
+            flush=True,
+        )

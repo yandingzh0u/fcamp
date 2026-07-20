@@ -13,6 +13,7 @@ from components.imitation.motion_features import canonicalize_imitation_window
 from .imitation_data import (
     G1_IMITATION_FRAME_DIM,
     G1_IMITATION_KEY_BODY_NAMES,
+    G1_IMITATION_NUM_JOINTS,
     build_g1_add_disc_frame,
     build_g1_imitation_frame,
     g1_add_disc_frame_dim,
@@ -352,6 +353,7 @@ class MimicMotionReference:
                 action_joint_names=action_joint_names,
                 device=device,
             )
+        self._fcamp_expert_integer_frame_cache: torch.Tensor | None = None
         self.num_frames = int(self.joint_pos.shape[0])
         self.duration = float(max(0, self.num_frames - 1)) / self.fps
         if self.motion_reference_mode == "mimickit_add":
@@ -615,6 +617,162 @@ class MimicMotionReference:
             root_ang_vel=self.body_ang_vel_full_w[time_steps, self.root_body_id],
             joint_vel=self.joint_vel[time_steps],
         )
+
+    @property
+    def fcamp_has_runtime_fk(self) -> bool:
+        return self._fk_model is not None
+
+    def get_fcamp_fk_body_positions(
+        self,
+        *,
+        root_pos: torch.Tensor,
+        root_quat: torch.Tensor,
+        joint_pos: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate the checked-in runtime URDF at caller-provided states."""
+
+        if self._fk_model is None:
+            raise RuntimeError("FCAMP requires kinematic_urdf_file for expert/runtime alignment")
+        count = int(root_pos.shape[0])
+        if tuple(root_pos.shape) != (count, 3):
+            raise ValueError("root_pos must have shape [B,3]")
+        if tuple(root_quat.shape) != (count, 4):
+            raise ValueError("root_quat must have shape [B,4]")
+        if tuple(joint_pos.shape) != (count, G1_IMITATION_NUM_JOINTS):
+            raise ValueError(
+                f"joint_pos must have shape [B,{G1_IMITATION_NUM_JOINTS}]"
+            )
+        return self._fk_model.body_pos(
+            root_pos=root_pos.to(device=self.device, dtype=torch.float32),
+            root_quat=root_quat.to(device=self.device, dtype=torch.float32),
+            joint_pos=joint_pos.to(device=self.device, dtype=torch.float32),
+        )
+
+    def build_fcamp_frame_from_robot_state(
+        self,
+        *,
+        root_pos: torch.Tensor,
+        root_quat: torch.Tensor,
+        joint_pos: torch.Tensor,
+        root_link_velocity: torch.Tensor,
+        joint_vel: torch.Tensor,
+    ) -> torch.Tensor:
+        """Build the FCAMP 233-D frame through the expert FK code path.
+
+        This is used as a same-state runtime invariant.  All physical fields,
+        including root velocity, are supplied by the simulator; only key-body
+        origins are reconstructed by the exact URDF used for expert data.
+        """
+
+        if root_link_velocity.shape != (root_pos.shape[0], 6):
+            raise ValueError("root_link_velocity must have shape [B,6]")
+        fk_body_pos = self.get_fcamp_fk_body_positions(
+            root_pos=root_pos,
+            root_quat=root_quat,
+            joint_pos=joint_pos,
+        )
+        return build_g1_imitation_frame(
+            root_pos=root_pos,
+            root_quat_wxyz=root_quat,
+            joint_pos=joint_pos,
+            key_body_pos=fk_body_pos.index_select(1, self.imitation_key_body_ids),
+            root_lin_vel=root_link_velocity[:, :3],
+            root_ang_vel=root_link_velocity[:, 3:],
+            joint_vel=joint_vel,
+        )
+
+    def get_fcamp_expert_frame_at_times(self, time_steps: torch.Tensor) -> torch.Tensor:
+        """Return expert frames in the runtime URDF/root-link feature domain."""
+
+        if not torch.is_tensor(time_steps):
+            raise TypeError("time_steps must be a torch.Tensor")
+        if self._fk_model is None:
+            raise RuntimeError(
+                "FCAMP expert frames require kinematic_urdf_file for the runtime FK model"
+            )
+        requested_shape = tuple(time_steps.shape)
+        phases = time_steps.to(device=self.device, dtype=torch.float32).reshape(-1)
+        if not bool(torch.isfinite(phases).all()):
+            raise ValueError("FCAMP expert frame times contain non-finite values")
+        if bool((phases < 0).any()) or bool((phases > self.num_frames - 1).any()):
+            raise ValueError(
+                f"FCAMP expert frame times must lie in [0, {self.num_frames - 1}]"
+            )
+        root_pos = self._interpolate(self.body_pos_full_w[:, self.root_body_id], phases)
+        root_quat = self._interpolate_quat_shortest(
+            self.body_quat_full_w[:, self.root_body_id], phases
+        )
+        joint_pos = self._interpolate(self.joint_pos, phases)
+        root_link_velocity = torch.cat(
+            (
+                self._interpolate(
+                    self.body_lin_vel_full_w[:, self.root_body_id], phases
+                ),
+                self._interpolate(
+                    self.body_ang_vel_full_w[:, self.root_body_id], phases
+                ),
+            ),
+            dim=-1,
+        )
+        frame = self.build_fcamp_frame_from_robot_state(
+            root_pos=root_pos,
+            root_quat=root_quat,
+            joint_pos=joint_pos,
+            root_link_velocity=root_link_velocity,
+            joint_vel=self._interpolate(self.joint_vel, phases),
+        )
+        return frame.reshape(requested_shape + (G1_IMITATION_FRAME_DIM,))
+
+    @torch.no_grad()
+    def _fcamp_integer_expert_frames(self) -> torch.Tensor:
+        cached = getattr(self, "_fcamp_expert_integer_frame_cache", None)
+        if cached is None:
+            cached = self.get_fcamp_expert_frame_at_times(
+                torch.arange(self.num_frames, device=self.device, dtype=torch.float32)
+            ).detach()
+            self._fcamp_expert_integer_frame_cache = cached
+        return cached
+
+    def get_fcamp_demo_history(
+        self,
+        phase_indices: torch.Tensor,
+        window_size: int,
+        *,
+        flatten: bool = False,
+    ) -> torch.Tensor:
+        """Build chronological fixed-W FCAMP reset seeds ending at each phase."""
+
+        if not torch.is_tensor(phase_indices):
+            raise TypeError("phase_indices must be a torch.Tensor")
+        phases = phase_indices.to(device=self.device)
+        if phases.ndim != 1:
+            raise ValueError(f"phase_indices must be 1-D, got {tuple(phases.shape)}")
+        if torch.is_floating_point(phases):
+            if not bool(torch.isfinite(phases).all()):
+                raise ValueError("phase_indices contain non-finite values")
+            rounded = torch.round(phases)
+            if not torch.equal(phases, rounded):
+                raise ValueError("FCAMP reset history endpoints must be integer phases")
+            phases = rounded
+        indices = history_indices(
+            phases.to(dtype=torch.long), window_size, self.num_frames, clamp_start=True
+        )
+        frames = self._fcamp_integer_expert_frames().index_select(
+            0, indices.reshape(-1)
+        ).reshape(indices.shape + (G1_IMITATION_FRAME_DIM,))
+        return frames.flatten(start_dim=-2) if flatten else frames
+
+    def get_fcamp_demo_windows_at_end_indices(
+        self,
+        end_indices: torch.Tensor,
+        window_size: int,
+        *,
+        flatten: bool = True,
+    ) -> torch.Tensor:
+        frames = self.get_fcamp_demo_history(end_indices, window_size, flatten=False)
+        if not flatten:
+            return frames
+        return canonicalize_imitation_window(frames).flatten(start_dim=-2)
 
     def get_imitation_frame_at_times(self, time_steps: torch.Tensor) -> torch.Tensor:
         """Return evaluator-only frames at exact fractional motion phases.

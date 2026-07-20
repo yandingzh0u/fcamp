@@ -121,6 +121,47 @@ def test_history_canonicalized_flatten_does_not_modify_raw_ring_frames() -> None
     torch.testing.assert_close(history.flatten().reshape(1, 3, 5), raw_window)
 
 
+def test_demo_seeded_history_is_fixed_width_from_first_policy_step() -> None:
+    history = TemporalFeatureHistory(1, history_len=4, feature_dim=1)
+    seed = torch.tensor([[[0.0], [1.0], [2.0], [3.0]]], dtype=torch.float32)
+    history.reset_seeded(seed)
+
+    assert history.seeded.tolist() == [True]
+    assert history.ready.tolist() == [False]
+    history.push(torch.tensor([[4.0]], dtype=torch.float32))
+
+    assert history.ready.tolist() == [True]
+    assert history.causal_ready.tolist() == [True]
+    assert history.window_ages().tolist() == [[-2, -1, 0, 1]]
+    assert history.flatten().tolist() == [[1.0, 2.0, 3.0, 4.0]]
+
+
+def test_intervention_after_excludes_exactly_next_w_minus_one_windows() -> None:
+    history = TemporalFeatureHistory(1, history_len=4, feature_dim=1)
+    history.reset_seeded(
+        torch.tensor([[[0.0], [1.0], [2.0], [3.0]]], dtype=torch.float32)
+    )
+
+    # The intervention is after endpoint 4, so that endpoint remains clean.
+    history.push(
+        torch.tensor([[4.0]], dtype=torch.float32),
+        intervention_after=torch.tensor([True]),
+    )
+    assert history.causal_ready.tolist() == [True]
+    assert history.flatten().tolist() == [[1.0, 2.0, 3.0, 4.0]]
+
+    for value in (5.0, 6.0, 7.0):
+        history.push(torch.tensor([[value]], dtype=torch.float32))
+        assert history.ready.tolist() == [True]
+        assert history.causal_ready.tolist() == [False]
+        with pytest.raises(RuntimeError, match="external intervention"):
+            history.window()
+
+    history.push(torch.tensor([[8.0]], dtype=torch.float32))
+    assert history.causal_ready.tolist() == [True]
+    assert history.flatten().tolist() == [[5.0, 6.0, 7.0, 8.0]]
+
+
 def test_history_rejects_uninitialized_push() -> None:
     history = TemporalFeatureHistory(1, history_len=4, feature_dim=2)
     with pytest.raises(RuntimeError, match="imitation history"):

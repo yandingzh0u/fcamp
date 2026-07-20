@@ -454,6 +454,42 @@ def test_residual_absolute_anchors_on_prev_action() -> None:
     )
 
 
+def test_residual_absolute_uses_configured_symmetric_command_domain() -> None:
+    from models.flow_cps_policy import FlowMatchingPolicy
+
+    pol = FlowMatchingPolicy(
+        obs_dim=5,
+        action_dim=3,
+        horizon=4,
+        hidden_dims=(16, 16),
+        activation="elu",
+        action_squash_scale=5.0,
+        causal_velocity=True,
+    )
+    pol.action_transform = "residual_absolute"
+    prev = torch.tensor([[0.4, -1.7, 2.1]])
+
+    held = pol._action_transform(
+        torch.zeros(1, pol.chunk_dim), prev_action=prev
+    ).view(pol.horizon, pol.action_dim)
+    torch.testing.assert_close(held, prev.expand_as(held), atol=2.0e-6, rtol=0.0)
+
+    extreme = torch.tensor(
+        [[100.0, -100.0, 100.0] * pol.horizon], dtype=torch.float32
+    )
+    actions = pol._action_transform(extreme, prev_action=prev).view(
+        pol.horizon, pol.action_dim
+    )
+    assert bool((actions >= -5.0).all())
+    assert bool((actions <= 5.0).all())
+    torch.testing.assert_close(
+        actions[-1],
+        torch.tensor([5.0, -5.0, 5.0]),
+        atol=1.0e-6,
+        rtol=0.0,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # failure_frame excludes motion_complete (a success signal must not be
 # absorbed into the failure target).

@@ -13,7 +13,7 @@ from components.evaluation import (
 from envs.spec import EE_Z_TERMINATION_THRESHOLD
 from method.base import classify_mimickit_done_terms
 from .env_state import restore_env_state, snapshot_env_state
-from .validation_metrics import terminal_phase_metrics
+from .validation_metrics import ChunkBoundaryDiagnostics, terminal_phase_metrics
 
 
 def short_body_name(body_name: str) -> str:
@@ -103,7 +103,17 @@ def _reset_alignment_metrics(env, prefix: str) -> dict[str, float]:
     body_pos_top_idx = int(torch.argmax(body_pos_err_mean_by_body).item())
     body_ori_top_idx = int(torch.argmax(body_ori_deg_mean_by_body).item())
     joint_pos, joint_vel = env.get_action_joint_state()
-    root_velocity = env.get_mimic_root_velocity_w()
+    # FCAMP writes and discriminates root-link velocity even though the shared
+    # task configuration retains COM semantics for its ordinary observations.
+    # Read the same frame here so the reset diagnostic is not a COM-vs-link
+    # comparison artifact.
+    root_velocity = env.get_mimic_root_velocity_w(
+        velocity_frame=(
+            "link"
+            if bool(getattr(env, "_strict_action_contract", False))
+            else None
+        )
+    )
     root_ori_deg = (
         quat_error_magnitude(reference["root_quat_w"], env.robot.data.root_quat_w)
         * (180.0 / 3.141592653589793)
@@ -202,6 +212,14 @@ def run_validation_rollout(
     current_obs = algo.evaluation_reset(validation_phase)
     print(f"[VALIDATION_RESET_DONE] time={time.perf_counter() - reset_t0:.3f}s", flush=True)
     reset_metrics = _reset_alignment_metrics(env, "validation")
+    _, initial_joint_vel = env.get_action_joint_state()
+    initial_root_ang_vel = env.get_mimic_root_velocity_w()[:, 3:]
+    chunk_diagnostics = ChunkBoundaryDiagnostics(
+        horizon=horizon,
+        initial_action=env.last_action,
+        initial_joint_vel=initial_joint_vel,
+        initial_root_ang_vel=initial_root_ang_vel,
+    )
 
     demo_frame_indices = torch.arange(
         env.motion.num_frames, dtype=torch.long, device=env.device
@@ -312,6 +330,7 @@ def run_validation_rollout(
                 if cached_chunk is None or chunk_index >= cached_chunk.shape[1]:
                     cached_chunk = _deployment_action_chunk(algo, current_obs)
                     chunk_index = 0
+                primitive_offset = step_idx % horizon
                 action_payload = cached_chunk[:, chunk_index, :]
                 action, reference_dt = _split_reference_action(algo, env, action_payload)
                 if bool(done.any()):
@@ -325,6 +344,20 @@ def run_validation_rollout(
                 current_obs, reward, step_done, info = algo.evaluation_step(
                     action,
                     reference_dt,
+                )
+                reference_post = env.motion.get_frame(info["reference_phase_steps"])
+                robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
+                robot_root_ang_vel = env.get_mimic_root_velocity_w()[:, 3:]
+                chunk_diagnostics.update(
+                    active_mask=active_mask,
+                    chunk_offset=primitive_offset,
+                    action=action,
+                    joint_pos=robot_joint_pos,
+                    joint_vel=robot_joint_vel,
+                    root_ang_vel=robot_root_ang_vel,
+                    reference_joint_pos=reference_post["joint_pos"],
+                    reference_joint_vel=reference_post["joint_vel"],
+                    reference_root_ang_vel=reference_post["root_ang_vel_w"],
                 )
                 metric_env_ids = motion_metric.env_ids
                 policy_imitation_frame = env.get_evaluator_imitation_policy_frame(
@@ -500,6 +533,7 @@ def run_validation_rollout(
         "validation/full_motion_control_steps": float(env.full_motion_control_steps()),
     }
     metrics.update(motion_metric.metrics())
+    metrics.update(chunk_diagnostics.metrics())
     metrics.update(reset_metrics)
     timeout, motion_complete, failure = classify_mimickit_done_terms(done, done_term_record)
     metrics.update({

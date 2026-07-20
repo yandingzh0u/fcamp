@@ -26,6 +26,7 @@ class CoreTrainer:
         self.start_update = 1
         self.env_transitions_total = 0
         self.train_wall_seconds_total = 0.0
+        self._pre_training_warmup_ran = False
 
         torch.manual_seed(cfg.training.seed)
         if torch.cuda.is_available():
@@ -52,6 +53,8 @@ class CoreTrainer:
         if tcfg.resume:
             print(f"[INFO] resumed_from={tcfg.resume}", flush=True)
 
+        warmup_metrics, warmup_transitions, warmup_seconds = self._run_pre_training_warmup()
+
         for update_idx in range(self.start_update, tcfg.max_updates + 1):
             if not self.simulation_app.is_running():
                 break
@@ -66,13 +69,17 @@ class CoreTrainer:
 
             metrics = self.algo.update(rollout, collect_time)
             metrics.update(reset_metrics)
-            iteration_s = time.perf_counter() - t0
-            transitions_update = int(self.env_cfg.num_envs) * int(self.algo_cfg.rollout_env_steps)
-            self.env_transitions_total += transitions_update
-            self.train_wall_seconds_total += iteration_s
+            formal_iteration_s = time.perf_counter() - t0
+            formal_transitions = int(self.env_cfg.num_envs) * int(self.algo_cfg.rollout_env_steps)
+            transitions_update = formal_transitions + warmup_transitions
+            iteration_s = formal_iteration_s + warmup_seconds
+            self.env_transitions_total += formal_transitions
+            self.train_wall_seconds_total += formal_iteration_s
+            metrics.update(warmup_metrics)
             metrics.update(
                 {
                     "samples/env_transitions_update": float(transitions_update),
+                    "samples/formal_env_transitions_update": float(formal_transitions),
                     "samples/env_transitions_total": float(self.env_transitions_total),
                     "progress/control_seconds_per_env": float(
                         self.env_transitions_total * self.env_cfg.sim_dt / self.env_cfg.num_envs
@@ -83,6 +90,10 @@ class CoreTrainer:
                     "health/parameters_finite": float(metrics.get("system/parameters_finite", 1.0)),
                 }
             )
+            # Warm-up belongs only to the first fresh-run accounting interval.
+            warmup_metrics = {}
+            warmup_transitions = 0
+            warmup_seconds = 0.0
 
 
             del rollout
@@ -166,6 +177,54 @@ class CoreTrainer:
 
         print("[INFO] Training finished.", flush=True)
         self.metrics_logger.close()
+
+    def _run_pre_training_warmup(self) -> tuple[dict[str, float], int, float]:
+        """Run the optional warm-up once on a fresh run and account its cost."""
+        if (
+            bool(getattr(self, "_pre_training_warmup_ran", False))
+            or self.start_update != 1
+            or bool(self.train_cfg.resume)
+        ):
+            return {}, 0, 0.0
+        hook = getattr(self.algo, "pre_training_warmup", None)
+        if not callable(hook):
+            return {}, 0, 0.0
+
+        started = time.perf_counter()
+        result = hook(self.current_observation)
+        elapsed = time.perf_counter() - started
+        if not isinstance(result, tuple) or len(result) != 3:
+            raise TypeError(
+                "pre_training_warmup must return "
+                "(observation, metrics, env_transition_count)"
+            )
+        observation, method_metrics, transition_count = result
+        if not isinstance(method_metrics, dict):
+            raise TypeError("pre_training_warmup metrics must be a dict")
+        if isinstance(transition_count, bool) or not isinstance(transition_count, int):
+            raise TypeError("pre_training_warmup transition count must be an int")
+        if transition_count < 0:
+            raise ValueError("pre_training_warmup transition count must be >= 0")
+
+        self._pre_training_warmup_ran = True
+        self.current_observation = observation
+        if transition_count == 0 and not method_metrics:
+            return {}, 0, 0.0
+
+        self.env_transitions_total += transition_count
+        self.train_wall_seconds_total += elapsed
+        metrics = {f"warmup/{key}": value for key, value in method_metrics.items()}
+        metrics.update(
+            {
+                "samples/warmup_env_transitions": float(transition_count),
+                "timing/warmup_s": float(elapsed),
+            }
+        )
+        print(
+            f"[WARMUP] env_transitions={transition_count} time={elapsed:.3f}s",
+            flush=True,
+        )
+        return metrics, transition_count, elapsed
 
     def _official_output_reset_due(self, update_idx: int) -> bool:
         every = int(self.train_cfg.official_reset_every)

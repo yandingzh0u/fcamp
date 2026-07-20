@@ -27,10 +27,56 @@ def test_fcamp_config_is_h4_w16_flow_cps() -> None:
     assert cfg.parameters.policy_lr == 0.0003
     assert cfg.parameters.value_lr == 0.0003
     assert cfg.parameters.style_prior.obs_steps == 16
+    assert cfg.parameters.style_prior.discriminator_warmup_rollouts == 1
     assert cfg.parameters.credit.advantage_normalization == "global"
     assert cfg.parameters.credit.integrate_amp_reward_dt is True
     assert cfg.parameters.streams.phase0_fraction == 0.10
     assert cfg.training.max_updates == 500
+
+
+def test_fcamp_rejects_negative_discriminator_warmup_rollouts() -> None:
+    with pytest.raises(ValueError, match="discriminator_warmup_rollouts must be 0 or 1"):
+        load_config(
+            ROOT / "configs" / "fcamp_largebox.yaml",
+            ["parameters.style_prior.discriminator_warmup_rollouts=-1"],
+        )
+
+
+def test_fcamp_discriminator_batch_must_realize_both_streams() -> None:
+    with pytest.raises(
+        ValueError,
+        match="discriminator optimizer/batch/epoch settings are invalid",
+    ):
+        load_config(
+            ROOT / "configs" / "fcamp_largebox.yaml",
+            ["parameters.style_prior.batch_size=1"],
+        )
+
+
+def test_fcamp_requires_two_streams_and_integer_reset_phases() -> None:
+    with pytest.raises(ValueError, match="at least two environments"):
+        load_config(
+            ROOT / "configs" / "fcamp_largebox.yaml",
+            ["environment.num_envs=1"],
+        )
+    with pytest.raises(ValueError, match="requires integer phases"):
+        load_config(
+            ROOT / "configs" / "fcamp_largebox.yaml",
+            [
+                "environment.reset_phase_sampling=continuous_uniform",
+                "environment.adaptive_motion_sampling=false",
+            ],
+        )
+
+
+def test_legacy_fcamp_config_defaults_to_no_discriminator_warmup() -> None:
+    cfg = load_config(ROOT / "configs" / "fcamp_largebox.yaml")
+    tree = asdict(cfg)
+    tree["parameters"]["style_prior"].pop("discriminator_warmup_rollouts")
+
+    rebuilt = config_from_dict(tree, ROOT / "configs" / "legacy_fcamp.yaml")
+
+    assert rebuilt.parameters.style_prior.discriminator_warmup_rollouts == 0
 
 
 def test_validation_has_no_fractional_early_stop() -> None:

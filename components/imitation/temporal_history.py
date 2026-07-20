@@ -10,9 +10,11 @@ from components.imitation.motion_features import canonicalize_imitation_window
 class TemporalFeatureHistory:
     """A vectorized per-environment raw-frame ring, returned oldest-to-newest.
 
-    Reset stores one real simulator frame at age 0. That frame can be a
-    predecessor, but it is never legal discriminator input. The first legal
-    window is exactly ages 1..W.
+    ``reset_seeded`` installs a complete chronological demonstration history.
+    The seed itself is never emitted as a policy endpoint; the first
+    post-action frame replaces its oldest predecessor and immediately produces
+    a fixed-width window.  Incoming frame edges also carry an explicit causal
+    flag so windows crossing an exogenous intervention fail closed.
     """
 
     def __init__(
@@ -44,14 +46,34 @@ class TemporalFeatureHistory:
             device=self.device,
             dtype=torch.long,
         )
+        # For the frame stored in slot s, this says whether the edge from its
+        # chronological predecessor into s is policy-causal.  The oldest
+        # frame's incoming edge lies outside a returned window and is ignored.
+        self._incoming_edge_clean = torch.ones(
+            (self.num_envs, self.history_len),
+            device=self.device,
+            dtype=torch.bool,
+        )
+        # A push is applied after the current frame is captured.  It therefore
+        # dirties the incoming edge of the next appended frame.
+        self._pending_intervention = torch.zeros(
+            self.num_envs,
+            device=self.device,
+            dtype=torch.bool,
+        )
         # Cursor is the slot overwritten by the next post-action push.
         self._cursor = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self._initialized = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self._seeded = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._age = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
 
     @property
     def initialized(self) -> torch.Tensor:
         return self._initialized.clone()
+
+    @property
+    def seeded(self) -> torch.Tensor:
+        return self._seeded.clone()
 
     @property
     def push_count(self) -> torch.Tensor:
@@ -63,7 +85,33 @@ class TemporalFeatureHistory:
 
     @property
     def ready(self) -> torch.Tensor:
-        return self._initialized & (self._age >= self.history_len)
+        legacy_ready = ~self._seeded & (self._age >= self.history_len)
+        seeded_ready = self._seeded & (self._age >= 1)
+        return self._initialized & (legacy_ready | seeded_ready)
+
+    @property
+    def pending_intervention(self) -> torch.Tensor:
+        return self._pending_intervention.clone()
+
+    def _ordered_incoming_edge_clean(self, ids: torch.Tensor) -> torch.Tensor:
+        offsets = torch.arange(self.history_len, device=self.device)
+        chronological = torch.remainder(
+            self._cursor[ids, None] + offsets[None, :], self.history_len
+        )
+        return torch.gather(self._incoming_edge_clean[ids], 1, chronological)
+
+    @property
+    def causal_ready(self) -> torch.Tensor:
+        """Ready endpoints whose W-1 internal edges contain no intervention."""
+
+        ready = self.ready
+        result = torch.zeros_like(ready)
+        ids = ready.nonzero(as_tuple=False).squeeze(-1)
+        if ids.numel() == 0:
+            return result
+        ordered_edges = self._ordered_incoming_edge_clean(ids)
+        result[ids] = ordered_edges[:, 1:].all(dim=1)
+        return result
 
     def _ids(self, env_ids: torch.Tensor | None) -> torch.Tensor:
         if env_ids is None:
@@ -78,12 +126,27 @@ class TemporalFeatureHistory:
         return ids
 
     def _check_frames(self, name: str, frames: torch.Tensor, count: int) -> torch.Tensor:
+        if not torch.is_tensor(frames):
+            raise TypeError(f"{name} must be a torch.Tensor")
         expected = (count, self.feature_dim)
         if tuple(frames.shape) != expected:
             raise ValueError(f"{name} must have shape {expected}, got {tuple(frames.shape)}")
         if frames.dtype != torch.float32:
             raise TypeError(f"{name} must be float32, got {frames.dtype}")
         values = frames.detach().to(device=self.device, dtype=self.dtype)
+        if not bool(torch.isfinite(values).all()):
+            raise ValueError(f"{name} contains non-finite imitation features")
+        return values
+
+    def _check_windows(self, name: str, windows: torch.Tensor, count: int) -> torch.Tensor:
+        if not torch.is_tensor(windows):
+            raise TypeError(f"{name} must be a torch.Tensor")
+        expected = (count, self.history_len, self.feature_dim)
+        if tuple(windows.shape) != expected:
+            raise ValueError(f"{name} must have shape {expected}, got {tuple(windows.shape)}")
+        if windows.dtype != torch.float32:
+            raise TypeError(f"{name} must be float32, got {windows.dtype}")
+        values = windows.detach().to(device=self.device, dtype=self.dtype)
         if not bool(torch.isfinite(values).all()):
             raise ValueError(f"{name} contains non-finite imitation features")
         return values
@@ -98,18 +161,64 @@ class TemporalFeatureHistory:
             return
         self._data[ids] = 0.0
         self._slot_ages[ids] = -1
+        self._incoming_edge_clean[ids] = True
+        self._pending_intervention[ids] = False
         self._data[ids, 0] = frames
         self._slot_ages[ids, 0] = 0
         self._cursor[ids] = 1 % self.history_len
         self._initialized[ids] = True
+        self._seeded[ids] = False
         self._age[ids] = 0
 
     @torch.no_grad()
-    def push(self, frame: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
-        """Append post-action frames for selected environments."""
+    def reset_seeded(
+        self,
+        seed_windows: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> None:
+        """Reset from complete demo windows ``[M,W,F]`` oldest-to-newest."""
+
+        ids = self._ids(env_ids)
+        windows = self._check_windows("seed_windows", seed_windows, ids.numel())
+        if ids.numel() == 0:
+            return
+        self._data[ids] = windows
+        self._slot_ages[ids] = torch.arange(
+            1 - self.history_len, 1, device=self.device, dtype=torch.long
+        )
+        self._incoming_edge_clean[ids] = True
+        self._pending_intervention[ids] = False
+        # Slot zero is the oldest demo predecessor and is replaced first.
+        self._cursor[ids] = 0
+        self._initialized[ids] = True
+        self._seeded[ids] = True
+        self._age[ids] = 0
+
+    @torch.no_grad()
+    def push(
+        self,
+        frame: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+        *,
+        intervention_after: torch.Tensor | None = None,
+    ) -> None:
+        """Append frames and mark interventions occurring after each frame."""
 
         ids = self._ids(env_ids)
         frames = self._check_frames("frame", frame, ids.numel())
+        if intervention_after is None:
+            interventions = torch.zeros(ids.numel(), device=self.device, dtype=torch.bool)
+        else:
+            if not torch.is_tensor(intervention_after):
+                raise TypeError("intervention_after must be a torch.Tensor")
+            expected = (ids.numel(),)
+            if tuple(intervention_after.shape) != expected:
+                raise ValueError(
+                    f"intervention_after must have shape {expected}, got {tuple(intervention_after.shape)}"
+                )
+            if intervention_after.dtype != torch.bool:
+                raise TypeError("intervention_after must use bool dtype")
+            interventions = intervention_after.detach().to(device=self.device)
         if ids.numel() == 0:
             return
         if not bool(self._initialized[ids].all()):
@@ -119,8 +228,10 @@ class TemporalFeatureHistory:
         next_age = self._age[ids] + 1
         self._data[ids, slots] = frames
         self._slot_ages[ids, slots] = next_age
+        self._incoming_edge_clean[ids, slots] = ~self._pending_intervention[ids]
         self._cursor[ids] = torch.remainder(slots + 1, self.history_len)
         self._age[ids] = next_age
+        self._pending_intervention[ids] = interventions
 
     def window_ages(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         ids = self._ids(env_ids)
@@ -135,15 +246,25 @@ class TemporalFeatureHistory:
         chronological = torch.remainder(self._cursor[ids, None] + offsets[None, :], self.history_len)
         slot_ages = torch.gather(self._slot_ages[ids], 1, chronological)
         expected = self._age[ids, None] - (self.history_len - 1) + offsets[None, :]
-        if not torch.equal(slot_ages, expected) or bool((slot_ages <= 0).any()):
-            raise RuntimeError("corrupt imitation history: legal window ages must be positive and contiguous")
+        if not torch.equal(slot_ages, expected):
+            raise RuntimeError("corrupt imitation history: legal window ages must be contiguous")
+        legacy = ~self._seeded[ids]
+        if bool(legacy.any()) and bool((slot_ages[legacy] <= 0).any()):
+            raise RuntimeError("corrupt imitation history: legacy window ages must be positive")
         return slot_ages
 
     def window(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-        """Return legal chronological windows with shape ``[M,W,F]``."""
+        """Return clean chronological windows with shape ``[M,W,F]``."""
 
         ids = self._ids(env_ids)
         self.window_ages(ids)
+        clean = self.causal_ready
+        if not bool(clean[ids].all()):
+            bad = ids[~clean[ids]].detach().cpu().tolist()
+            raise RuntimeError(
+                "imitation history window crosses an external intervention: "
+                f"env_ids={bad}"
+            )
         offsets = torch.arange(self.history_len, device=self.device)
         chronological = torch.remainder(self._cursor[ids, None] + offsets[None, :], self.history_len)
         return torch.gather(
@@ -166,12 +287,28 @@ class TemporalFeatureHistory:
     def statistics(self) -> dict[str, float]:
         initialized = self._initialized
         ready = self.ready
+        causal_ready = self.causal_ready
+        dirty = ready & ~causal_ready
+        seeded = initialized & self._seeded
+        seed_frames_remaining = torch.where(
+            seeded,
+            torch.clamp(self.history_len - self._age, min=0, max=self.history_len),
+            torch.zeros_like(self._age),
+        )
         metrics = {
             "history/initialized_fraction": float(self._initialized.float().mean().item()),
             "history/ready_fraction": float(ready.float().mean().item()),
             "history/ready_count": float(ready.sum().item()),
+            "history/causal_ready_fraction": float(causal_ready.float().mean().item()),
+            "history/causal_ready_count": float(causal_ready.sum().item()),
+            "history/intervention_dirty_fraction": float(dirty.float().mean().item()),
+            "history/intervention_dirty_count": float(dirty.sum().item()),
+            "history/pending_intervention_count": float(self._pending_intervention.sum().item()),
             "history/age0_count": float((initialized & (self._age == 0)).sum().item()),
             "history/age0_in_legal_window_count": 0.0,
+            "history/seeded_fraction": float(seeded.float().mean().item()),
+            "history/seeded_count": float(seeded.sum().item()),
+            "history/seed_frames_remaining_mean": float(seed_frames_remaining.float().mean().item()),
         }
         if bool(initialized.any()):
             ages = self._age[initialized]

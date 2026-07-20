@@ -34,7 +34,7 @@ from components.imitation.style_reward import (
 from components.imitation.temporal_history import TemporalFeatureHistory
 from components.imitation.window_pipeline import TemporalWindowPipeline
 from components.normalization.running_stats import RunningNormalizer
-from components.replay.frame_trajectory import FrameTrajectoryReplay
+from components.replay.fcamp_window_buffer import FCAMPWindowReplay
 from models.style_discriminator import (
     StyleDiscriminator,
     compute_style_discriminator_loss,
@@ -73,6 +73,22 @@ class FCAMP(FlowCPSBase):
 
         self.imitation_history_steps = int(amp_cfg.obs_steps)
         super().build()
+
+        # FCAMP actions are normalized PD target commands.  Their algorithmic
+        # domain is defined solely by action_squash_scale, never by URDF joint
+        # position metadata or startup-randomized default poses.
+        action_limit = float(cfg.action_squash_scale)
+        self.action_low = torch.full(
+            (self.num_act,), -action_limit, device=env.device
+        )
+        self.action_high = torch.full(
+            (self.num_act,), action_limit, device=env.device
+        )
+        env.enable_strict_action_contract(self.action_low, self.action_high)
+        if not bool(env.motion.fcamp_has_runtime_fk):
+            raise RuntimeError(
+                "FCAMP requires the configured runtime URDF FK for expert/policy alignment"
+            )
 
         self.training_streams = Phase0CurriculumStreams.create(
             env.num_envs,
@@ -142,13 +158,36 @@ class FCAMP(FlowCPSBase):
             self.imitation_frame_dim,
             device=env.device,
         )
-        # Replay is CPU-backed FP32 frame replay: every post-action frame is
-        # stored once, and discriminator windows are reconstructed only through
-        # continuous predecessor chains.
-        self.disc_frame_replay = FrameTrajectoryReplay(
-            int(amp_cfg.replay_size),
+        replay_capacity = int(amp_cfg.replay_size)
+        replay_replace = int(amp_cfg.replay_samples)
+        phase0_fraction = float(cfg.streams.phase0_fraction)
+        phase0_capacity = int(round(replay_capacity * phase0_fraction))
+        phase0_replace = int(round(replay_replace * phase0_fraction))
+        self.replay_stream_capacities = {
+            PHASE0_STREAM: phase0_capacity,
+            CURRICULUM_STREAM: replay_capacity - phase0_capacity,
+        }
+        self.replay_replacement_quotas = {
+            PHASE0_STREAM: phase0_replace,
+            CURRICULUM_STREAM: replay_replace - phase0_replace,
+        }
+        current_capacity = int(amp_cfg.current_buffer_size)
+        current_phase0_capacity = int(round(current_capacity * phase0_fraction))
+        self.current_stream_capacities = {
+            PHASE0_STREAM: current_phase0_capacity,
+            CURRICULUM_STREAM: current_capacity - current_phase0_capacity,
+        }
+        # One replay item is one lossless chronological raw [W,F] window.
+        # Stream partitions make the configured 10/90 contract invariant to
+        # episode survival and curriculum drift.
+        self.disc_window_replay = FCAMPWindowReplay(
+            self.replay_stream_capacities,
+            self.imitation_history_steps,
             self.imitation_frame_dim,
-            num_envs=env.num_envs,
+            # 200k x 16 x 233 FP32 is ~2.78 GiB.  Page-locking that entire
+            # resident store is unsafe and unnecessary; only sampled batches
+            # cross to CUDA.
+            pin_memory=False,
         )
         disc_parameters = [p for p in self.discriminator.parameters() if p.requires_grad]
         optimizer_name = amp_cfg.optimizer.lower()
@@ -167,6 +206,7 @@ class FCAMP(FlowCPSBase):
         else:
             self.disc_optimizer = torch.optim.AdamW(disc_parameters, **optimizer_kwargs)
         self.disc_version = 0
+        self.warmup_env_transitions = 0
 
         # Everything needed for a training checkpoint is registered, while
         # deployment still calls deterministic_actions() on the actor only.
@@ -184,11 +224,29 @@ class FCAMP(FlowCPSBase):
     # ------------------------------------------------------------------ #
     # Checkpointing
     # ------------------------------------------------------------------ #
+    def _validate_checkpoint_action_domain(self, state: dict) -> None:
+        for name, expected in (
+            ("action_low", self.action_low),
+            ("action_high", self.action_high),
+        ):
+            saved = state.get(name)
+            if (
+                not torch.is_tensor(saved)
+                or saved.shape != expected.shape
+                or not torch.equal(
+                    saved.detach().to(device="cpu"),
+                    expected.detach().to(device="cpu"),
+                )
+            ):
+                raise ValueError(
+                    f"FCAMP checkpoint {name} differs from the policy command domain"
+                )
+
     def validate_checkpoint_payload(self, payload: dict) -> None:
         state = payload.get("algo_state")
         if not isinstance(state, dict) or int(
             state.get("fcamp_schema_version", 0)
-        ) != 6:
+        ) != 8:
             raise ValueError(
                 "FCAMP checkpoint predates the reward-only discriminator "
                 "architecture; start a fresh run."
@@ -198,6 +256,7 @@ class FCAMP(FlowCPSBase):
                 "FCAMP checkpoints with discriminator-conditioned policies "
                 "cannot be resumed."
             )
+        self._validate_checkpoint_action_domain(state)
 
     def extra_checkpoint_state(self) -> dict:
         payload = super().extra_checkpoint_state()
@@ -205,8 +264,11 @@ class FCAMP(FlowCPSBase):
             {
                 "disc_optimizer": self.disc_optimizer.state_dict(),
                 "disc_version": int(self.disc_version),
-                "disc_frame_replay": self.disc_frame_replay.state_dict(),
-                "fcamp_schema_version": 6,
+                "warmup_env_transitions": int(self.warmup_env_transitions),
+                "action_low": self.action_low.detach().cpu(),
+                "action_high": self.action_high.detach().cpu(),
+                "disc_window_replay": self.disc_window_replay.state_dict(),
+                "fcamp_schema_version": 8,
                 "imitation_history_steps": self.imitation_history_steps,
                 "imitation_frame_dim": self.imitation_frame_dim,
                 "prefix_context_dim": self.prefix_context_dim,
@@ -228,7 +290,7 @@ class FCAMP(FlowCPSBase):
         if not payload:
             return
         schema = int(payload.get("fcamp_schema_version", 0))
-        if schema != 6:
+        if schema != 8:
             raise ValueError(
                 "FCAMP checkpoint predates the reward-only discriminator "
                 "architecture; start a fresh run."
@@ -238,6 +300,7 @@ class FCAMP(FlowCPSBase):
                 "FCAMP checkpoints with discriminator-conditioned policies "
                 "cannot be resumed."
             )
+        self._validate_checkpoint_action_domain(payload)
         saved_stream_ids = payload.get("stream_ids")
         if not torch.is_tensor(saved_stream_ids) or not torch.equal(
             saved_stream_ids.to(dtype=torch.int8, device="cpu"),
@@ -254,8 +317,15 @@ class FCAMP(FlowCPSBase):
         if not reset_optimizer and "disc_optimizer" in payload:
             self.disc_optimizer.load_state_dict(payload["disc_optimizer"])
         self.disc_version = int(payload.get("disc_version", self.disc_version))
-        if not self.disc_frame_replay.load_state_dict(payload.get("disc_frame_replay")):
-            print("[FCAMP] discriminator frame replay absent/incompatible; starting empty", flush=True)
+        self.warmup_env_transitions = int(
+            payload.get("warmup_env_transitions", 0)
+        )
+        if self.warmup_env_transitions < 0:
+            raise ValueError("FCAMP checkpoint has invalid warmup transition count")
+        replay_state = payload.get("disc_window_replay")
+        if replay_state is None:
+            raise ValueError("FCAMP checkpoint is missing complete-window replay state")
+        self.disc_window_replay.load_state_dict(replay_state)
 
     # ------------------------------------------------------------------ #
     # Causal prefix contexts and style reward
@@ -423,9 +493,15 @@ class FCAMP(FlowCPSBase):
         phase_indices: torch.Tensor | None = None,
         env_ids: torch.Tensor | None = None,
     ) -> None:
-        del phase_indices
-        initial_frame = self.env.get_imitation_policy_frame(env_ids)
-        self.imitation_history.reset(initial_frame, env_ids=env_ids)
+        if phase_indices is None:
+            raise ValueError("FCAMP reset history requires explicit reference phases")
+        phases = phase_indices.to(device=self.env.device)
+        seed = self.env.motion.get_fcamp_demo_history(
+            phases,
+            self.imitation_history_steps,
+            flatten=False,
+        )
+        self.imitation_history.reset_seeded(seed, env_ids=env_ids)
 
     def _reset_training_streams(
         self,
@@ -449,8 +525,8 @@ class FCAMP(FlowCPSBase):
         obs = env.reset(
             phase_indices=phases,
             reset_stream_ids=reset_streams,
+            root_velocity_frame="link",
         )
-        env.episode_steps[self.training_streams.phase0_ids] = 0
         if (
             randomize_curriculum_episode_age
             and bool(self.cfg.init_at_random_ep_len)
@@ -465,10 +541,10 @@ class FCAMP(FlowCPSBase):
                 device=env.device,
                 dtype=env.episode_steps.dtype,
             )
-            env.episode_steps.index_copy_(0, curriculum_ids, random_age)
+            env.set_episode_age(curriculum_ids, random_age)
         self._obs = obs
         self._critic_obs = env.get_critic_observation()
-        self._reset_imitation_history(env.phase_steps.clone())
+        self._reset_imitation_history(phases)
         self.phase0_attempts.start(self.training_streams.phase0_ids)
         return obs
 
@@ -484,6 +560,71 @@ class FCAMP(FlowCPSBase):
             randomize_curriculum_episode_age=False,
         )
 
+    def pre_training_warmup(
+        self,
+        current_observation: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float], int]:
+        """Prime normalization and D on one discarded policy rollout.
+
+        Actor, both critics, and their normalizers are deliberately untouched.
+        The complete-window replay is retained because those interactions count
+        toward the training budget; adaptive curriculum evidence and episode
+        accounting are restored so the discarded rollout cannot steer update 1.
+        """
+
+        warmup_rollouts = int(self.cfg.amp.discriminator_warmup_rollouts)
+        if warmup_rollouts == 0:
+            return current_observation, {}, 0
+        if warmup_rollouts != 1:
+            raise ValueError("FCAMP supports exactly one discriminator warm-up rollout")
+
+        sampler_state = {
+            key: value.clone() if torch.is_tensor(value) else value
+            for key, value in self.env.adaptive_sampler.state_dict().items()
+        }
+        failure_recorded = self.env._failure_recorded.clone()
+        self._fcamp_update_idx = 0
+        rollout = self.collect(current_observation)
+        disc_metrics = self._discriminator_update(
+            0,
+            rollout=rollout,
+            commit_normalizer_before_training=True,
+        )
+        if disc_metrics.get("disc/update_steps", 0.0) <= 0.0:
+            raise RuntimeError("FCAMP discriminator warm-up produced no optimizer step")
+        if disc_metrics.get("disc_norm/committed_before_training", 0.0) != 1.0:
+            raise RuntimeError(
+                "FCAMP discriminator warm-up did not commit matched normalization first"
+            )
+
+        if not self.env.adaptive_sampler.load_state_dict(sampler_state):
+            raise RuntimeError("FCAMP could not restore sampler after discarded warm-up")
+        self.env._failure_recorded.copy_(failure_recorded)
+        self.phase0_attempts = Phase0AttemptTracker(
+            self.training_streams.stream_ids
+        )
+        self._init_train_episode_stats()
+        next_observation = self._reset_training_streams(
+            randomize_curriculum_episode_age=True,
+        )
+        transitions = int(self.env.num_envs) * int(self.cfg.rollout_env_steps)
+        self.warmup_env_transitions = transitions
+        metrics = {
+            **disc_metrics,
+            "discarded_rollouts": 1.0,
+            "actor_optimizer_steps": 0.0,
+            "critic_optimizer_steps": 0.0,
+            "env_transitions": float(transitions),
+            "amp_valid_window_count": float(rollout["amp_valid"].sum().item()),
+            "replay_dirty_insert_count": float(
+                self.disc_window_replay.statistics(current_update=0).get(
+                    "replay/dirty_insert_count", -1.0
+                )
+            ),
+        }
+        del rollout
+        return next_observation, metrics, transitions
+
     def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
         if obs.shape[-1] != self.base_actor_obs_dim:
             raise ValueError(
@@ -491,6 +632,14 @@ class FCAMP(FlowCPSBase):
                 f"got {tuple(obs.shape)}"
             )
         return super().deterministic_actions(obs)
+
+    def evaluation_reset(self, phase_indices: torch.Tensor) -> torch.Tensor:
+        """Reset FCAMP evaluation in the same root-link domain as training."""
+
+        return self.env.reset(
+            phase_indices=phase_indices,
+            root_velocity_frame="link",
+        )
 
     def reset_for_update(self, update_idx: int) -> torch.Tensor:
         # Trainer owns the canonical update clock, including after resume.
@@ -508,8 +657,6 @@ class FCAMP(FlowCPSBase):
         chunks = self._chunks_per_update()
         h = self.horizon_h
         flow_steps = int(self.cfg.flow_steps)
-        total_primitive_steps = chunks * h
-
         # One rollout is generated, history-conditioned and rewarded by one
         # immutable committed discriminator snapshot.  As in the local
         # MimicKit AMP implementation, policy/value optimization consumes these
@@ -540,12 +687,12 @@ class FCAMP(FlowCPSBase):
         amp_logit_buf = torch.zeros_like(task_reward_buf)
         valid_buf = torch.zeros(chunks, n_envs, h, dtype=torch.bool, device=device)
         amp_valid_buf = torch.zeros_like(valid_buf)
+        intervention_edge_buf = torch.zeros_like(valid_buf)
+        amp_bootstrap_buf = torch.zeros_like(valid_buf)
+        amp_trace_buf = torch.zeros_like(valid_buf)
         amp_age_buf = torch.full(
             (chunks, n_envs, h), -1, dtype=torch.long, device=device
         )
-        current_disc_window_chunks: list[torch.Tensor] = []
-        current_disc_end_time_chunks: list[torch.Tensor] = []
-        current_disc_stream_chunks: list[torch.Tensor] = []
         done_buf = torch.zeros_like(valid_buf)
         failure_buf = torch.zeros_like(valid_buf)
         timeout_buf = torch.zeros_like(valid_buf)
@@ -563,16 +710,37 @@ class FCAMP(FlowCPSBase):
         critic_obs = self._critic_obs
         collection_start_phases = env.phase_steps.detach().clone()
         rollout_info_items: list[tuple[dict, torch.Tensor]] = []
-        current_keep_per_step = max(
-            1, math.ceil(int(self.cfg.amp.current_buffer_size) / total_primitive_steps)
-        )
         task_weight = float(self.cfg.credit.task_weight)
         amp_weight = float(self.cfg.credit.amp_weight)
         amp_dt_scale = float(env.dt) if self.cfg.credit.integrate_amp_reward_dt else 1.0
         action_abs_max = 0.0
+        action_bound_violation_max = 0.0
+        fk_alignment_abs_max = 0.0
+        fk_alignment_abs_sum = 0.0
+        fk_alignment_count = 0
+        geometry_checked = False
+        dirty_window_excluded_count = 0
         window_latest_root_xy_abs_max = torch.zeros((), device=device)
         window_root_xy_abs_sum = torch.zeros((), device=device)
         window_root_xy_count = 0
+        replay_update_idx = int(getattr(self, "_fcamp_update_idx", 0))
+        self.disc_window_replay.begin_update(
+            replay_update_idx,
+            replacement_quotas=self.replay_replacement_quotas,
+        )
+        # Current-D data uses the same whole-rollout reservoir semantics.  A
+        # per-primitive 10/90 rounding would make short-lived streams or small
+        # diagnostics silently disappear and biases selection by step order.
+        current_window_buffer = FCAMPWindowReplay(
+            self.current_stream_capacities,
+            self.imitation_history_steps,
+            self.imitation_frame_dim,
+            pin_memory=False,
+        )
+        current_window_buffer.begin_update(
+            0,
+            replacement_quotas={PHASE0_STREAM: 0, CURRICULUM_STREAM: 0},
+        )
         with torch.no_grad():
             for chunk_idx in range(chunks):
                 chunk_actor_raw = obs.clone()
@@ -584,6 +752,12 @@ class FCAMP(FlowCPSBase):
                     final_latent, prev_action=previous_action
                 ).view(n_envs, h, self.num_act)
                 action_abs_max = max(action_abs_max, float(action_chunk.abs().max().item()))
+                below = (self.action_low - action_chunk).clamp_min(0.0)
+                above = (action_chunk - self.action_high).clamp_min(0.0)
+                action_bound_violation_max = max(
+                    action_bound_violation_max,
+                    float(torch.maximum(below, above).max().item()),
+                )
 
                 actor_obs_buf[chunk_idx] = actor_obs_n
                 actor_obs_raw_buf[chunk_idx] = chunk_actor_raw
@@ -610,32 +784,69 @@ class FCAMP(FlowCPSBase):
                     next_obs, task_reward, done, info = env.step(action_t, auto_reset=False)
                     next_critic_obs = env.get_critic_observation()
 
-                    # Temporal discriminator prior uses post-action windows. Reset contributes
-                    # one real frame at age=0; legal D windows start at ages
-                    # 1..W, so early post-reset frames are sample-masked.
+                    # Reset installs a complete phase-matched demo predecessor
+                    # history.  This first post-action frame immediately forms
+                    # the same fixed-W endpoint window used everywhere else.
                     imitation_frame = info.get("imitation_frame")
                     if imitation_frame is None:
                         imitation_frame = env.get_imitation_policy_frame()
-                    self.imitation_history.push(imitation_frame)
                     alive_ids = alive_before.nonzero(as_tuple=False).squeeze(-1)
+                    intervention_edges = info.get("intervention_edge_mask")
+                    if not torch.is_tensor(intervention_edges):
+                        raise RuntimeError(
+                            "FCAMP environment did not report intervention_edge_mask"
+                        )
+                    intervention_edges = intervention_edges.bool()
+                    intervention_edge_buf[chunk_idx, :, frame_idx] = (
+                        intervention_edges & alive_before
+                    )
                     if alive_ids.numel() > 0:
-                        self.disc_frame_replay.push_frames(
+                        self.imitation_history.push(
                             imitation_frame.index_select(0, alive_ids),
-                            env_ids=alive_ids,
-                            episode_ids=env.episode_ids.index_select(0, alive_ids),
-                            reference_times=info["imitation_frame_phase_steps"].index_select(
-                                0, alive_ids
-                            ),
-                            ages=self.imitation_history.ages.index_select(0, alive_ids),
-                            update=int(getattr(self, "_fcamp_update_idx", 0)),
-                            stream=self.training_streams.stream_ids.index_select(
+                            alive_ids,
+                            intervention_after=intervention_edges.index_select(
                                 0, alive_ids
                             ),
                         )
+                    if not geometry_checked:
+                        # ``imitation_frame`` was captured before an interval
+                        # push while the returned simulator state is post-push.
+                        # Compare only untouched states so this is an exact
+                        # same-state geometry/feature-domain invariant.
+                        alignment_ids = (
+                            alive_before & ~intervention_edges
+                        ).nonzero(as_tuple=False).squeeze(-1)
+                        if alignment_ids.numel() > 0:
+                            aligned_frame = env.get_fcamp_fk_aligned_policy_frame(
+                                alignment_ids
+                            )
+                            alignment_error = (
+                                imitation_frame.index_select(0, alignment_ids)
+                                - aligned_frame
+                            ).abs()
+                            fk_alignment_abs_max = float(
+                                alignment_error.max().item()
+                            )
+                            fk_alignment_abs_sum = float(
+                                alignment_error.sum().item()
+                            )
+                            fk_alignment_count = int(alignment_error.numel())
+                            geometry_checked = True
+                            if fk_alignment_abs_max > 1.0e-4:
+                                raise RuntimeError(
+                                    "FCAMP expert/runtime 233-D geometry contract failed: "
+                                    f"max_abs={fk_alignment_abs_max:.6g}"
+                                )
                     active_float = alive_before.to(dtype=task_reward.dtype)
                     amp_reward_raw = torch.zeros_like(task_reward)
                     amp_logits = torch.zeros_like(task_reward)
-                    ready_mask = self.imitation_history.ready & alive_before
+                    dirty_ready = (
+                        self.imitation_history.ready
+                        & ~self.imitation_history.causal_ready
+                        & alive_before
+                    )
+                    dirty_window_excluded_count += int(dirty_ready.sum().item())
+                    ready_mask = self.imitation_history.causal_ready & alive_before
                     if bool(ready_mask.any()):
                         ready_ids = ready_mask.nonzero(as_tuple=False).squeeze(-1)
                         raw_window_frames = self.imitation_history.window(ready_ids)
@@ -658,6 +869,49 @@ class FCAMP(FlowCPSBase):
                         )
                         window_root_xy_abs_sum += window_view[..., :2].abs().sum()
                         window_root_xy_count += window_view.shape[0] * window_view.shape[1] * 2
+                        ready_streams = self.training_streams.stream_ids.index_select(
+                            0, ready_ids
+                        )
+                        ready_end_times = info[
+                            "imitation_frame_phase_steps"
+                        ].index_select(0, ready_ids)
+                        rounded_end_times = ready_end_times.float().round().to(
+                            dtype=torch.long
+                        )
+                        if not bool(
+                            torch.allclose(
+                                ready_end_times.to(dtype=torch.float32),
+                                rounded_end_times.float(),
+                                rtol=0.0,
+                                atol=1.0e-4,
+                            )
+                        ):
+                            raise RuntimeError(
+                                "FCAMP complete-window replay requires integer reference endpoints"
+                            )
+                        for stream_id in (PHASE0_STREAM, CURRICULUM_STREAM):
+                            local = ready_streams == stream_id
+                            if bool(local.any()):
+                                self.disc_window_replay.offer(
+                                    raw_window_frames[local],
+                                    end_times=rounded_end_times[local],
+                                    stream_id=stream_id,
+                                    dirty=torch.zeros(
+                                        int(local.sum().item()),
+                                        dtype=torch.bool,
+                                        device=device,
+                                    ),
+                                )
+                                current_window_buffer.offer(
+                                    raw_window_frames[local],
+                                    end_times=rounded_end_times[local],
+                                    stream_id=stream_id,
+                                    dirty=torch.zeros(
+                                        int(local.sum().item()),
+                                        dtype=torch.bool,
+                                        device=device,
+                                    ),
+                                )
                     amp_reward_credit = amp_reward_raw * amp_dt_scale
                     mixed_reward = (
                         task_weight * task_reward + amp_weight * amp_reward_credit
@@ -716,6 +970,18 @@ class FCAMP(FlowCPSBase):
                         alive_before & ~new_failure & ~new_motion_complete
                     )
                     trace_buf[chunk_idx, :, frame_idx] = alive_before & ~new_done
+                    # An interval push occurs after this endpoint was captured.
+                    # Task learning retains the domain-randomized transition;
+                    # style credit cannot bootstrap or trace across that
+                    # exogenous edge.
+                    amp_bootstrap_buf[chunk_idx, :, frame_idx] = (
+                        bootstrap_buf[chunk_idx, :, frame_idx]
+                        & ~intervention_edges
+                    )
+                    amp_trace_buf[chunk_idx, :, frame_idx] = (
+                        trace_buf[chunk_idx, :, frame_idx]
+                        & ~intervention_edges
+                    )
 
                     if frame_idx < h - 1:
                         next_context_raw = self._prefix_context_raw(
@@ -745,32 +1011,6 @@ class FCAMP(FlowCPSBase):
                         next_context_raw, update=False
                     )
 
-                    valid_ids = ready_mask.nonzero(as_tuple=False).squeeze(-1)
-                    if valid_ids.numel() > 0:
-                        select_ids, selected_streams = (
-                            self.training_streams.balanced_sample(
-                                valid_ids,
-                                current_keep_per_step,
-                            )
-                        )
-                        selected_windows = self.imitation_pipeline.flatten(
-                            self.imitation_history.window(select_ids)
-                        )
-                        current_disc_window_chunks.append(
-                            selected_windows.detach().to("cpu", dtype=torch.float32)
-                        )
-                        current_disc_end_time_chunks.append(
-                            info["imitation_frame_phase_steps"]
-                            .index_select(0, select_ids)
-                            .detach()
-                            .to("cpu", dtype=torch.long)
-                        )
-                        current_disc_stream_chunks.append(
-                            selected_streams.detach().to(
-                                "cpu",
-                                dtype=torch.int8,
-                            )
-                        )
                     self._record_train_episode_stats(
                         mixed_reward,
                         new_done,
@@ -797,10 +1037,14 @@ class FCAMP(FlowCPSBase):
                         reset_ids,
                         phase_indices=reset_phases,
                         reset_stream_ids=reset_streams,
+                        root_velocity_frame="link",
                     )
                     obs[reset_ids] = reset_obs
                     critic_obs = env.get_critic_observation()
-                    self._reset_imitation_history(env_ids=reset_ids)
+                    self._reset_imitation_history(
+                        phase_indices=reset_phases,
+                        env_ids=reset_ids,
+                    )
                     self.phase0_attempts.start(reset_ids)
 
             values = self._evaluate_prefix_values(context_buf)
@@ -818,6 +1062,41 @@ class FCAMP(FlowCPSBase):
                     0, 2, 1, *range(3, 3 + len(tail))
                 )
 
+        if not geometry_checked:
+            self.disc_window_replay.abort_update()
+            current_window_buffer.abort_update()
+            raise RuntimeError("FCAMP could not perform a same-state FK alignment check")
+        if bool((intervention_edge_buf & done_buf).any()):
+            self.disc_window_replay.abort_update()
+            current_window_buffer.abort_update()
+            raise RuntimeError("terminal FCAMP transitions must never receive an interval push")
+        if action_bound_violation_max > 1.0e-6:
+            self.disc_window_replay.abort_update()
+            current_window_buffer.abort_update()
+            raise RuntimeError(
+                "FCAMP actor emitted an action outside its configured policy command domain"
+            )
+        replay_commit_report = self.disc_window_replay.commit_update()
+        current_commit_report = current_window_buffer.commit_update()
+        current_disc_windows: list[torch.Tensor] = []
+        current_disc_end_times: list[torch.Tensor] = []
+        current_disc_stream_ids: list[torch.Tensor] = []
+        for stream_id in (PHASE0_STREAM, CURRICULUM_STREAM):
+            count = current_window_buffer.size(stream_id)
+            if count <= 0:
+                raise RuntimeError(
+                    f"FCAMP current-D stream {stream_id} has no clean complete window"
+                )
+            raw, ends = current_window_buffer.sample(
+                count,
+                stream_id=stream_id,
+                replacement=False,
+            )
+            current_disc_windows.append(self.imitation_pipeline.flatten(raw))
+            current_disc_end_times.append(ends)
+            current_disc_stream_ids.append(
+                torch.full((count,), stream_id, dtype=torch.int8)
+            )
         self._obs = obs
         self._critic_obs = critic_obs
         rollout = {
@@ -834,20 +1113,15 @@ class FCAMP(FlowCPSBase):
             "next_values": next_values,
             "valid": valid_buf,
             "amp_valid": amp_valid_buf,
+            "intervention_edge": intervention_edge_buf,
             "current_disc_windows": (
-                torch.cat(current_disc_window_chunks, dim=0)
-                if current_disc_window_chunks
-                else torch.empty((0, self.imitation_window_dim), dtype=torch.float32)
+                torch.cat(current_disc_windows, dim=0)
             ),
             "current_disc_end_times": (
-                torch.cat(current_disc_end_time_chunks, dim=0)
-                if current_disc_end_time_chunks
-                else torch.empty((0,), dtype=torch.long)
+                torch.cat(current_disc_end_times, dim=0)
             ),
             "current_disc_stream_ids": (
-                torch.cat(current_disc_stream_chunks, dim=0)
-                if current_disc_stream_chunks
-                else torch.empty((0,), dtype=torch.int8)
+                torch.cat(current_disc_stream_ids, dim=0)
             ),
             "imitation_window_age": amp_age_buf,
             "done": done_buf,
@@ -857,6 +1131,8 @@ class FCAMP(FlowCPSBase):
             "terminal_phase": terminal_phase_buf,
             "bootstrap_mask": bootstrap_buf,
             "trace_mask": trace_buf,
+            "amp_bootstrap_mask": amp_bootstrap_buf,
+            "amp_trace_mask": amp_trace_buf,
             "task_reward": task_reward_buf,
             "amp_reward_raw": amp_reward_raw_buf,
             "amp_reward_credit": amp_reward_credit_buf,
@@ -868,6 +1144,14 @@ class FCAMP(FlowCPSBase):
             "stream_ids": self.training_streams.stream_ids,
             "collection_start_phases": collection_start_phases,
             "action_abs_max": action_abs_max,
+            "action_bound_violation_max": action_bound_violation_max,
+            "fk_alignment_abs_max": fk_alignment_abs_max,
+            "fk_alignment_abs_mean": (
+                fk_alignment_abs_sum / max(fk_alignment_count, 1)
+            ),
+            "dirty_window_excluded_count": float(dirty_window_excluded_count),
+            "replay_commit_report": replay_commit_report,
+            "current_commit_report": current_commit_report,
             "window_latest_root_xy_abs_max": float(
                 window_latest_root_xy_abs_max.item()
             ),
@@ -918,6 +1202,26 @@ class FCAMP(FlowCPSBase):
         bootstrap_time = chronological(rollout["bootstrap_mask"])
         trace_time = chronological(rollout["trace_mask"])
         valid_time = chronological(rollout["valid"])
+        amp_valid_time = chronological(rollout.get("amp_valid", rollout["valid"]))
+        channel_valid_time = torch.stack(
+            (valid_time, amp_valid_time), dim=-1
+        )
+        channel_bootstrap_time = torch.stack(
+            (
+                bootstrap_time,
+                chronological(
+                    rollout.get("amp_bootstrap_mask", rollout["bootstrap_mask"])
+                ),
+            ),
+            dim=-1,
+        )
+        channel_trace_time = torch.stack(
+            (
+                trace_time,
+                chronological(rollout.get("amp_trace_mask", rollout["trace_mask"])),
+            ),
+            dim=-1,
+        )
         # Dual GAE is vectorized over independent environments.  Compute it once
         # without normalization so task/style critic targets remain raw.
         credit = compute_dual_channel_gae(
@@ -932,6 +1236,9 @@ class FCAMP(FlowCPSBase):
             chunk_horizon=h,
             normalization="none",
             actor_weights=(task_weight, amp_weight),
+            channel_valid_mask=channel_valid_time,
+            channel_bootstrap_mask=channel_bootstrap_time,
+            channel_trace_mask=channel_trace_time,
         )
         if self.cfg.credit.mode == "chunk_shared":
             credit = with_chunk_shared_actor_credit(
@@ -975,6 +1282,9 @@ class FCAMP(FlowCPSBase):
         rollout["mixed_advantage"] = chunk_layout(credit.mixed_advantage)
         rollout["value_targets"] = chunk_layout(credit.value_targets)
         rollout["td_errors"] = chunk_layout(credit.td_errors)
+        if credit.channel_valid_mask is None:
+            raise RuntimeError("FCAMP dual credit did not return channel validity")
+        rollout["channel_valid"] = chunk_layout(credit.channel_valid_mask)
 
     # ------------------------------------------------------------------ #
     # Optimizers
@@ -1333,6 +1643,10 @@ class FCAMP(FlowCPSBase):
         contexts = rollout["contexts"].reshape(-1, self.prefix_context_dim)
         targets = rollout["value_targets"].reshape(-1, 2)
         valid = rollout["valid"].reshape(-1)
+        channel_valid = rollout["channel_valid"].reshape(-1, 2).bool()
+        if not torch.equal(channel_valid[:, 0], valid.bool()):
+            raise RuntimeError("FCAMP task critic validity diverged from rollout validity")
+        amp_valid = channel_valid[:, 1]
         env_stream_ids = rollout.get("stream_ids")
         if env_stream_ids is None:
             env_stream_ids = torch.full(
@@ -1351,15 +1665,23 @@ class FCAMP(FlowCPSBase):
         if valid_idx.numel() == 0:
             raise RuntimeError("FCAMP rollout has no valid critic samples")
         local_specs = self._stream_specs(valid_labels)
-        stream_specs = [
-            (
-                name,
-                stream_id,
-                objective_weight,
-                valid_idx.index_select(0, local_indices),
+        stream_specs = []
+        for name, stream_id, objective_weight, local_indices in local_specs:
+            task_indices = valid_idx.index_select(0, local_indices)
+            amp_indices = task_indices[amp_valid.index_select(0, task_indices)]
+            if amp_indices.numel() == 0:
+                raise RuntimeError(
+                    f"FCAMP {name} stream has no clean AMP critic targets"
+                )
+            stream_specs.append(
+                (
+                    name,
+                    stream_id,
+                    objective_weight,
+                    task_indices,
+                    amp_indices,
+                )
             )
-            for name, stream_id, objective_weight, local_indices in local_specs
-        ]
         num_mini_batches = max(1, int(self.cfg.num_mini_batches))
         micro_batch_size = self._policy_micro_batch_size(
             self._policy_mini_batch_size(int(valid_idx.numel()))
@@ -1369,49 +1691,68 @@ class FCAMP(FlowCPSBase):
         totals = {"task": 0.0, "amp": 0.0, "grad": 0.0}
         stream_totals = {
             name: {"task": 0.0, "amp": 0.0}
-            for name, _, _, _ in stream_specs
+            for name, _, _, _, _ in stream_specs
         }
-        stream_steps = {name: 0 for name, _, _, _ in stream_specs}
+        stream_task_steps = {name: 0 for name, _, _, _, _ in stream_specs}
+        stream_amp_steps = {name: 0 for name, _, _, _, _ in stream_specs}
         steps = 0
         for _ in range(int(self.cfg.policy_epochs)):
-            stream_splits: dict[str, tuple[float, tuple[torch.Tensor, ...]]] = {}
-            for name, _, objective_weight, indices in stream_specs:
-                shuffled = indices.index_select(
+            stream_splits: dict[
+                str,
+                tuple[
+                    float,
+                    tuple[torch.Tensor, ...],
+                    tuple[torch.Tensor, ...],
+                ],
+            ] = {}
+            for name, _, objective_weight, task_indices, amp_indices in stream_specs:
+                shuffled_task = task_indices.index_select(
                     0,
-                    torch.randperm(indices.numel(), device=indices.device),
+                    torch.randperm(
+                        task_indices.numel(), device=task_indices.device
+                    ),
+                )
+                shuffled_amp = amp_indices.index_select(
+                    0,
+                    torch.randperm(
+                        amp_indices.numel(), device=amp_indices.device
+                    ),
                 )
                 stream_splits[name] = (
                     objective_weight,
-                    torch.tensor_split(shuffled, num_mini_batches),
+                    torch.tensor_split(shuffled_task, num_mini_batches),
+                    torch.tensor_split(shuffled_amp, num_mini_batches),
                 )
             for mini_batch_index in range(num_mini_batches):
                 parts = [
                     (
                         name,
                         objective_weight,
-                        splits[mini_batch_index],
+                        task_splits[mini_batch_index],
+                        amp_splits[mini_batch_index],
                     )
                     for name, (
                         objective_weight,
-                        splits,
+                        task_splits,
+                        amp_splits,
                     ) in stream_splits.items()
-                    if splits[mini_batch_index].numel() > 0
+                    if task_splits[mini_batch_index].numel() > 0
                 ]
                 if not parts:
                     continue
                 self.critic_optimizer.zero_grad(set_to_none=True)
                 combined_task = 0.0
                 combined_amp = 0.0
-                for name, objective_weight, idx in parts:
-                    denominator = float(idx.numel())
+                for name, objective_weight, task_idx, amp_idx in parts:
+                    task_denominator = float(task_idx.numel())
                     task_sum = 0.0
                     amp_sum = 0.0
                     for micro_start in range(
                         0,
-                        idx.numel(),
+                        task_idx.numel(),
                         micro_batch_size,
                     ):
-                        sub = idx[
+                        sub = task_idx[
                             micro_start : micro_start + micro_batch_size
                         ]
                         loss_channels = self.critic.flow_matching_loss(
@@ -1420,21 +1761,45 @@ class FCAMP(FlowCPSBase):
                             fm_samples=self.flow_critic_fm_samples,
                         )
                         task_loss_sum = loss_channels[:, 0].sum()
-                        amp_loss_sum = loss_channels[:, 1].sum()
-                        loss = objective_weight * (
-                            task_weight * task_loss_sum
-                            + amp_weight * amp_loss_sum
-                        ) / denominator
-                        loss.backward()
+                        (
+                            objective_weight
+                            * task_weight
+                            * task_loss_sum
+                            / task_denominator
+                        ).backward()
                         task_sum += float(task_loss_sum.item())
-                        amp_sum += float(amp_loss_sum.item())
-                    task_mean = task_sum / denominator
-                    amp_mean = amp_sum / denominator
+                    task_mean = task_sum / task_denominator
+                    stream_task_steps[name] += 1
+                    amp_mean = 0.0
+                    if amp_idx.numel() > 0:
+                        amp_denominator = float(amp_idx.numel())
+                        for micro_start in range(
+                            0,
+                            amp_idx.numel(),
+                            micro_batch_size,
+                        ):
+                            sub = amp_idx[
+                                micro_start : micro_start + micro_batch_size
+                            ]
+                            loss_channels = self.critic.flow_matching_loss(
+                                contexts[sub],
+                                targets[sub],
+                                fm_samples=self.flow_critic_fm_samples,
+                            )
+                            amp_loss_sum = loss_channels[:, 1].sum()
+                            (
+                                objective_weight
+                                * amp_weight
+                                * amp_loss_sum
+                                / amp_denominator
+                            ).backward()
+                            amp_sum += float(amp_loss_sum.item())
+                        amp_mean = amp_sum / amp_denominator
+                        stream_amp_steps[name] += 1
                     combined_task += objective_weight * task_mean
                     combined_amp += objective_weight * amp_mean
                     stream_totals[name]["task"] += task_mean
                     stream_totals[name]["amp"] += amp_mean
-                    stream_steps[name] += 1
                 grad = nn.utils.clip_grad_norm_(
                     self.critic.parameters(), float(self.cfg.max_grad_norm)
                 )
@@ -1450,17 +1815,20 @@ class FCAMP(FlowCPSBase):
             "critic/grad_norm": totals["grad"] / denom,
             "critic/lr": float(self.critic_learning_rate),
             "critic/optimizer_steps": float(steps),
+            "critic/task_valid_count": float(valid.sum().item()),
+            "critic/amp_valid_count": float(amp_valid.sum().item()),
         }
-        for name, _, objective_weight, _ in stream_specs:
-            stream_denom = max(stream_steps[name], 1)
+        for name, _, objective_weight, _, _ in stream_specs:
             metrics[
                 f"stream/{name}/critic_objective_weight"
             ] = objective_weight
             metrics[f"stream/{name}/critic_task_flow_loss"] = (
-                stream_totals[name]["task"] / stream_denom
+                stream_totals[name]["task"]
+                / max(stream_task_steps[name], 1)
             )
             metrics[f"stream/{name}/critic_amp_flow_loss"] = (
-                stream_totals[name]["amp"] / stream_denom
+                stream_totals[name]["amp"]
+                / max(stream_amp_steps[name], 1)
             )
         return metrics
 
@@ -1550,9 +1918,8 @@ class FCAMP(FlowCPSBase):
         frame_parts: list[torch.Tensor] = []
         end_parts: list[torch.Tensor] = []
         for stream_id, count in self._disc_stream_quotas(batch_size):
-            frames, ends = self.disc_frame_replay.sample_windows(
+            frames, ends = self.disc_window_replay.sample(
                 count,
-                self.imitation_history_steps,
                 stream_id=stream_id,
             )
             if frames.shape[0] != count:
@@ -1564,7 +1931,7 @@ class FCAMP(FlowCPSBase):
         return torch.cat(frame_parts, dim=0), torch.cat(end_parts, dim=0)
 
     def _expert_flat_at_end_times(self, end_times_cpu: torch.Tensor) -> torch.Tensor:
-        raw = self.env.get_imitation_demo_windows_at_end_indices(
+        raw = self.env.motion.get_fcamp_demo_windows_at_end_indices(
             end_times_cpu.to(device=self.env.device, dtype=torch.long),
             self.imitation_history_steps,
             flatten=False,
@@ -1607,6 +1974,7 @@ class FCAMP(FlowCPSBase):
         update_idx: int,
         *,
         rollout: dict,
+        commit_normalizer_before_training: bool = False,
     ) -> dict[str, float]:
         current_windows_cpu = rollout["current_disc_windows"]
         current_end_times_cpu = rollout["current_disc_end_times"]
@@ -1681,8 +2049,8 @@ class FCAMP(FlowCPSBase):
             metrics.update(
                 {
                     key.replace("replay/", "disc_replay/"): value
-                    for key, value in self.disc_frame_replay.statistics(
-                        current_step=update_idx
+                    for key, value in self.disc_window_replay.statistics(
+                        current_update=update_idx
                     ).items()
                 }
             )
@@ -1701,6 +2069,14 @@ class FCAMP(FlowCPSBase):
             current_stream_ids_cpu,
             min(current_count, batch_size * update_steps),
         )
+        committed_before_training = False
+        if commit_normalizer_before_training:
+            # The first discriminator must not see raw, unscaled 3728-D input.
+            # Commit matched expert/policy moments first; the rollout itself is
+            # discarded, so no actor can consume its random-D reward snapshot.
+            self.disc_normalizer.unfreeze()
+            committed_before_training = bool(self.disc_normalizer.commit())
+            self.disc_normalizer.freeze()
         totals: dict[str, float] = {}
         grad_total = 0.0
         canonical_root_xy_max = {"current": 0.0, "replay": 0.0, "expert": 0.0}
@@ -1770,9 +2146,12 @@ class FCAMP(FlowCPSBase):
             for key, value in output.metrics.items():
                 totals[key] = totals.get(key, 0.0) + float(value.item())
         self.disc_version += 1
-        self.disc_normalizer.unfreeze()
-        committed = self.disc_normalizer.commit()
-        self.disc_normalizer.freeze()
+        if commit_normalizer_before_training:
+            committed = committed_before_training
+        else:
+            self.disc_normalizer.unfreeze()
+            committed = self.disc_normalizer.commit()
+            self.disc_normalizer.freeze()
         denom = max(update_steps, 1)
         metrics = {key: value / denom for key, value in totals.items()}
         metrics.update(
@@ -1783,6 +2162,10 @@ class FCAMP(FlowCPSBase):
                 "disc/version": float(self.disc_version),
                 "disc/input_version": float(input_version),
                 "disc_norm/committed_this_update": float(committed),
+                "disc_norm/committed_before_training": float(
+                    commit_normalizer_before_training
+                    and committed_before_training
+                ),
                 "disc_norm/policy_samples_update": float(normalizer_samples),
                 "disc_norm/expert_samples_update": float(normalizer_samples),
                 "disc/current_count": float(current_count),
@@ -1813,7 +2196,9 @@ class FCAMP(FlowCPSBase):
         metrics.update(
             {
                 key.replace("replay/", "disc_replay/"): value
-                for key, value in self.disc_frame_replay.statistics(current_step=update_idx).items()
+                for key, value in self.disc_window_replay.statistics(
+                    current_update=update_idx
+                ).items()
             }
         )
         return metrics
@@ -1906,6 +2291,7 @@ class FCAMP(FlowCPSBase):
         stream_ids = rollout["stream_ids"]
         valid = rollout["valid"]
         amp_valid = rollout["amp_valid"]
+        channel_valid = rollout["channel_valid"]
         done = rollout["done"]
         failure = rollout["failure"]
         timeout = rollout["timeout"]
@@ -2057,6 +2443,7 @@ class FCAMP(FlowCPSBase):
 
         valid = rollout["valid"]
         amp_valid = rollout["amp_valid"]
+        channel_valid = rollout["channel_valid"]
         metrics: dict[str, float] = {}
         metrics.update(actor_metrics)
         metrics.update(critic_metrics)
@@ -2069,7 +2456,13 @@ class FCAMP(FlowCPSBase):
         metrics.update(_masked_stats("reward/amp_credit", rollout["amp_reward_credit"], amp_valid))
         metrics.update(_masked_stats("reward/mixed", rollout["mixed_reward"], valid))
         metrics.update(_masked_stats("credit/task_adv", rollout["channel_advantages"][..., 0], valid))
-        metrics.update(_masked_stats("credit/amp_adv", rollout["channel_advantages"][..., 1], valid))
+        metrics.update(
+            _masked_stats(
+                "credit/amp_adv",
+                rollout["channel_advantages"][..., 1],
+                channel_valid[..., 1],
+            )
+        )
         weighted_channel_advantage = (
             float(self.cfg.credit.task_weight)
             * rollout["channel_advantages"][..., 0]
@@ -2102,14 +2495,26 @@ class FCAMP(FlowCPSBase):
             _masked_stats(
                 "credit/amp_actor_component",
                 rollout["actor_advantage_components"][..., 1],
-                valid,
+                channel_valid[..., 1],
             )
         )
         metrics.update(_masked_stats("credit/actor_adv", rollout["advantages"], valid))
         metrics.update(_masked_stats("critic/task_value", rollout["values"][..., 0], valid))
-        metrics.update(_masked_stats("critic/amp_value", rollout["values"][..., 1], valid))
+        metrics.update(
+            _masked_stats(
+                "critic/amp_value",
+                rollout["values"][..., 1],
+                channel_valid[..., 1],
+            )
+        )
         metrics.update(_masked_stats("critic/task_target", rollout["value_targets"][..., 0], valid))
-        metrics.update(_masked_stats("critic/amp_target", rollout["value_targets"][..., 1], valid))
+        metrics.update(
+            _masked_stats(
+                "critic/amp_target",
+                rollout["value_targets"][..., 1],
+                channel_valid[..., 1],
+            )
+        )
         metrics.update(
             style_reward_statistics(
                 rollout["amp_logits"][amp_valid],
@@ -2121,6 +2526,7 @@ class FCAMP(FlowCPSBase):
         )
         for frame_idx in range(self.horizon_h):
             frame_valid = valid[..., frame_idx]
+            frame_amp_valid = channel_valid[..., frame_idx, 1]
             metrics.update(
                 _masked_stats(
                     f"credit/frame_{frame_idx}_task_adv",
@@ -2132,7 +2538,7 @@ class FCAMP(FlowCPSBase):
                 _masked_stats(
                     f"credit/frame_{frame_idx}_amp_adv",
                     rollout["channel_advantages"][..., frame_idx, 1],
-                    frame_valid,
+                    frame_amp_valid,
                 )
             )
             metrics.update(
@@ -2146,7 +2552,7 @@ class FCAMP(FlowCPSBase):
                 _masked_stats(
                     f"credit/frame_{frame_idx}_amp_actor_component",
                     rollout["actor_advantage_components"][..., frame_idx, 1],
-                    frame_valid,
+                    frame_amp_valid,
                 )
             )
         metrics.update(self.disc_normalizer.statistics())
@@ -2170,6 +2576,35 @@ class FCAMP(FlowCPSBase):
                 "phase/start_min": float(rollout["collection_start_phases"].min().item()),
                 "phase/start_max": float(rollout["collection_start_phases"].max().item()),
                 "act/abs_max": float(rollout["action_abs_max"]),
+                "act/policy_bound_violation_max": float(
+                    rollout["action_bound_violation_max"]
+                ),
+                "disc_contract/fk_alignment_abs_max": float(
+                    rollout["fk_alignment_abs_max"]
+                ),
+                "disc_contract/fk_alignment_abs_mean": float(
+                    rollout["fk_alignment_abs_mean"]
+                ),
+                "disc_contract/dirty_window_excluded_count": float(
+                    rollout["dirty_window_excluded_count"]
+                ),
+                "disc_contract/replay_dirty_insert_count": float(
+                    metrics.get("disc_replay/dirty_insert_count", -1.0)
+                ),
+                "intervention/edge_count": float(
+                    rollout["intervention_edge"].sum().item()
+                ),
+                "intervention/amp_bootstrap_cut_count": float(
+                    (
+                        rollout["bootstrap_mask"]
+                        & ~rollout["amp_bootstrap_mask"]
+                    ).sum().item()
+                ),
+                "intervention/amp_trace_cut_count": float(
+                    (
+                        rollout["trace_mask"] & ~rollout["amp_trace_mask"]
+                    ).sum().item()
+                ),
                 "disc_window/policy_latest_root_xy_abs_max": float(
                     rollout["window_latest_root_xy_abs_max"]
                 ),
@@ -2192,7 +2627,10 @@ class FCAMP(FlowCPSBase):
                 "timing/disc_update_s": float(disc_time),
                 "timing/update_s": float(time.perf_counter() - update_start),
                 "system/primitive_steps": float(
-                    update_idx * int(self.cfg.rollout_env_steps) * self.env.num_envs
+                    self.warmup_env_transitions
+                    + update_idx
+                    * int(self.cfg.rollout_env_steps)
+                    * self.env.num_envs
                 ),
                 "system/cuda_peak_allocated_gib": float(
                     torch.cuda.max_memory_allocated(self.env.device) / (1024**3)
@@ -2286,6 +2724,20 @@ class FCAMP(FlowCPSBase):
             flush=True,
         )
         print(
+            "[FCAMP_CONTRACT] "
+            f"fk_max={metrics.get('disc_contract/fk_alignment_abs_max', float('nan')):.3e} "
+            f"policy_action_violation={metrics.get('act/policy_bound_violation_max', float('nan')):.3e} "
+            f"dirty_excluded={metrics.get('disc_contract/dirty_window_excluded_count', 0.0):.0f} "
+            f"replay_dirty={metrics.get('disc_contract/replay_dirty_insert_count', -1.0):.0f} "
+            f"push_edges={metrics.get('intervention/edge_count', 0.0):.0f} "
+            f"amp_trace_cuts={metrics.get('intervention/amp_trace_cut_count', 0.0):.0f} "
+            f"replay_phase0={metrics.get('disc_replay/stream_0_size', 0.0):.0f}/"
+            f"{metrics.get('disc_replay/stream_0_capacity', 0.0):.0f} "
+            f"replay_curr={metrics.get('disc_replay/stream_1_size', 0.0):.0f}/"
+            f"{metrics.get('disc_replay/stream_1_capacity', 0.0):.0f}",
+            flush=True,
+        )
+        print(
             f"[TIME] collect={metrics['timing/collect_s']:.3f}s "
             f"actor={metrics['timing/actor_update_s']:.3f}s "
             f"critic={metrics['timing/critic_update_s']:.3f}s "
@@ -2320,7 +2772,7 @@ class FCAMP(FlowCPSBase):
             f"[STYLE_PRIOR] discriminator=standard_mlp hidden={list(self.cfg.amp.hidden_dims)} "
             f"BCE=True GP={self.cfg.amp.grad_penalty} replay={self.cfg.amp.replay_size} "
             f"EMA=False policy_conditioning=False motion_end_terminal=True "
-            f"replay_mode=frame_trajectory fcamp_schema=6 "
+            f"replay_mode=complete_window_stratified fcamp_schema=8 "
             f"phase0_trajectory_attempt_stream={self.cfg.streams.phase0_fraction:.2f}",
             flush=True,
         )
