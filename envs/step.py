@@ -68,42 +68,20 @@ class MimicStepMixin:
         motion_resample_mask = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
-        beyondmimic_command_order = (
-            getattr(self, "termination_mode", "tracking") == "beyondmimic"
-            and getattr(self, "motion_end_behavior", "hold_last")
-            == "resample_command"
-            and not self.terminate_on_motion_end
-        )
         self.episode_steps += 1
-        if beyondmimic_command_order:
-            # Official ManagerBasedRLEnv computes termination/reward against
-            # the command observed by the actor. MotionCommand advances only
-            # afterwards, immediately before the next observation.
-            self._motion_end_mask = phase_start_steps >= (
-                self.motion.num_frames - 1
-            )
-            reference_phase_steps = phase_start_steps
-        else:
-            # Existing common MimicKit path uses the post-transition reference.
-            self._motion_end_mask = next_phase_steps >= (
-                self.motion.num_frames - 1
-            )
-            reference_phase_steps = torch.clamp(
-                next_phase_steps, max=self.motion.num_frames - 1
-            )
-            self.phase_steps = reference_phase_steps
+        self._motion_end_mask = next_phase_steps >= (
+            self.motion.num_frames - 1
+        )
+        reference_phase_steps = torch.clamp(
+            next_phase_steps, max=self.motion.num_frames - 1
+        )
+        self.phase_steps = reference_phase_steps
 
         termination_phase_steps = reference_phase_steps.clone()
-        if beyondmimic_command_order:
-            done, done_terms, debug_terms = self.compute_termination()
-            reward, reward_terms = self.compute_reward(
-                applied_actions, previous_action
-            )
-        else:
-            reward, reward_terms = self.compute_reward(
-                applied_actions, previous_action
-            )
-            done, done_terms, debug_terms = self.compute_termination()
+        reward, reward_terms = self.compute_reward(
+            applied_actions, previous_action
+        )
+        done, done_terms, debug_terms = self.compute_termination()
         if reference_dt is not None:
             reward = reward * reference_frame_delta.to(dtype=reward.dtype)
             reward_terms = {
@@ -120,52 +98,21 @@ class MimicStepMixin:
         # Capture the true post-action state before any optional reset.  FCAMP
         # normally disables auto-reset within a chunk, while this also makes the
         # semantics correct for evaluation code that uses auto_reset=True.
-        if beyondmimic_command_order:
-            imitation_frame = None
-            amp_policy_observation = None
-            add_policy_disc_frame = None
-            add_demo_disc_frame = None
-            add_policy_observation = None
-        else:
-            imitation_frame = self.get_imitation_policy_frame()
-            amp_policy_observation = self.get_amp_policy_observation()
-            add_policy_disc_frame = self.get_add_policy_disc_frame()
-            add_demo_disc_frame = self.get_add_demo_disc_frame(
-                reference_phase_steps
-            )
-            add_policy_observation = self.get_add_policy_observation()
+        imitation_frame = self.get_imitation_policy_frame()
         reset_env_ids = torch.empty(0, dtype=torch.long, device=self.device)
         reset_phase_indices = torch.empty(0, dtype=torch.long, device=self.device)
-
 
         tracking_failure = done_terms["anchor_pos_bad"] | done_terms["anchor_ori_bad"] | done_terms["ee_body_bad"]
         self._record_adaptive_failures(tracking_failure, termination_phase_steps)
 
         if auto_reset and bool(done.any()):
-            if not beyondmimic_command_order:
-                terminal_observation = self.get_observation().clone()
-                terminal_critic_observation = self.get_critic_observation().clone()
+            terminal_observation = self.get_observation().clone()
+            terminal_critic_observation = self.get_critic_observation().clone()
             env_ids = done.nonzero(as_tuple=False).squeeze(-1)
             reset_phases = self.sample_phase_indices(env_ids.numel(), horizon=max(1, reset_horizon))
-            if beyondmimic_command_order:
-                self._reset_env_state(env_ids, phase_indices=reset_phases)
-            else:
-                self.reset_envs(env_ids, phase_indices=reset_phases)
+            self.reset_envs(env_ids, phase_indices=reset_phases)
             reset_env_ids = env_ids
             reset_phase_indices = reset_phases
-
-        if beyondmimic_command_order:
-            # This mirrors CommandManager.compute after reset handling. Done
-            # envs advance from their newly sampled command; surviving envs
-            # advance from the command used for this transition.
-            self.phase_steps += reference_frame_delta.to(
-                dtype=self.phase_steps.dtype
-            )
-            motion_wrap_env_ids, motion_wrap_phase_indices = (
-                self._resample_finished_motions()
-            )
-            motion_resample_mask[motion_wrap_env_ids] = True
-            self._update_beyondmimic_relative_targets()
 
         if (
             not self.terminate_on_motion_end
@@ -178,7 +125,6 @@ class MimicStepMixin:
             # MimicKit AMP disables motion-end termination without silently
             # reinitializing the character; reference queries clamp at the end.
             self.phase_steps[not_reset] = next_phase_steps[not_reset]
-
 
         self._fold_adaptive_sampler()
 
@@ -209,13 +155,8 @@ class MimicStepMixin:
             "motion_resample_mask": motion_resample_mask,
             "interval_push_mask": self._last_interval_push_mask.clone(),
             "intervention_edge_mask": intervention_edge_mask,
+            "imitation_frame": imitation_frame,
         }
-        if imitation_frame is not None:
-            info["imitation_frame"] = imitation_frame
-            info["amp_policy_observation"] = amp_policy_observation
-            info["add_policy_disc_frame"] = add_policy_disc_frame
-            info["add_demo_disc_frame"] = add_demo_disc_frame
-            info["add_policy_observation"] = add_policy_observation
         if terminal_observation is not None:
             info["final_observation"] = terminal_observation
         if terminal_critic_observation is not None:
@@ -239,20 +180,7 @@ class MimicStepMixin:
                 f"got {tuple(eligible_mask.shape)}"
             )
         eligible_mask = eligible_mask.to(device=self.device, dtype=torch.bool)
-        if self.beyondmimic_global_push_timer:
-            # IsaacLab 2.1.0 keeps plain-function interval event timers across
-            # episode resets. EventManager subtracts first, then uses a strict
-            # < 1e-6 comparison and samples the next interval before invoking
-            # push_by_setting_velocity.
-            self.push_time_left -= self.dt
-            due_env_ids = torch.where(self.push_time_left < 1.0e-6)[0]
-            if due_env_ids.numel() > 0:
-                low, high = self._push_interval_time_range
-                self.push_time_left[due_env_ids] = low + (high - low) * torch.rand(
-                    due_env_ids.numel(), device=self.device
-                )
-        else:
-            due_env_ids = torch.where(self.episode_steps >= self.next_push_step)[0]
+        due_env_ids = torch.where(self.episode_steps >= self.next_push_step)[0]
         if due_env_ids.numel() > 0:
             due_env_ids = due_env_ids[
                 eligible_mask.index_select(0, due_env_ids)
@@ -285,21 +213,18 @@ class MimicStepMixin:
                 root_velocity, env_ids=due_env_ids
             )
 
-        if not self.beyondmimic_global_push_timer:
-            min_interval, max_interval = self.push_interval_step_range
-            self.next_push_step[due_env_ids] = self.episode_steps[due_env_ids] + torch.randint(
-                min_interval,
-                max_interval + 1,
-                (due_env_ids.numel(),),
-                dtype=torch.long,
-                device=self.device,
-            )
+        min_interval, max_interval = self.push_interval_step_range
+        self.next_push_step[due_env_ids] = self.episode_steps[due_env_ids] + torch.randint(
+            min_interval,
+            max_interval + 1,
+            (due_env_ids.numel(),),
+            dtype=torch.long,
+            device=self.device,
+        )
         return self._last_interval_push_mask.clone()
 
     def _reset_interval_push_schedule(self, env_ids: torch.Tensor) -> None:
         self.first_push_step[env_ids] = -1
-        if self.beyondmimic_global_push_timer:
-            return
         min_push, max_push = self.push_interval_step_range
         self.next_push_step[env_ids] = (
             self.episode_steps.index_select(0, env_ids)

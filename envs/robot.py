@@ -13,7 +13,6 @@ from isaaclab.sim import SimulationContext
 from .spec import (
     G1SceneConfig,
     G1_MIMIC_ACTION_SCALE_VALUES,
-    BEYONDMIMIC_PUSH_INTERVAL_SECONDS,
     PUSH_INTERVAL_STEP_RANGE,
     STARTUP_BASE_COM_RANGE,
     STARTUP_JOINT_DEFAULT_POS_RANGE,
@@ -46,9 +45,6 @@ class G1Env:
         self._render_step_index = 0
         self.render = render
         self.render_every = max(1, int(render_every))
-        self._uses_beyondmimic_randomization_order = (
-            cfg.reset_phase_sampling == "beyondmimic"
-        )
 
         sim_cfg = sim_utils.SimulationCfg(
             device=cfg.device,
@@ -133,31 +129,18 @@ class G1Env:
         self._policy_action_low: torch.Tensor | None = None
         self._policy_action_high: torch.Tensor | None = None
         self._action_space = self._build_action_space()
-        self.beyondmimic_global_push_timer = (
-            cfg.reset_phase_sampling == "beyondmimic"
-        )
         self._push_interval_step_range = PUSH_INTERVAL_STEP_RANGE
-        self._push_interval_time_range = BEYONDMIMIC_PUSH_INTERVAL_SECONDS
         min_push, max_push = self._push_interval_step_range
-        if self.beyondmimic_global_push_timer:
-            low, high = self._push_interval_time_range
-            self.push_time_left = low + (high - low) * torch.rand(
-                self.num_envs, device=self.device
-            )
-            # Kept only for the common validation-state schema. BeyondMimic
-            # schedules pushes exclusively with the continuous timer above.
-            self.next_push_step = torch.ceil(self.push_time_left / self.dt).long()
-        else:
-            self.push_time_left = torch.full(
-                (self.num_envs,), float("inf"), device=self.device
-            )
-            self.next_push_step = torch.randint(
-                min_push,
-                max_push + 1,
-                (self.num_envs,),
-                dtype=torch.long,
-                device=self.device,
-            )
+        self.push_time_left = torch.full(
+            (self.num_envs,), float("inf"), device=self.device
+        )
+        self.next_push_step = torch.randint(
+            min_push,
+            max_push + 1,
+            (self.num_envs,),
+            dtype=torch.long,
+            device=self.device,
+        )
         # per-env episode-step of the FIRST interval push (-1 = not yet pushed).
         # Used by validation to decompose the 50-100 cliff into "died before
         # push" (early collapse) vs "pushed then died" (push-recovery failure).
@@ -257,15 +240,9 @@ class G1Env:
         return joint_pos, joint_vel
 
     def _apply_official_startup_events(self) -> None:
-        if self._uses_beyondmimic_randomization_order:
-            # BeyondMimic's EventManager preserves EventCfg declaration order.
-            self._randomize_rigid_body_material()
-            self._randomize_joint_default_pos()
-            self._randomize_torso_com()
-        else:
-            self._randomize_joint_default_pos()
-            self._randomize_torso_com()
-            self._randomize_rigid_body_material()
+        self._randomize_joint_default_pos()
+        self._randomize_torso_com()
+        self._randomize_rigid_body_material()
 
     def _randomize_joint_default_pos(self) -> None:
         low, high = STARTUP_JOINT_DEFAULT_POS_RANGE

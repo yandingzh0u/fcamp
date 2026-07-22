@@ -5,9 +5,13 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Training artifacts are local-only. Checkpoints routinely exceed hosting
-# limits; each run already contains its own resolved config/source snapshot.
-runs/
+# Training artifacts are local-only by default.
+runs/*
+# Keep the FCAMP baseline run: logs + last.pt only (no update_*.pt).
+!runs/fcamp_2_fix_bugs/
+!runs/fcamp_2_fix_bugs/**
+runs/fcamp_2_fix_bugs/checkpoints/update_*.pt
+runs/fcamp_2_fix_bugs/source_snapshot.tar.gz
 
 .vscode/
 .idea/
@@ -15,3 +19,6 @@ runs/
 
 .DS_Store
 Thumbs.db
+
+# last.pt is kept locally; GitHub LFS budget is exhausted (file ~2.9G).
+runs/fcamp_2_fix_bugs/checkpoints/last.pt

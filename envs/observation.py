@@ -12,115 +12,11 @@ from isaaclab.utils.math import (
 )
 
 from .spec import CRITIC_OBS_DIM, OBS_DIM
-from .imitation_data import (
-    G1_ADD_NUM_JOINTS,
-    G1_IMITATION_NUM_KEY_BODIES,
-    add_joint_positions_to_tan_norm,
-    build_g1_add_disc_frame,
-    build_g1_imitation_frame,
-    joint_positions_to_tan_norm,
-    quat_wxyz_to_tan_norm,
-)
-from .motion import ADD_TARGET_OBS_STEPS, add_target_phase_offsets
+from .imitation_data import build_g1_imitation_frame
 from .contracts import select_imitation_root_domain
 
 
-BEYONDMIMIC_POLICY_OBS_DIM = 160
-
-
 class MimicObservationMixin:
-    def get_amp_policy_observation(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-        """MimicKit AMP actor/critic observation: character state, not disc state."""
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
-        if env_ids.ndim != 1:
-            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
-        joint_pos, joint_vel = self.get_action_joint_state()
-        root_pos = self.robot.data.root_pos_w.index_select(0, env_ids)
-        env_origins = self.scene.env_origins.index_select(0, env_ids)
-        root_pos_local = root_pos - env_origins
-        key_body_pos = self.robot.data.body_pos_w.index_select(0, env_ids)[
-            ..., self.imitation_key_body_ids, :
-        ]
-        key_body_pos_local = key_body_pos - env_origins.unsqueeze(-2)
-        key_pos = key_body_pos_local - root_pos_local.unsqueeze(-2)
-        if key_pos.shape[-2:] != (G1_IMITATION_NUM_KEY_BODIES, 3):
-            raise RuntimeError(
-                f"Expected AMP key bodies {(G1_IMITATION_NUM_KEY_BODIES, 3)}, "
-                f"got {tuple(key_pos.shape[-2:])}"
-            )
-        joint_rot_obs = joint_positions_to_tan_norm(joint_pos.index_select(0, env_ids))
-        root_velocity = self.get_mimic_root_velocity_w().index_select(0, env_ids)
-        observation = torch.cat(
-            [
-                root_pos_local[:, 2:3],
-                quat_wxyz_to_tan_norm(self.robot.data.root_quat_w.index_select(0, env_ids)),
-                root_velocity[:, :3],
-                root_velocity[:, 3:],
-                joint_rot_obs.reshape(env_ids.numel(), -1),
-                joint_vel.index_select(0, env_ids),
-                key_pos.reshape(env_ids.numel(), -1),
-            ],
-            dim=-1,
-        )
-        expected_dim = (
-            1
-            + 6
-            + 3
-            + 3
-            + 6 * joint_pos.shape[-1]
-            + joint_vel.shape[-1]
-            + 3 * G1_IMITATION_NUM_KEY_BODIES
-        )
-        if observation.shape[-1] != expected_dim:
-            raise RuntimeError(
-                f"Expected AMP policy observation dim {expected_dim}, got {observation.shape[-1]}"
-            )
-        return observation
-
-    def get_add_char_observation(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-        """MimicKit ADD/DeepMimic character observation with fixed joints."""
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
-        if env_ids.ndim != 1:
-            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
-        joint_pos, joint_vel = self.get_action_joint_state()
-        root_pos = self.robot.data.root_pos_w.index_select(0, env_ids)
-        env_origins = self.scene.env_origins.index_select(0, env_ids)
-        root_pos_local = root_pos - env_origins
-        key_body_pos = self.robot.data.body_pos_w.index_select(0, env_ids)[
-            ..., self.imitation_key_body_ids, :
-        ]
-        key_pos = key_body_pos - env_origins.unsqueeze(-2) - root_pos_local.unsqueeze(-2)
-        joint_rot_obs = add_joint_positions_to_tan_norm(joint_pos.index_select(0, env_ids))
-        root_velocity = self.get_mimic_root_velocity_w().index_select(0, env_ids)
-        observation = torch.cat(
-            [
-                root_pos_local[:, 2:3],
-                quat_wxyz_to_tan_norm(self.robot.data.root_quat_w.index_select(0, env_ids)),
-                root_velocity[:, :3],
-                root_velocity[:, 3:],
-                joint_rot_obs.reshape(env_ids.numel(), -1),
-                joint_vel.index_select(0, env_ids),
-                key_pos.reshape(env_ids.numel(), -1),
-            ],
-            dim=-1,
-        )
-        expected_dim = (
-            1
-            + 6
-            + 3
-            + 3
-            + 6 * G1_ADD_NUM_JOINTS
-            + joint_vel.shape[-1]
-            + 3 * G1_IMITATION_NUM_KEY_BODIES
-        )
-        if observation.shape[-1] != expected_dim:
-            raise RuntimeError(
-                f"Expected ADD char observation dim {expected_dim}, got {observation.shape[-1]}"
-            )
-        return observation
-
     def get_imitation_policy_frame(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         """Return the native method-specific post-action imitation frame."""
         if env_ids is None:
@@ -217,72 +113,6 @@ class MimicObservationMixin:
             joint_vel=joint_vel.index_select(0, env_ids),
         )
 
-    def get_add_policy_disc_frame(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-        """Return MimicKit ADD's full-body policy discriminator frame."""
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
-        if env_ids.ndim != 1:
-            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
-        joint_pos, joint_vel = self.get_action_joint_state()
-        env_origins = self.scene.env_origins.index_select(0, env_ids)
-        root_pos_local = self.robot.data.root_pos_w.index_select(0, env_ids) - env_origins
-        body_pos_local = (
-            self.robot.data.body_pos_w.index_select(0, env_ids).index_select(1, self.add_disc_body_ids)
-            - env_origins.unsqueeze(-2)
-        )
-        root_velocity = self.get_mimic_root_velocity_w().index_select(0, env_ids)
-        return build_g1_add_disc_frame(
-            root_pos=root_pos_local,
-            root_quat_wxyz=self.robot.data.root_quat_w.index_select(0, env_ids),
-            joint_pos=joint_pos.index_select(0, env_ids),
-            body_pos=body_pos_local,
-            root_lin_vel=root_velocity[:, :3],
-            root_ang_vel=root_velocity[:, 3:],
-            joint_vel=joint_vel.index_select(0, env_ids),
-            global_obs=True,
-        )
-
-    def get_add_demo_disc_frame(self, phase_steps: torch.Tensor) -> torch.Tensor:
-        """Return MimicKit ADD's phase-aligned demo discriminator frame."""
-        return self.motion.get_add_disc_frame(phase_steps, body_ids=self.add_disc_body_ids)
-
-    def get_add_policy_observation(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-        """MimicKit ADD actor observation: char state plus future target poses."""
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
-        if env_ids.ndim != 1:
-            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
-        char_obs = self.get_add_char_observation(env_ids)
-        env_origins = self.scene.env_origins.index_select(0, env_ids)
-        root_pos_local = self.robot.data.root_pos_w.index_select(0, env_ids) - env_origins
-
-        offsets = torch.tensor(
-            add_target_phase_offsets(self.motion_frame_delta),
-            dtype=self.phase_steps.dtype,
-            device=self.device,
-        )
-        target_steps = self.phase_steps.index_select(0, env_ids).unsqueeze(-1) + offsets
-        flat_target = self.motion.get_add_target_frame(target_steps.reshape(-1))
-        n = int(env_ids.numel())
-        k = len(ADD_TARGET_OBS_STEPS)
-        target_root_pos = flat_target["root_pos_w"].reshape(n, k, 3)
-        target_root_obs = target_root_pos - root_pos_local.unsqueeze(1)
-        target_root_obs[..., 2] = target_root_pos[..., 2]
-        target_root_rot = quat_wxyz_to_tan_norm(flat_target["root_quat_w"]).reshape(n, k, 6)
-        target_joint_rot = add_joint_positions_to_tan_norm(flat_target["joint_pos"]).reshape(n, k, -1)
-        target_key_pos = flat_target["key_body_pos_w"].reshape(n, k, -1, 3)
-        target_key_pos = target_key_pos - target_root_pos.unsqueeze(-2)
-        target_obs = torch.cat(
-            (
-                target_root_obs,
-                target_root_rot,
-                target_joint_rot,
-                target_key_pos.reshape(n, k, -1),
-            ),
-            dim=-1,
-        ).reshape(n, -1)
-        return torch.cat((char_obs, target_obs), dim=-1)
-
     def get_reference_state(self) -> dict[str, torch.Tensor]:
         reference = dict(self.motion.get_frame(self.phase_steps))
         env_origins = self.scene.env_origins
@@ -321,15 +151,11 @@ class MimicObservationMixin:
         robot_anchor_pos_w = self.robot.data.body_pos_w[:, self.anchor_body_id]
         robot_anchor_quat_w = self.robot.data.body_quat_w[:, self.anchor_body_id]
 
-        if getattr(self, "termination_mode", "tracking") == "beyondmimic":
-            body_pos_relative_w = self._beyondmimic_body_pos_relative_w
-            body_quat_relative_w = self._beyondmimic_body_quat_relative_w
-        else:
-            body_pos_relative_w, body_quat_relative_w = self._compute_relative_reference_bodies(
-                reference,
-                robot_anchor_pos_w,
-                robot_anchor_quat_w,
-            )
+        body_pos_relative_w, body_quat_relative_w = self._compute_relative_reference_bodies(
+            reference,
+            robot_anchor_pos_w,
+            robot_anchor_quat_w,
+        )
         return {
             "reference": reference,
             "robot_joint_pos": robot_joint_pos,
@@ -343,19 +169,6 @@ class MimicObservationMixin:
             "body_pos_relative_w": body_pos_relative_w,
             "body_quat_relative_w": body_quat_relative_w,
         }
-
-    def _update_beyondmimic_relative_targets(self) -> None:
-        """Mirror MotionCommand's cached targets after command advancement."""
-        reference = self.get_reference_state()
-        robot_anchor_pos_w = self.robot.data.body_pos_w[:, self.anchor_body_id]
-        robot_anchor_quat_w = self.robot.data.body_quat_w[:, self.anchor_body_id]
-        body_pos_relative_w, body_quat_relative_w = self._compute_relative_reference_bodies(
-            reference,
-            robot_anchor_pos_w,
-            robot_anchor_quat_w,
-        )
-        self._beyondmimic_body_pos_relative_w.copy_(body_pos_relative_w)
-        self._beyondmimic_body_quat_relative_w.copy_(body_quat_relative_w)
 
     def _motion_anchor_observation_terms(
         self,
@@ -375,92 +188,10 @@ class MimicObservationMixin:
         return motion_anchor_pos_b, motion_anchor_ori_b
 
     def get_observation(self) -> torch.Tensor:
-        if getattr(self, "policy_observation_mode", "tracking") == "beyondmimic":
-            return self.get_beyondmimic_policy_observation()
         return self.build_observation()
 
     def get_critic_observation(self) -> torch.Tensor:
         return self.build_critic_observation()
-
-    def get_beyondmimic_policy_observation(
-        self, env_ids: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """Official default G1 policy observation.
-
-        The order exactly follows ``G1FlatEnvCfg`` from official BeyondMimic
-        at commit ``cd651720``:
-
-        ``reference q/dq (58), anchor position (3), anchor orientation rot6d
-        (6), base linear/angular velocity (3+3), joint position/velocity
-        relative to default (29+29), previous action (29)``.
-        """
-        observation = self.build_beyondmimic_policy_observation()
-        if env_ids is None:
-            return observation
-        if env_ids.ndim != 1:
-            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
-        return observation.index_select(0, env_ids)
-
-    def get_beyondmimic_critic_observation(
-        self, env_ids: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """Return the clean official 286-D privileged observation."""
-        observation = self.build_critic_observation()
-        if env_ids is None:
-            return observation
-        if env_ids.ndim != 1:
-            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
-        return observation.index_select(0, env_ids)
-
-    def build_beyondmimic_policy_observation(self) -> torch.Tensor:
-        context = self.get_tracking_context()
-        reference = context["reference"]
-        reference_joint_state = torch.cat(
-            [reference["joint_pos"], reference["joint_vel"]], dim=-1
-        )
-        motion_anchor_pos_b, motion_anchor_ori_b = self._motion_anchor_observation_terms(
-            context["robot_anchor_pos_w"],
-            context["robot_anchor_quat_w"],
-            reference,
-        )
-        joint_pos_rel = context["robot_joint_pos"] - self.default_action_joint_pos
-        joint_vel_rel = context["robot_joint_vel"] - self.default_action_joint_vel
-
-        # Reference command and last action stay clean.  The remaining terms
-        # use the exact corruption ranges of official Tracking-Flat-G1-v0.
-        motion_anchor_pos_b = self._add_uniform_noise(
-            motion_anchor_pos_b, -0.25, 0.25
-        )
-        motion_anchor_ori_b = self._add_uniform_noise(
-            motion_anchor_ori_b, -0.05, 0.05
-        )
-        base_lin_vel = self._add_uniform_noise(
-            self.robot.data.root_lin_vel_b, -0.5, 0.5
-        )
-        base_ang_vel = self._add_uniform_noise(
-            self.robot.data.root_ang_vel_b, -0.2, 0.2
-        )
-        joint_pos_rel = self._add_uniform_noise(joint_pos_rel, -0.01, 0.01)
-        joint_vel_rel = self._add_uniform_noise(joint_vel_rel, -0.5, 0.5)
-        observation = torch.cat(
-            [
-                reference_joint_state,
-                motion_anchor_pos_b,
-                motion_anchor_ori_b,
-                base_lin_vel,
-                base_ang_vel,
-                joint_pos_rel,
-                joint_vel_rel,
-                self.last_action,
-            ],
-            dim=-1,
-        )
-        if observation.shape[-1] != BEYONDMIMIC_POLICY_OBS_DIM:
-            raise RuntimeError(
-                "Expected BeyondMimic policy observation dim "
-                f"{BEYONDMIMIC_POLICY_OBS_DIM}, got {observation.shape[-1]}"
-            )
-        return observation
 
     def build_observation(self) -> torch.Tensor:
         context = self.get_tracking_context()

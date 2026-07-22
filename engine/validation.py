@@ -243,10 +243,14 @@ def run_validation_rollout(
 
     death_phase_record = torch.zeros(num_envs, dtype=torch.float32, device=env.device)
     cumulative_reward = torch.zeros(num_envs, device=env.device)
-    done_term_names = ["time_out", "motion_complete", "anchor_pos_bad", "anchor_ori_bad", "ee_body_bad", "fall_contact"]
-    if getattr(env, "termination_mode", "tracking") == "add":
-        done_term_names.extend(["fall_contact", "pose_fail"])
-    done_term_names = list(dict.fromkeys(done_term_names))
+    done_term_names = [
+        "time_out",
+        "motion_complete",
+        "anchor_pos_bad",
+        "anchor_ori_bad",
+        "ee_body_bad",
+        "fall_contact",
+    ]
     done_term_record = {
         name: torch.zeros(num_envs, dtype=torch.bool, device=env.device)
         for name in done_term_names
@@ -258,19 +262,10 @@ def run_validation_rollout(
     ee_body_count = len(env.ee_body_names)
     done_ee_z_error_record = torch.zeros(num_envs, ee_body_count, device=env.device)
     done_ee_bad_record = torch.zeros(num_envs, ee_body_count, dtype=torch.bool, device=env.device)
-    contact_body_attr = (
-        "add_undesired_contact_body_ids"
-        if getattr(env, "termination_mode", "tracking") == "add"
-        else "amp_undesired_contact_body_ids"
-    )
-    contact_force_key = (
-        "add_undesired_contact_force_by_body"
-        if getattr(env, "termination_mode", "tracking") == "add"
-        else "amp_undesired_contact_force_by_body"
-    )
+    contact_force_key = "amp_undesired_contact_force_by_body"
     amp_contact_body_ids = getattr(
         env,
-        contact_body_attr,
+        "amp_undesired_contact_body_ids",
         torch.empty(0, dtype=torch.long, device=env.device),
     )
     amp_contact_body_ids = amp_contact_body_ids.to(device=env.device, dtype=torch.long)

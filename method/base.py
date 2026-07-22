@@ -125,8 +125,8 @@ class Algorithm(ABC):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         """Advance one clean evaluator transition.
 
-        Methods with private observation state (AdaMimic history, for example)
-        override this while retaining the shared evaluator reward/termination.
+        Methods with private observation state override this while retaining
+        the shared evaluator reward/termination.
         """
         return self.env.step(
             actions,

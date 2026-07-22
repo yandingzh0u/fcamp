@@ -127,7 +127,6 @@ STARTUP_BASE_COM_RANGE = (
     (-0.05, 0.05),
 )
 PUSH_INTERVAL_STEP_RANGE = (50, 150)
-BEYONDMIMIC_PUSH_INTERVAL_SECONDS = (1.0, 3.0)
 
 
 def _match_joint_expr(expr: str, joint_name: str) -> bool:

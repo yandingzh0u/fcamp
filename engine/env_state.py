@@ -23,8 +23,6 @@ def snapshot_env_state(env) -> dict[str, torch.Tensor]:
         "adaptive_bin_failed_count": env.adaptive_sampler.bin_failed_count.clone(),
         "adaptive_current_bin_failed_count": env.adaptive_sampler.current_bin_failed_count.clone(),
         "failure_recorded": env._failure_recorded.clone(),
-        "beyondmimic_body_pos_relative_w": env._beyondmimic_body_pos_relative_w.clone(),
-        "beyondmimic_body_quat_relative_w": env._beyondmimic_body_quat_relative_w.clone(),
     }
     sensor = env.contact_sensor
     snapshot["contact_timestamp"] = sensor._timestamp.clone()
@@ -80,12 +78,6 @@ def restore_env_state(env, snapshot: dict[str, torch.Tensor]) -> None:
     )
     env._failure_recorded.copy_(snapshot["failure_recorded"])
     env.scene.update(env.physics_dt)
-    env._beyondmimic_body_pos_relative_w.copy_(
-        snapshot["beyondmimic_body_pos_relative_w"]
-    )
-    env._beyondmimic_body_quat_relative_w.copy_(
-        snapshot["beyondmimic_body_quat_relative_w"]
-    )
     sensor = env.contact_sensor
     for name in (
         "net_forces_w",

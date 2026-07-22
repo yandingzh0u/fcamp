@@ -95,7 +95,6 @@ class _PushContractFixture(MimicStepMixin):
         self.device = torch.device("cpu")
         self.dt = 0.02
         self.interval_pushes = True
-        self.beyondmimic_global_push_timer = False
         self.episode_steps = torch.tensor([1, 1, 1], dtype=torch.long)
         self.next_push_step = torch.tensor([1, 1, 5], dtype=torch.long)
         self.first_push_step = torch.full((3,), -1, dtype=torch.long)

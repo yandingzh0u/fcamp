@@ -84,12 +84,7 @@ def test_validation_has_no_fractional_early_stop() -> None:
         field.name for field in fields(TrainingConfig)
     }
     for name in (
-        "amp_largebox.yaml",
-        "add_largebox.yaml",
         "fcamp_largebox.yaml",
-        "beyondmimic_largebox.yaml",
-        "adamimic_stage1_largebox.yaml",
-        "adamimic_stage2_largebox.yaml",
     ):
         load_config(ROOT / "configs" / name)
 
