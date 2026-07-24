@@ -7,10 +7,16 @@ __pycache__/
 
 # Training artifacts are local-only by default.
 runs/*
-# Keep the FCAMP baseline run: logs + last.pt only (no update_*.pt).
+# Whitelist every run's train.log (un-ignore parents layer by layer).
+!runs/*/
+runs/*/*
+!runs/*/logs/
+runs/*/logs/*
+!runs/*/logs/train.log
+# Keep the FCAMP baseline run: logs + config (no checkpoints / snapshot).
 !runs/fcamp_2_fix_bugs/
 !runs/fcamp_2_fix_bugs/**
-runs/fcamp_2_fix_bugs/checkpoints/update_*.pt
+runs/fcamp_2_fix_bugs/checkpoints/
 runs/fcamp_2_fix_bugs/source_snapshot.tar.gz
 
 .vscode/
@@ -19,6 +25,3 @@ runs/fcamp_2_fix_bugs/source_snapshot.tar.gz
 
 .DS_Store
 Thumbs.db
-
-# last.pt is kept locally; GitHub LFS budget is exhausted (file ~2.9G).
-runs/fcamp_2_fix_bugs/checkpoints/last.pt
