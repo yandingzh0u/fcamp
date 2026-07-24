@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+import math
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -34,6 +35,9 @@ class EnvironmentConfig:
     adaptive_predecessor_ratio: float
     adaptive_predecessor_lookback_bins: int
     action_rate_weight: float
+    policy_action_bound: float
+    command_rate_limit: tuple[float, ...]
+    rate_half_life_seconds: float
     terminate_on_motion_end: bool
     motion_reference_mode: str
     root_velocity_mode: str
@@ -54,11 +58,9 @@ class FlowCPSConfig:
     actor_hidden_dims: tuple[int, ...]
     critic_hidden_dims: tuple[int, ...]
     activation: str
-    action_squash_scale: float
     flow_steps: int
-    cps_noise_level: float
+    cps_physical_rms: float
     cps_trainable: bool
-    cps_cov_rank: int
     rollout_env_steps: int
     discount_gamma: float
     gae_lambda: float
@@ -75,7 +77,7 @@ class FlowCPSConfig:
     empirical_normalization: bool
     init_at_random_ep_len: bool
     max_grad_norm: float
-    kl_early_stop_factor: float
+    kl_acceptance_factor: float
     advantage_normalization: str
 
 
@@ -206,9 +208,11 @@ def _construct(cls, values: dict[str, Any]):
         "hidden_dims",
         "encoder_hidden_dims",
         "head_hidden_dims",
+        "command_rate_limit",
     ):
         if name in converted:
-            converted[name] = tuple(int(value) for value in converted[name])
+            converter = float if name == "command_rate_limit" else int
+            converted[name] = tuple(converter(value) for value in converted[name])
     return cls(**converted)
 
 
@@ -317,6 +321,27 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError("environment.sim_dt must be positive")
     if env.decimation < 1:
         raise ValueError("environment.decimation must be positive")
+    if (
+        not math.isfinite(env.policy_action_bound)
+        or env.policy_action_bound <= 0.0
+    ):
+        raise ValueError(
+            "environment.policy_action_bound must be finite and positive"
+        )
+    if len(env.command_rate_limit) != 29 or any(
+        not math.isfinite(limit) or limit <= 0.0
+        for limit in env.command_rate_limit
+    ):
+        raise ValueError(
+            "environment.command_rate_limit must contain 29 finite positive values"
+        )
+    if (
+        not math.isfinite(env.rate_half_life_seconds)
+        or env.rate_half_life_seconds <= 0.0
+    ):
+        raise ValueError(
+            "environment.rate_half_life_seconds must be finite and positive"
+        )
     if env.platform_profile not in {"custom", "g1_largebox_50hz"}:
         raise ValueError("environment.platform_profile must be custom or g1_largebox_50hz")
     if env.reset_phase_sampling not in {
@@ -384,10 +409,19 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError("Flow-CPS requires parameters.rollout_env_steps > 0")
     if params.rollout_env_steps % params.horizon:
         raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
-    if not (0.0 < params.cps_noise_level < 1.0):
-        raise ValueError("Flow-CPS requires parameters.cps_noise_level in (0, 1)")
-    if params.cps_cov_rank < 0:
-        raise ValueError("Flow-CPS requires parameters.cps_cov_rank >= 0")
+    if not math.isfinite(params.cps_physical_rms) or params.cps_physical_rms <= 0.0:
+        raise ValueError(
+            "Flow-CPS requires parameters.cps_physical_rms to be finite and positive"
+        )
+    if (
+        not math.isfinite(params.desired_kl)
+        or params.desired_kl <= 0.0
+        or not math.isfinite(params.kl_acceptance_factor)
+        or params.kl_acceptance_factor <= 0.0
+    ):
+        raise ValueError(
+            "FCAMP requires positive desired_kl and kl_acceptance_factor"
+        )
     norm = str(params.advantage_normalization).lower()
     if norm not in {"per_prefix", "global", "none"}:
         raise ValueError(
@@ -460,8 +494,10 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
             "FCAMP requires credit.integrate_amp_reward_dt=true so the style "
             "reward has the same control-frequency semantics as task reward"
         )
-    if credit.ratio_mode != "joint_path":
-        raise ValueError("FCAMP requires credit.ratio_mode=joint_path")
+    if credit.ratio_mode != "conditional_frame":
+        raise ValueError(
+            "FCAMP requires credit.ratio_mode=conditional_frame"
+        )
     if credit.task_weight < 0.0 or credit.amp_weight < 0.0:
         raise ValueError("FCstyle reward weights must be non-negative")
     if credit.task_weight == 0.0 and credit.amp_weight == 0.0:

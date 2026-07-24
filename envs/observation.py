@@ -14,9 +14,33 @@ from isaaclab.utils.math import (
 from .spec import CRITIC_OBS_DIM, OBS_DIM
 from .imitation_data import build_g1_imitation_frame
 from .contracts import select_imitation_root_domain
+from .action_rate import normalize_command_rate
 
 
 class MimicObservationMixin:
+    def _command_rate_observation(self) -> torch.Tensor:
+        """Return dimensionless carried rate without mutating environment state."""
+
+        return normalize_command_rate(
+            self.command_rate,
+            self.command_rate_limit,
+        )
+
+    def _append_command_state(
+        self,
+        terms: tuple[torch.Tensor, ...],
+    ) -> torch.Tensor:
+        """Append normalized rate then raw last action under one layout contract."""
+
+        return torch.cat(
+            (
+                *terms,
+                self._command_rate_observation(),
+                self.last_action,
+            ),
+            dim=-1,
+        )
+
     def get_imitation_policy_frame(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         """Return the native method-specific post-action imitation frame."""
         if env_ids is None:
@@ -230,8 +254,8 @@ class MimicObservationMixin:
         base_ang_vel = self._add_uniform_noise(self.robot.data.root_ang_vel_b, -0.2, 0.2)
         joint_pos_rel = self._add_uniform_noise(joint_pos_rel, -0.01, 0.01)
         joint_vel_rel = self._add_uniform_noise(joint_vel_rel, -0.5, 0.5)
-        observation = torch.cat(
-            [
+        observation = self._append_command_state(
+            (
                 reference_joint_state,
                 motion_anchor_pos_b,
                 motion_anchor_ori_b,
@@ -243,9 +267,7 @@ class MimicObservationMixin:
                 base_ang_vel,
                 joint_pos_rel,
                 joint_vel_rel,
-                self.last_action,
-            ],
-            dim=-1,
+            )
         )
         if observation.shape[-1] != OBS_DIM:
             raise RuntimeError(f"Expected observation dim {OBS_DIM}, got {observation.shape[-1]}")
@@ -272,8 +294,8 @@ class MimicObservationMixin:
         robot_body_ori_b = matrix_from_quat(robot_body_ori_b)[..., :2].reshape(self.num_envs, -1)
         joint_pos_rel = context["robot_joint_pos"] - self.default_action_joint_pos
         joint_vel_rel = context["robot_joint_vel"] - self.default_action_joint_vel
-        observation = torch.cat(
-            [
+        observation = self._append_command_state(
+            (
                 reference_joint_state,
                 motion_anchor_pos_b,
                 motion_anchor_ori_b,
@@ -283,9 +305,7 @@ class MimicObservationMixin:
                 self.robot.data.root_ang_vel_b,
                 joint_pos_rel,
                 joint_vel_rel,
-                self.last_action,
-            ],
-            dim=-1,
+            )
         )
         if observation.shape[-1] != CRITIC_OBS_DIM:
             raise RuntimeError(f"Expected critic observation dim {CRITIC_OBS_DIM}, got {observation.shape[-1]}")

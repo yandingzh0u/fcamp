@@ -3,13 +3,19 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from dataclasses import fields, replace
+from dataclasses import replace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import torch
+
+from engine.checkpoint import (
+    preflight_checkpoint_payload,
+    preflight_static_checkpoint_payload,
+)
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Play a trained checkpoint in IsaacLab.")
@@ -33,79 +39,37 @@ parser.add_argument("--startup_randomization", action=argparse.BooleanOptionalAc
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
+checkpoint_path = Path(args_cli.checkpoint).expanduser().resolve()
+if not checkpoint_path.is_file():
+    raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+# This CPU payload is retained for the complete process.  Most importantly,
+# schema 16 is checked before AppLauncher creates an Isaac runtime.
+payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+preflight_static_checkpoint_payload(payload, expected_method="fcamp")
+
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-import torch
-
 from engine.config import (
-    EnvironmentConfig,
     ExperimentConfig,
-    TrainingConfig,
     config_from_dict,
-    METHOD_CONFIGS,
 )
 from envs.g1_mimic import G1MimicEnv
 from method import load_method_class
 
 
-def _deployment_action_chunk(algo, obs: torch.Tensor) -> torch.Tensor:
-    payload = algo.deployment_actions(obs)
-    if payload.dim() == 2:
-        return payload.unsqueeze(1)
-    if payload.dim() == 3:
-        return payload
-    raise ValueError(f"deployment_actions must return [N,D] or [N,H,D], got shape={tuple(payload.shape)}")
-
-
-def _split_reference_action(algo, env, payload: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if not bool(getattr(algo, "uses_reference_dt", False)):
-        return payload, None
-    expected_dim = int(env.action_dim) + 1
-    if payload.shape[-1] != expected_dim:
-        raise ValueError(
-            f"{algo.__class__.__name__} uses reference_dt but returned action dim "
-            f"{payload.shape[-1]}, expected {expected_dim}"
-        )
-    return payload[..., : env.action_dim], payload[..., -1]
-
-
-def _select(cls, values: dict) -> dict:
-    return {field.name: values[field.name] for field in fields(cls) if field.name in values}
-
-
 def _rebuild_config(payload: dict) -> ExperimentConfig:
     raw = payload.get("config", {})
-    if "method" in raw or "algorithm" in raw:
-        return config_from_dict(raw)
-    if not {"algo_name", "env", "algo", "train"}.issubset(raw):
-        raise KeyError("Checkpoint has no supported configuration schema")
-    method = raw["algo_name"]
-    if method != "fcamp":
-        raise ValueError(f"Unsupported legacy checkpoint method {method!r}; available: {sorted(METHOD_CONFIGS)}")
-    legacy_env = raw["env"]
-    environment = _select(EnvironmentConfig, legacy_env)
-    environment["task"] = "largebox_plane" if legacy_env.get("terrain_type") == "plane" else "crawl_slope"
-    environment["decimation"] = 4
-    parameters = dict(raw["algo"])
-    tree = {
-        "method": method,
-        "environment": environment,
-        "parameters": parameters,
-        "training": _select(TrainingConfig, raw["train"]),
-    }
-    return config_from_dict(tree)
+    if not isinstance(raw, dict) or (
+        "method" not in raw and "algorithm" not in raw
+    ):
+        raise KeyError(
+            "Schema-16 FCAMP checkpoint has no current experiment config"
+        )
+    return config_from_dict(raw)
 
 
 def main() -> None:
-    checkpoint_path = Path(args_cli.checkpoint).expanduser().resolve()
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    device = torch.device(args_cli.device)
-    load_device = device if (device.type != "cuda" or torch.cuda.is_available()) else torch.device("cpu")
-    payload = torch.load(checkpoint_path, map_location=load_device, weights_only=False)
-    if "policy" not in payload:
-        raise KeyError("Checkpoint must contain a 'policy' state dict.")
     cfg = _rebuild_config(payload)
 
     environment = replace(
@@ -137,6 +101,7 @@ def main() -> None:
     )
     algo = load_method_class(cfg.method)(cfg.parameters, env, simulation_app)
     algo.build()
+    preflight_checkpoint_payload(algo, payload)
     algo.policy.load_state_dict(payload["policy"])
     algo.policy.eval()
 
@@ -146,6 +111,7 @@ def main() -> None:
     current_obs = algo.evaluation_reset(reset_phases)
     cached_chunk: torch.Tensor | None = None
     chunk_index = horizon
+    terminal_mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     total_steps = 0
 
     use_real_time = (args_cli.real_time or not args_cli.headless) and not args_cli.no_real_time
@@ -168,12 +134,18 @@ def main() -> None:
     while simulation_app.is_running():
         if cached_chunk is None or chunk_index >= cached_chunk.shape[1]:
             with torch.inference_mode():
-                cached_chunk = _deployment_action_chunk(algo, current_obs)
+                cached_chunk = algo.validated_deployment_chunk(current_obs)
             chunk_index = 0
-        action_payload = cached_chunk[:, chunk_index, :]
-        action, reference_dt = _split_reference_action(algo, env, action_payload)
+        frame_payload = cached_chunk[:, chunk_index, :]
+        frame_payload, reference_dt = algo.split_deployment_frame(frame_payload)
         chunk_index += 1
-        current_obs, reward, done, info = algo.evaluation_step(action, reference_dt)
+        current_obs, reward, done, info = algo.evaluation_step_payload(
+            frame_payload,
+            reference_dt,
+            active_mask=~terminal_mask,
+        )
+        applied_action = algo.require_applied_action(info)
+        terminal_mask |= done
         total_steps += 1
 
         if use_real_time:
@@ -192,7 +164,7 @@ def main() -> None:
                 f"[PLAY] step={total_steps} phase={float(env.phase_steps[0].item()):.2f} "
                 f"reference_dt={reference_dt_mean:.5f} "
                 f"frame_delta={frame_delta_mean:.3f} "
-                f"action_abs={float(action.abs().mean().item()):.5f} "
+                f"action_abs={float(applied_action.abs().mean().item()):.5f} "
                 f"reward={float(reward.mean().item()):.5f} "
                 f"done={float(done.float().mean().item()):.5f} "
                 f"height={float(info['debug_terms']['robot_anchor_height'].mean().item()):.5f} "
@@ -219,6 +191,7 @@ def main() -> None:
             current_obs = algo.evaluation_reset(reset_phases)
             cached_chunk = None
             chunk_index = horizon
+            terminal_mask.zero_()
 
     print(f"[INFO] Playback finished after {total_steps} steps.", flush=True)
 

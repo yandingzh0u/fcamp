@@ -34,27 +34,6 @@ def validation_max_steps(train_cfg, env) -> int:
     return max(1, steps)
 
 
-def _deployment_action_chunk(algo, obs: torch.Tensor) -> torch.Tensor:
-    payload = algo.deployment_actions(obs)
-    if payload.dim() == 2:
-        return payload.unsqueeze(1)
-    if payload.dim() == 3:
-        return payload
-    raise ValueError(f"deployment_actions must return [N,D] or [N,H,D], got shape={tuple(payload.shape)}")
-
-
-def _split_reference_action(algo, env, payload: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if not bool(getattr(algo, "uses_reference_dt", False)):
-        return payload, None
-    expected_dim = int(env.action_dim) + 1
-    if payload.shape[-1] != expected_dim:
-        raise ValueError(
-            f"{algo.__class__.__name__} uses reference_dt but returned action dim "
-            f"{payload.shape[-1]}, expected {expected_dim}"
-        )
-    return payload[..., : env.action_dim], payload[..., -1]
-
-
 def _add_disc_component_abs(
     diff_abs: torch.Tensor,
     *,
@@ -303,22 +282,23 @@ def run_validation_rollout(
                 if not trainer.simulation_app.is_running():
                     break
                 if cached_chunk is None or chunk_index >= cached_chunk.shape[1]:
-                    cached_chunk = _deployment_action_chunk(algo, current_obs)
+                    cached_chunk = algo.validated_deployment_chunk(current_obs)
                     chunk_index = 0
-                primitive_offset = step_idx % horizon
-                action_payload = cached_chunk[:, chunk_index, :]
-                action, reference_dt = _split_reference_action(algo, env, action_payload)
-                if bool(done.any()):
-                    action = torch.where(done.unsqueeze(-1), torch.zeros_like(action), action)
-                    if reference_dt is not None:
-                        reference_dt = torch.where(done, torch.full_like(reference_dt, float(env.dt)), reference_dt)
+                primitive_offset = chunk_index
+                frame_payload = cached_chunk[:, chunk_index, :]
+                frame_payload, reference_dt = algo.split_deployment_frame(frame_payload)
                 chunk_index += 1
                 active_mask = ~done
-                action_target = env.default_action_joint_pos + env.action_scale * torch.clamp(action, -100.0, 100.0)
 
-                current_obs, reward, step_done, info = algo.evaluation_step(
-                    action,
+                current_obs, reward, step_done, info = algo.evaluation_step_payload(
+                    frame_payload,
                     reference_dt,
+                    active_mask=active_mask,
+                )
+                applied_action = algo.require_applied_action(info)
+                action_target = (
+                    env.default_action_joint_pos
+                    + env.action_scale * applied_action
                 )
                 reference_post = env.motion.get_frame(info["reference_phase_steps"])
                 robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
@@ -326,7 +306,7 @@ def run_validation_rollout(
                 chunk_diagnostics.update(
                     active_mask=active_mask,
                     chunk_offset=primitive_offset,
-                    action=action,
+                    action=applied_action,
                     joint_pos=robot_joint_pos,
                     joint_vel=robot_joint_vel,
                     root_ang_vel=robot_root_ang_vel,
@@ -415,8 +395,8 @@ def run_validation_rollout(
                     )
                     body_pos_err = torch.linalg.norm(robot_body_pos - reference["body_pos_w"], dim=-1)
                     body_z_err = torch.abs(robot_body_pos[..., 2] - reference["body_pos_w"][..., 2])
-                    done_action_abs_record[new_done] = action[new_done].abs().mean(dim=-1)
-                    done_action_max_record[new_done] = action[new_done].abs().max(dim=-1).values
+                    done_action_abs_record[new_done] = applied_action[new_done].abs().mean(dim=-1)
+                    done_action_max_record[new_done] = applied_action[new_done].abs().max(dim=-1).values
                     done_action_ref_now_record[new_done] = action_ref_now[new_done]
                     done_action_ref_next_record[new_done] = action_ref_next[new_done]
                     done_action_ref_next_joint_record[new_done] = action_ref_next_by_joint[new_done]

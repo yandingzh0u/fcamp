@@ -22,6 +22,19 @@ environment:
   adaptive_predecessor_ratio: 0.8
   adaptive_predecessor_lookback_bins: 1
   action_rate_weight: 0.1
+  # Environment-owned normalized PD-command domain.  The policy no longer
+  # installs either this bound or the carried-rate dynamics after first reset.
+  policy_action_bound: 5.0
+  # Per-joint target-rate support in normalized action / second, ordered exactly
+  # as G1_29DOF_ACTION_NAMES.  These bounds cover the full 50 Hz reference after
+  # inverse filtering through the decoder, with 50% support margin.
+  command_rate_limit:
+    [80.0, 32.5, 66.5, 192.0, 69.0, 43.5,
+     84.0, 24.5, 22.5, 210.5, 115.5, 35.0,
+     14.0, 25.5, 28.0,
+     50.5, 45.0, 14.5, 68.0, 13.0, 155.0, 124.5,
+     26.0, 33.0, 61.0, 55.5, 4.5, 112.0, 98.5]
+  rate_half_life_seconds: 0.08
   motion_reference_mode: frame
   root_velocity_mode: com
 
@@ -31,11 +44,13 @@ parameters:
   actor_hidden_dims: [512, 256, 128]
   critic_hidden_dims: [512, 256, 128]
   activation: elu
-  action_squash_scale: 5.0
   flow_steps: 4
-  cps_noise_level: 0.8
+  # Aggregate RMS in normalized-action units after the fixed decoder response
+  # metric (frame delta, d2, and carried terminal-rate tail).  This is an
+  # absolute physical budget, not a fraction of the very large target-rate
+  # support.
+  cps_physical_rms: 0.05
   cps_trainable: true
-  cps_cov_rank: 8
   rollout_env_steps: 24
   discount_gamma: 0.99
   gae_lambda: 0.95
@@ -52,7 +67,9 @@ parameters:
   empirical_normalization: true
   init_at_random_ep_len: true
   max_grad_norm: 1.0
-  kl_early_stop_factor: 4.0
+  # A tentative actor step is committed only when every frame's exact expected
+  # conditional KL is at most this multiple of desired_kl.
+  kl_acceptance_factor: 4.0
   # Retained for inherited Flow-CPS helpers; FCAMP uses credit.* below.
   advantage_normalization: global
 
@@ -91,7 +108,7 @@ parameters:
     # Form the weighted task/style advantage first, then normalize that single
     # scalar objective once over the fixed 10/90 training measure.
     advantage_normalization: global
-    ratio_mode: joint_path
+    ratio_mode: conditional_frame
 
   critics:
     encoder_hidden_dims: [512, 256, 128]

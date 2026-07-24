@@ -8,6 +8,7 @@ conditional.
 
 from __future__ import annotations
 
+import copy
 import math
 import time
 
@@ -41,15 +42,10 @@ from models.style_discriminator import (
 )
 from models.mlp_actor_critic import EmpiricalNormalization
 from models.dual_flow_critic import SharedTrunkDualFlowCritic
-
-
-FCAMP_CHECKPOINT_CONTRACT = {
-    "fcamp_schema_version": 15,
-    "action_contract": "residual_absolute_v1",
-    "reset_contract": "phase_reference_action_v1",
-    "validation_contract": "tracking_primary_v1",
-    "ppo_contract": "fcamp_joint_flow_path_sum_v1",
-}
+from engine.checkpoint import (
+    FCAMP_CHECKPOINT_CONTRACT,
+    validate_static_fcamp_checkpoint_contract,
+)
 
 
 def _masked_stats(prefix: str, values: torch.Tensor, mask: torch.Tensor | None = None) -> dict[str, float]:
@@ -83,17 +79,11 @@ class FCAMP(FlowCPSBase):
         self.imitation_history_steps = int(amp_cfg.obs_steps)
         super().build()
 
-        # FCAMP actions are normalized PD target commands.  Their algorithmic
-        # domain is defined solely by action_squash_scale, never by URDF joint
-        # position metadata or startup-randomized default poses.
-        action_limit = float(cfg.action_squash_scale)
-        self.action_low = torch.full(
-            (self.num_act,), -action_limit, device=env.device
-        )
-        self.action_high = torch.full(
-            (self.num_act,), action_limit, device=env.device
-        )
-        env.enable_strict_action_contract(self.action_low, self.action_high)
+        # Bounds and carried-rate dynamics exist before the first reset and are
+        # owned solely by the environment.  FCAMP only records the immutable
+        # domain as part of its fresh-checkpoint contract.
+        self.action_low = env.action_low
+        self.action_high = env.action_high
         if not bool(env.motion.fcamp_has_runtime_fk):
             raise RuntimeError(
                 "FCAMP requires the configured runtime URDF FK for expert/policy alignment"
@@ -119,7 +109,7 @@ class FCAMP(FlowCPSBase):
         env.terminate_on_motion_end = True
 
         # Context = current privileged state, chunk-start privileged and actor
-        # states, previous action, padded causal latent prefix, prefix mask and
+        # states, previous action, padded causal raw-z prefix, prefix mask and
         # offset one-hot.  The online discriminator state is deliberately absent.
         self.prefix_context_dim = (
             2 * self.critic_obs_dim
@@ -234,29 +224,16 @@ class FCAMP(FlowCPSBase):
     # Checkpointing
     # ------------------------------------------------------------------ #
     def _validate_checkpoint_contract(self, state: dict) -> None:
-        if not isinstance(state, dict):
-            raise ValueError(
-                "FCAMP checkpoint is missing its algorithm contract; start a fresh run."
-            )
-        for name, expected in FCAMP_CHECKPOINT_CONTRACT.items():
-            saved = state.get(name)
-            if type(saved) is not type(expected) or saved != expected:
-                raise ValueError(
-                    f"FCAMP checkpoint {name}={saved!r} differs from "
-                    f"the required contract {expected!r}; start a fresh run."
-                )
-        if bool(state.get("discriminator_policy_conditioning", True)):
-            raise ValueError(
-                "FCAMP checkpoints with discriminator-conditioned policies "
-                "cannot be resumed."
-            )
-        self._validate_checkpoint_action_domain(state)
+        validate_static_fcamp_checkpoint_contract(state)
+        self._validate_checkpoint_decoder_contract(state)
 
-    def _validate_checkpoint_action_domain(self, state: dict) -> None:
-        for name, expected in (
+    def _validate_checkpoint_decoder_contract(self, state: dict) -> None:
+        tensor_contract = (
             ("action_low", self.action_low),
             ("action_high", self.action_high),
-        ):
+            ("decoder_command_rate_limit", self.env.command_rate_limit),
+        )
+        for name, expected in tensor_contract:
             saved = state.get(name)
             if (
                 not torch.is_tensor(saved)
@@ -267,7 +244,21 @@ class FCAMP(FlowCPSBase):
                 )
             ):
                 raise ValueError(
-                    f"FCAMP checkpoint {name} differs from the policy command domain"
+                    f"FCAMP checkpoint {name} differs from the physical decoder"
+                )
+        scalar_contract = (
+            ("decoder_control_dt", float(self.env.dt)),
+            (
+                "decoder_command_rate_decay",
+                float(self.env.command_rate_decay),
+            ),
+        )
+        for name, expected in scalar_contract:
+            saved = state.get(name)
+            if type(saved) is not float or saved != expected:
+                raise ValueError(
+                    f"FCAMP checkpoint {name}={saved!r} differs from "
+                    f"the physical decoder value {expected!r}"
                 )
 
     def validate_checkpoint_payload(self, payload: dict) -> None:
@@ -283,6 +274,13 @@ class FCAMP(FlowCPSBase):
                 "warmup_env_transitions": int(self.warmup_env_transitions),
                 "action_low": self.action_low.detach().cpu(),
                 "action_high": self.action_high.detach().cpu(),
+                "decoder_control_dt": float(self.env.dt),
+                "decoder_command_rate_decay": float(
+                    self.env.command_rate_decay
+                ),
+                "decoder_command_rate_limit": (
+                    self.env.command_rate_limit.detach().cpu()
+                ),
                 "disc_window_replay": self.disc_window_replay.state_dict(),
                 **FCAMP_CHECKPOINT_CONTRACT,
                 "imitation_history_steps": self.imitation_history_steps,
@@ -342,16 +340,19 @@ class FCAMP(FlowCPSBase):
         chunk_start_critic_obs: torch.Tensor,
         chunk_start_actor_obs: torch.Tensor,
         previous_action: torch.Tensor,
-        final_latent: torch.Tensor,
+        raw_z: torch.Tensor,
         offset: int,
     ) -> torch.Tensor:
         batch = current_critic_obs.shape[0]
-        latent = final_latent.reshape(batch, self.horizon_h, self.num_act)
-        prefix = torch.zeros_like(latent)
+        raw_target_rate = raw_z.reshape(batch, self.horizon_h, self.num_act)
+        prefix = torch.zeros_like(raw_target_rate)
         if offset > 0:
-            prefix[:, :offset] = latent[:, :offset]
+            prefix[:, :offset] = raw_target_rate[:, :offset]
         prefix_mask = torch.zeros(
-            batch, self.horizon_h, device=latent.device, dtype=latent.dtype
+            batch,
+            self.horizon_h,
+            device=raw_target_rate.device,
+            dtype=raw_target_rate.dtype,
         )
         if offset > 0:
             prefix_mask[:, :offset] = 1.0
@@ -631,13 +632,38 @@ class FCAMP(FlowCPSBase):
         del rollout
         return next_observation, metrics, transitions
 
-    def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
+    def deployment_chunk(self, obs: torch.Tensor) -> torch.Tensor:
+        """Return the deterministic raw target-rate chunk used by the decoder."""
+
         if obs.shape[-1] != self.base_actor_obs_dim:
             raise ValueError(
                 f"FCAMP expected raw actor observation dim {self.base_actor_obs_dim}, "
                 f"got {tuple(obs.shape)}"
             )
-        return super().deterministic_actions(obs)
+        actor_obs = self._norm_actor(obs, update=False)
+        return self._flow_mean_raw(actor_obs).view(
+            obs.shape[0],
+            self.horizon_h,
+            self.num_act,
+        )
+
+    def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
+        """FCAMP's deterministic control payload is raw target rate, not action."""
+
+        return self.deployment_chunk(obs)
+
+    def evaluation_step_payload(
+        self,
+        frame_payload: torch.Tensor,
+        reference_dt: torch.Tensor | None,
+        active_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        return self.env.step_raw_target_rate(
+            frame_payload,
+            auto_reset=False,
+            reference_dt=reference_dt,
+            active_mask=active_mask,
+        )
 
     def evaluation_reset(self, phase_indices: torch.Tensor) -> torch.Tensor:
         """Reset FCAMP evaluation in the same root-link domain as training."""
@@ -662,7 +688,6 @@ class FCAMP(FlowCPSBase):
         n_envs = env.num_envs
         chunks = self._chunks_per_update()
         h = self.horizon_h
-        flow_steps = int(self.cfg.flow_steps)
         # One rollout is generated, history-conditioned and rewarded by one
         # immutable committed discriminator snapshot.  As in the local
         # MimicKit AMP implementation, policy/value optimization consumes these
@@ -675,11 +700,14 @@ class FCAMP(FlowCPSBase):
         actor_obs_buf = torch.zeros(chunks, n_envs, self.actor_obs_dim, device=device)
         actor_obs_raw_buf = torch.zeros_like(actor_obs_buf)
         actions_buf = torch.zeros(chunks, n_envs, h, self.num_act, device=device)
-        latent_path_buf = torch.zeros(
-            chunks, n_envs, flow_steps + 1, self.chunk_dim, device=device
+        raw_z_buf = torch.zeros(chunks, n_envs, self.chunk_dim, device=device)
+        old_mean_z_buf = torch.zeros_like(raw_z_buf)
+        old_log_probs_buf = torch.zeros(chunks, n_envs, h, device=device)
+        old_cps_cholesky, _ = self._effective_cps_cholesky(
+            device=device,
+            dtype=raw_z_buf.dtype,
         )
-        old_log_probs_buf = torch.zeros(chunks, n_envs, flow_steps, h, device=device)
-        prev_action_buf = torch.zeros(chunks, n_envs, self.num_act, device=device)
+        old_cps_cholesky = old_cps_cholesky.detach().clone()
         context_buf = torch.zeros(
             chunks, n_envs, h, self.prefix_context_dim, device=device
         )
@@ -721,6 +749,11 @@ class FCAMP(FlowCPSBase):
         amp_dt_scale = float(env.dt) if self.cfg.credit.integrate_amp_reward_dt else 1.0
         action_abs_max = 0.0
         action_bound_violation_max = 0.0
+        raw_z_abs_max = 0.0
+        command_rate_abs_max = 0.0
+        command_rate_support_max = 0.0
+        tanh_saturated_count = 0
+        raw_z_active_count = 0
         fk_alignment_abs_max = 0.0
         fk_alignment_abs_sum = 0.0
         fk_alignment_count = 0
@@ -752,25 +785,30 @@ class FCAMP(FlowCPSBase):
                 chunk_actor_raw = obs.clone()
                 chunk_critic_raw = critic_obs.clone()
                 actor_obs_n = self._norm_actor(chunk_actor_raw, update=False)
-                previous_action = chunk_actor_raw[..., -self.num_act :].detach()
-                final_latent, latent_path, old_log_probs, _ = self._sample_cps_path(actor_obs_n)
-                action_chunk = self._policy._action_transform(
-                    final_latent, prev_action=previous_action
-                ).view(n_envs, h, self.num_act)
-                action_abs_max = max(action_abs_max, float(action_chunk.abs().max().item()))
-                below = (self.action_low - action_chunk).clamp_min(0.0)
-                above = (action_chunk - self.action_high).clamp_min(0.0)
-                action_bound_violation_max = max(
-                    action_bound_violation_max,
-                    float(torch.maximum(below, above).max().item()),
+                previous_action = env.last_action.detach().clone()
+                observed_previous_action = chunk_actor_raw[..., -self.num_act :]
+                previous_action_error = (
+                    observed_previous_action - previous_action
+                ).abs().max()
+                if float(previous_action_error.item()) > 1.0e-6:
+                    raise RuntimeError(
+                        "FCAMP actor observation does not contain the exact "
+                        "environment-owned last_action"
+                    )
+                raw_z, old_mean_z, old_log_probs = self._sample_final_cps(
+                    actor_obs_n
+                )
+                raw_z_chunk = raw_z.view(n_envs, h, self.num_act)
+                raw_z_abs_max = max(
+                    raw_z_abs_max,
+                    float(raw_z_chunk.abs().max().item()),
                 )
 
                 actor_obs_buf[chunk_idx] = actor_obs_n
                 actor_obs_raw_buf[chunk_idx] = chunk_actor_raw
-                actions_buf[chunk_idx] = action_chunk
-                latent_path_buf[chunk_idx] = latent_path
+                raw_z_buf[chunk_idx] = raw_z
+                old_mean_z_buf[chunk_idx] = old_mean_z
                 old_log_probs_buf[chunk_idx] = old_log_probs
-                prev_action_buf[chunk_idx] = previous_action
 
                 alive = torch.ones(n_envs, dtype=torch.bool, device=device)
                 for frame_idx in range(h):
@@ -780,15 +818,55 @@ class FCAMP(FlowCPSBase):
                         chunk_critic_raw,
                         chunk_actor_raw,
                         previous_action,
-                        final_latent,
+                        raw_z,
                         frame_idx,
                     )
-                    action_t = action_chunk[:, frame_idx]
-                    action_t = torch.where(
-                        alive_before.unsqueeze(-1), action_t, torch.zeros_like(action_t)
+                    raw_z_t = raw_z_chunk[:, frame_idx]
+                    next_obs, task_reward, done, info = env.step_raw_target_rate(
+                        raw_z_t,
+                        auto_reset=False,
+                        active_mask=alive_before,
                     )
-                    next_obs, task_reward, done, info = env.step(action_t, auto_reset=False)
                     next_critic_obs = env.get_critic_observation()
+                    applied_action = info.get("applied_action")
+                    command_rate = info.get("command_rate")
+                    if not torch.is_tensor(applied_action) or not torch.is_tensor(
+                        command_rate
+                    ):
+                        raise RuntimeError(
+                            "FCAMP target-rate decoder did not report its applied "
+                            "action and carried command rate"
+                        )
+                    actions_buf[chunk_idx, :, frame_idx] = applied_action
+                    action_abs_max = max(
+                        action_abs_max,
+                        float(applied_action.abs().max().item()),
+                    )
+                    below = (self.action_low - applied_action).clamp_min(0.0)
+                    above = (applied_action - self.action_high).clamp_min(0.0)
+                    action_bound_violation_max = max(
+                        action_bound_violation_max,
+                        float(torch.maximum(below, above).max().item()),
+                    )
+                    if bool(alive_before.any()):
+                        active_raw_z = raw_z_t[alive_before]
+                        tanh_saturated_count += int(
+                            (torch.tanh(active_raw_z).abs() >= 0.99).sum().item()
+                        )
+                        raw_z_active_count += int(active_raw_z.numel())
+                        active_rate = command_rate[alive_before]
+                        command_rate_abs_max = max(
+                            command_rate_abs_max,
+                            float(active_rate.abs().max().item()),
+                        )
+                        rate_support = (
+                            active_rate.abs()
+                            / env.command_rate_limit.view(1, -1)
+                        )
+                        command_rate_support_max = max(
+                            command_rate_support_max,
+                            float(rate_support.max().item()),
+                        )
 
                     # Reset installs a complete phase-matched demo predecessor
                     # history.  This first post-action frame immediately forms
@@ -995,17 +1073,17 @@ class FCAMP(FlowCPSBase):
                             chunk_critic_raw,
                             chunk_actor_raw,
                             previous_action,
-                            final_latent,
+                            raw_z,
                             frame_idx + 1,
                         )
                     else:
-                        zero_latent = torch.zeros_like(final_latent)
+                        zero_raw_z = torch.zeros_like(raw_z)
                         next_context_raw = self._prefix_context_raw(
                             next_critic_obs,
                             next_critic_obs,
                             next_obs,
-                            action_t,
-                            zero_latent,
+                            applied_action,
+                            zero_raw_z,
                             0,
                         )
                     context_raw_buf[chunk_idx, :, frame_idx] = current_context_raw
@@ -1109,9 +1187,10 @@ class FCAMP(FlowCPSBase):
             "actor_obs": actor_obs_buf,
             "actor_obs_raw": actor_obs_raw_buf,
             "actions": actions_buf,
-            "latents": latent_path_buf,
+            "raw_z": raw_z_buf,
+            "old_mean_z": old_mean_z_buf,
+            "old_cps_cholesky": old_cps_cholesky,
             "old_log_probs": old_log_probs_buf,
-            "prev_action": prev_action_buf,
             "contexts": context_buf,
             "contexts_raw": context_raw_buf,
             "next_contexts_raw": next_context_raw_buf,
@@ -1151,6 +1230,12 @@ class FCAMP(FlowCPSBase):
             "collection_start_phases": collection_start_phases,
             "action_abs_max": action_abs_max,
             "action_bound_violation_max": action_bound_violation_max,
+            "raw_z_abs_max": raw_z_abs_max,
+            "raw_z_tanh_saturation_fraction": float(
+                tanh_saturated_count / max(raw_z_active_count, 1)
+            ),
+            "command_rate_abs_max": command_rate_abs_max,
+            "command_rate_support_max": command_rate_support_max,
             "fk_alignment_abs_max": fk_alignment_abs_max,
             "fk_alignment_abs_mean": (
                 fk_alignment_abs_sum / max(fk_alignment_count, 1)
@@ -1165,7 +1250,6 @@ class FCAMP(FlowCPSBase):
                 (window_root_xy_abs_sum / max(window_root_xy_count, 1)).item()
             ),
             "next_observation": obs,
-            "train_step_indices": self._train_step_indices(device),
         }
         if int(self.disc_version) != rollout_disc_version:
             raise RuntimeError("FCAMP discriminator changed while collecting one rollout")
@@ -1325,17 +1409,127 @@ class FCAMP(FlowCPSBase):
             for name, stream_id, weight, indices in active
         ]
 
+    def _set_actor_learning_rate(self, learning_rate: float) -> None:
+        self.learning_rate = float(learning_rate)
+        for group in self.actor_optimizer.param_groups:
+            group["lr"] = self.learning_rate
+
+    @torch.no_grad()
+    def _exact_rollout_frame_kl(
+        self,
+        actor_obs: torch.Tensor,
+        old_mean_z: torch.Tensor,
+        old_cps_cholesky: torch.Tensor,
+        valid: torch.Tensor,
+        micro_batch_size: int,
+    ) -> torch.Tensor:
+        """Evaluate exact old-rollout||current-policy conditional frame KL."""
+        new_cps_cholesky, _ = self._effective_cps_cholesky(
+            device=actor_obs.device,
+            dtype=actor_obs.dtype,
+        )
+        sums = torch.zeros(
+            self.horizon_h,
+            device=actor_obs.device,
+            dtype=torch.float64,
+        )
+        counts = valid.sum(dim=0).to(dtype=torch.float64)
+        if bool((counts <= 0).any()):
+            raise RuntimeError(
+                "FCAMP KL acceptance minibatch has a frame with no valid sample"
+            )
+        for start in range(0, actor_obs.shape[0], micro_batch_size):
+            stop = min(start + micro_batch_size, actor_obs.shape[0])
+            new_mean_z = self._flow_mean_raw(actor_obs[start:stop])
+            conditional_kl = self._final_cps_expected_conditional_kl(
+                old_mean_z[start:stop],
+                new_mean_z,
+                old_cps_cholesky,
+                new_cps_cholesky,
+            )
+            sums += (
+                conditional_kl.to(dtype=torch.float64)
+                * valid[start:stop].to(dtype=torch.float64)
+            ).sum(dim=0)
+        return (sums / counts).to(dtype=actor_obs.dtype)
+
+    def _atomic_actor_step(
+        self,
+        *,
+        actor_obs: torch.Tensor,
+        old_mean_z: torch.Tensor,
+        old_cps_cholesky: torch.Tensor,
+        valid: torch.Tensor,
+        micro_batch_size: int,
+    ) -> tuple[bool, torch.Tensor, int]:
+        """Commit one Adam step only if its exact final-control KL is safe."""
+        policy_state = copy.deepcopy(self._policy.state_dict())
+        optimizer_state = copy.deepcopy(self.actor_optimizer.state_dict())
+        max_attempts = 3
+        rejected_attempts = 0
+        limit = (
+            float(self.cfg.kl_acceptance_factor)
+            * float(self.cfg.desired_kl)
+        )
+        attempted_lr = float(self.learning_rate)
+        last_frame_kl = torch.full(
+            (self.horizon_h,),
+            float("inf"),
+            device=actor_obs.device,
+            dtype=actor_obs.dtype,
+        )
+
+        for attempt in range(max_attempts):
+            self._set_actor_learning_rate(attempted_lr)
+            self.actor_optimizer.step()
+            last_frame_kl = self._exact_rollout_frame_kl(
+                actor_obs,
+                old_mean_z,
+                old_cps_cholesky,
+                valid,
+                micro_batch_size,
+            )
+            finite = bool(torch.isfinite(last_frame_kl).all())
+            within_limit = (
+                limit <= 0.0
+                or (
+                    finite
+                    and float(last_frame_kl.max().item()) <= limit
+                )
+            )
+            if within_limit:
+                return True, last_frame_kl, rejected_attempts
+
+            rejected_attempts += 1
+            self._policy.load_state_dict(policy_state)
+            # Optimizer.load_state_dict may retain references to the supplied
+            # state tensors.  A fresh deep copy is required on every retry;
+            # otherwise the next tentative Adam step mutates the rollback
+            # snapshot itself (including moments and the step counter).
+            self.actor_optimizer.load_state_dict(
+                copy.deepcopy(optimizer_state)
+            )
+            reduced_lr = max(float(self.min_lr), attempted_lr * 0.5)
+            self._set_actor_learning_rate(reduced_lr)
+            if attempt + 1 >= max_attempts or reduced_lr >= attempted_lr:
+                break
+            attempted_lr = reduced_lr
+
+        return False, last_frame_kl, rejected_attempts
+
     def _actor_update(self, rollout: dict) -> dict[str, float]:
         device = self.env.device
         chunks, n_envs = rollout["actions"].shape[:2]
         batch_size = chunks * n_envs
         h = self.horizon_h
-        flow_steps = int(self.cfg.flow_steps)
         actor_obs = rollout["actor_obs"].reshape(batch_size, self.actor_obs_dim)
-        latent_path = rollout["latents"].reshape(
-            batch_size, flow_steps + 1, self.chunk_dim
+        raw_z = rollout["raw_z"].reshape(batch_size, self.chunk_dim)
+        old_mean_z = rollout["old_mean_z"].reshape(
+            batch_size,
+            self.chunk_dim,
         )
-        old_log_probs = rollout["old_log_probs"].reshape(batch_size, flow_steps, h)
+        old_cps_cholesky = rollout["old_cps_cholesky"]
+        old_log_probs = rollout["old_log_probs"].reshape(batch_size, h)
         advantages = rollout["advantages"].reshape(batch_size, h)
         valid = rollout["valid"].reshape(batch_size, h)
         env_stream_ids = rollout.get("stream_ids")
@@ -1356,35 +1550,37 @@ class FCAMP(FlowCPSBase):
         )
         clip_low = 1.0 - float(self.cfg.clip_range)
         clip_high = 1.0 + float(self.cfg.clip_range)
-        if self.cfg.credit.ratio_mode != "joint_path":
-            raise ValueError("FCAMP only supports credit.ratio_mode=joint_path")
+        if self.cfg.credit.ratio_mode != "conditional_frame":
+            raise ValueError(
+                "FCAMP only supports credit.ratio_mode=conditional_frame"
+            )
 
         totals = {
             "policy_loss": 0.0,
-            "kl": 0.0,
-            "per_factor_kl": 0.0,
-            "full_chunk_path_kl": 0.0,
+            "exact_kl": 0.0,
+            "exact_joint_chunk_kl": 0.0,
+            "logratio_sq_proxy": 0.0,
+            "joint_logratio_sq_proxy": 0.0,
             "ratio": 0.0,
             "clip": 0.0,
             "grad_norm": 0.0,
             "joint_log_ratio_abs_max": 0.0,
         }
-        metric_names = (
+        sample_metric_names = (
             "policy_loss",
-            "kl",
-            "per_factor_kl",
-            "full_chunk_path_kl",
+            "logratio_sq_proxy",
+            "joint_logratio_sq_proxy",
             "ratio",
             "clip",
         )
         stream_totals = {
-            name: {key: 0.0 for key in metric_names}
+            name: {key: 0.0 for key in sample_metric_names}
             for name, _, _, _ in stream_specs
         }
         stream_steps = {name: 0 for name, _, _, _ in stream_specs}
         frame_totals = {
             name: {
-                "kl": torch.zeros(h, device=device),
+                "logratio_sq_proxy": torch.zeros(h, device=device),
                 "ratio": torch.zeros(h, device=device),
                 "clip": torch.zeros(h, device=device),
                 "count": torch.zeros(h, device=device),
@@ -1392,15 +1588,15 @@ class FCAMP(FlowCPSBase):
             for name, _, _, _ in stream_specs
         }
         steps = 0
-        early_stop_epoch = int(self.cfg.policy_epochs)
         actor_lr_start = float(self.learning_rate)
         lr_decrease_steps = 0
-        lr_increase_steps = 0
         lr_hold_steps = 0
+        rejected_attempts = 0
+        skipped_steps = 0
+        exact_frame_kl_total = torch.zeros(h, device=device)
+        exact_frame_kl_max = 0.0
 
         for epoch in range(int(self.cfg.policy_epochs)):
-            epoch_kl_sum = 0.0
-            epoch_steps = 0
             stream_splits: dict[str, tuple[float, tuple[torch.Tensor, ...]]] = {}
             for name, _, objective_weight, indices in stream_specs:
                 shuffled = indices.index_select(
@@ -1427,7 +1623,11 @@ class FCAMP(FlowCPSBase):
                 if not parts:
                     continue
                 self.actor_optimizer.zero_grad(set_to_none=True)
-                combined_metrics = {key: 0.0 for key in metric_names}
+                combined_metrics = {
+                    key: 0.0 for key in sample_metric_names
+                }
+                pending_stream_metrics = []
+                combined_joint_log_ratio_abs_max = 0.0
                 for name, objective_weight, idx in parts:
                     valid_denominator = float(
                         valid.index_select(0, idx).sum().item()
@@ -1438,13 +1638,17 @@ class FCAMP(FlowCPSBase):
                         )
                     stream_sums = {
                         "policy_loss": 0.0,
-                        "kl": 0.0,
-                        "per_factor_kl": 0.0,
-                        "full_chunk_path_kl": 0.0,
+                        "logratio_sq_proxy": 0.0,
+                        "joint_logratio_sq_proxy": 0.0,
                         "ratio": 0.0,
                         "clip": 0.0,
                     }
-                    factor_denominator = valid_denominator * flow_steps
+                    stream_frame_sums = {
+                        "logratio_sq_proxy": torch.zeros(h, device=device),
+                        "ratio": torch.zeros(h, device=device),
+                        "clip": torch.zeros(h, device=device),
+                        "count": torch.zeros(h, device=device),
+                    }
                     chunk_denominator = float(
                         (
                             valid.index_select(0, idx).sum(dim=1) > 0
@@ -1456,14 +1660,18 @@ class FCAMP(FlowCPSBase):
                         sub = idx[
                             micro_start : micro_start + micro_batch_size
                         ]
-                        new_log_probs = self._recompute_cps_path_stats(
+                        new_log_probs = self._recompute_final_cps_log_prob(
                             actor_obs[sub],
-                            latent_path[sub],
+                            raw_z[sub],
                         )
                         delta = new_log_probs - old_log_probs[sub]
                         adv = advantages[sub]
                         mask = valid[sub].to(dtype=delta.dtype)
-                        log_ratio = delta.sum(dim=1)
+                        # The frame-major Cholesky gives the exact conditional
+                        # density of each executed raw target-rate frame.  PPO
+                        # therefore constrains the final physical control
+                        # variable, never an internal Flow integration path.
+                        log_ratio = delta
                         ratio = torch.exp(log_ratio)
                         unclipped = -adv * ratio
                         clipped = -adv * torch.clamp(
@@ -1484,7 +1692,6 @@ class FCAMP(FlowCPSBase):
                             clipped_flag = (
                                 (ratio < clip_low) | (ratio > clip_high)
                             ).to(ratio.dtype)
-                            factor_mask = mask.unsqueeze(1).expand_as(delta)
                             full_chunk_log_ratio = (
                                 log_ratio * mask
                             ).sum(dim=1)
@@ -1494,19 +1701,10 @@ class FCAMP(FlowCPSBase):
                             stream_sums["policy_loss"] += float(
                                 policy_sum.item()
                             )
-                            stream_sums["kl"] += float(
+                            stream_sums["logratio_sq_proxy"] += float(
                                 (kl * mask).sum().item()
                             )
-                            stream_sums["per_factor_kl"] += float(
-                                (
-                                    0.5
-                                    * delta.square()
-                                    * factor_mask
-                                ).sum().item()
-                            )
-                            stream_sums[
-                                "full_chunk_path_kl"
-                            ] += float(
+                            stream_sums["joint_logratio_sq_proxy"] += float(
                                 (
                                     0.5
                                     * full_chunk_log_ratio.square()
@@ -1519,20 +1717,20 @@ class FCAMP(FlowCPSBase):
                             stream_sums["clip"] += float(
                                 (clipped_flag * mask).sum().item()
                             )
-                            totals["joint_log_ratio_abs_max"] = max(
-                                totals["joint_log_ratio_abs_max"],
+                            combined_joint_log_ratio_abs_max = max(
+                                combined_joint_log_ratio_abs_max,
                                 float(log_ratio.abs().max().item()),
                             )
-                            frame_totals[name]["kl"] += (
+                            stream_frame_sums["logratio_sq_proxy"] += (
                                 kl * mask
                             ).sum(dim=0)
-                            frame_totals[name]["ratio"] += (
+                            stream_frame_sums["ratio"] += (
                                 ratio * mask
                             ).sum(dim=0)
-                            frame_totals[name]["clip"] += (
+                            stream_frame_sums["clip"] += (
                                 clipped_flag * mask
                             ).sum(dim=0)
-                            frame_totals[name]["count"] += mask.sum(
+                            stream_frame_sums["count"] += mask.sum(
                                 dim=0
                             )
                     stream_means = {
@@ -1540,13 +1738,12 @@ class FCAMP(FlowCPSBase):
                             stream_sums["policy_loss"]
                             / valid_denominator
                         ),
-                        "kl": stream_sums["kl"] / valid_denominator,
-                        "per_factor_kl": (
-                            stream_sums["per_factor_kl"]
-                            / max(factor_denominator, 1.0)
+                        "logratio_sq_proxy": (
+                            stream_sums["logratio_sq_proxy"]
+                            / valid_denominator
                         ),
-                        "full_chunk_path_kl": (
-                            stream_sums["full_chunk_path_kl"]
+                        "joint_logratio_sq_proxy": (
+                            stream_sums["joint_logratio_sq_proxy"]
                             / max(chunk_denominator, 1.0)
                         ),
                         "ratio": stream_sums["ratio"] / valid_denominator,
@@ -1554,43 +1751,80 @@ class FCAMP(FlowCPSBase):
                     }
                     for key, value in stream_means.items():
                         combined_metrics[key] += objective_weight * value
-                        stream_totals[name][key] += value
-                    stream_steps[name] += 1
+                    pending_stream_metrics.append(
+                        (name, stream_means, stream_frame_sums)
+                    )
 
-                observed_mb_kl = combined_metrics["kl"]
-                previous_lr = float(self.learning_rate)
-                self._update_adaptive_learning_rates(observed_mb_kl)
-                if self.learning_rate < previous_lr:
-                    lr_decrease_steps += 1
-                elif self.learning_rate > previous_lr:
-                    lr_increase_steps += 1
-                else:
-                    lr_hold_steps += 1
                 grad_norm = nn.utils.clip_grad_norm_(
                     self._policy.parameters(), float(self.cfg.max_grad_norm)
                 )
-                self.actor_optimizer.step()
-                for key in metric_names:
+                acceptance_indices = torch.cat(
+                    [idx for _, _, idx in parts],
+                    dim=0,
+                )
+                accepted, exact_frame_kl, rejected = self._atomic_actor_step(
+                    actor_obs=actor_obs.index_select(
+                        0,
+                        acceptance_indices,
+                    ),
+                    old_mean_z=old_mean_z.index_select(
+                        0,
+                        acceptance_indices,
+                    ),
+                    old_cps_cholesky=old_cps_cholesky,
+                    valid=valid.index_select(
+                        0,
+                        acceptance_indices,
+                    ),
+                    micro_batch_size=micro_batch_size,
+                )
+                rejected_attempts += rejected
+                lr_decrease_steps += rejected
+                if not accepted:
+                    skipped_steps += 1
+                    continue
+                lr_hold_steps += 1
+                for key in sample_metric_names:
                     totals[key] += combined_metrics[key]
+                totals["exact_kl"] += float(
+                    exact_frame_kl.mean().item()
+                )
+                totals["exact_joint_chunk_kl"] += float(
+                    exact_frame_kl.sum().item()
+                )
                 totals["grad_norm"] += float(grad_norm)
+                totals["joint_log_ratio_abs_max"] = max(
+                    totals["joint_log_ratio_abs_max"],
+                    combined_joint_log_ratio_abs_max,
+                )
+                for name, stream_means, stream_frame_sums in (
+                    pending_stream_metrics
+                ):
+                    for key, value in stream_means.items():
+                        stream_totals[name][key] += value
+                    for key, value in stream_frame_sums.items():
+                        frame_totals[name][key] += value
+                    stream_steps[name] += 1
+                exact_frame_kl_total += exact_frame_kl
+                exact_frame_kl_max = max(
+                    exact_frame_kl_max,
+                    float(exact_frame_kl.max().item()),
+                )
                 steps += 1
-                epoch_kl_sum += observed_mb_kl
-                epoch_steps += 1
-            if (
-                float(self.cfg.desired_kl) > 0
-                and epoch_steps > 0
-                and epoch_kl_sum / epoch_steps
-                > float(self.cfg.kl_early_stop_factor) * float(self.cfg.desired_kl)
-            ):
-                early_stop_epoch = epoch + 1
-                break
 
         denom = max(steps, 1)
         metrics = {
             "fcamp/policy_loss": totals["policy_loss"] / denom,
-            "fcamp/kl": totals["kl"] / denom,
-            "fcamp/per_factor_kl": totals["per_factor_kl"] / denom,
-            "fcamp/full_chunk_path_kl": totals["full_chunk_path_kl"] / denom,
+            "fcamp/kl": totals["exact_kl"] / denom,
+            "fcamp/joint_chunk_kl": (
+                totals["exact_joint_chunk_kl"] / denom
+            ),
+            "fcamp/logratio_sq_proxy": (
+                totals["logratio_sq_proxy"] / denom
+            ),
+            "fcamp/joint_logratio_sq_proxy": (
+                totals["joint_logratio_sq_proxy"] / denom
+            ),
             "fcamp/ratio": totals["ratio"] / denom,
             "fcamp/clip_fraction": totals["clip"] / denom,
             "fcamp/actor_grad_norm": totals["grad_norm"] / denom,
@@ -1599,12 +1833,16 @@ class FCAMP(FlowCPSBase):
             "fcamp/kl_target_per_step": float(self.cfg.desired_kl),
             "fcamp/kl_units": float(self.kl_units),
             "fcamp/lr_decrease_steps": float(lr_decrease_steps),
-            "fcamp/lr_increase_steps": float(lr_increase_steps),
             "fcamp/lr_hold_steps": float(lr_hold_steps),
             "fcamp/actor_optimizer_steps": float(steps),
-            "fcamp/actor_early_stop_epoch": float(early_stop_epoch),
+            "fcamp/actor_rejected_attempts": float(rejected_attempts),
+            "fcamp/actor_skipped_steps": float(skipped_steps),
+            "fcamp/exact_frame_kl_max": float(exact_frame_kl_max),
+            "fcamp/kl_acceptance_limit": (
+                float(self.cfg.kl_acceptance_factor)
+                * float(self.cfg.desired_kl)
+            ),
             "fcamp/joint_log_ratio_abs_max": totals["joint_log_ratio_abs_max"],
-            "fcamp/ratio_mode": 2.0,
         }
         objective_weights = {
             name: weight for name, _, weight, _ in stream_specs
@@ -1614,12 +1852,16 @@ class FCAMP(FlowCPSBase):
             metrics[
                 f"stream/{name}/actor_objective_weight"
             ] = objective_weight
-            for key in metric_names:
+            for key in sample_metric_names:
                 metrics[f"stream/{name}/actor_{key}"] = (
                     stream_totals[name][key] / stream_denom
                 )
         for frame_idx in range(h):
-            frame_values = {"kl": 0.0, "ratio": 0.0, "clip": 0.0}
+            frame_values = {
+                "logratio_sq_proxy": 0.0,
+                "ratio": 0.0,
+                "clip": 0.0,
+            }
             for name in objective_weights:
                 count = float(
                     frame_totals[name]["count"][frame_idx].item()
@@ -1634,8 +1876,13 @@ class FCAMP(FlowCPSBase):
                         ).item()
                     )
             metrics[f"fcamp/frame_{frame_idx}_kl"] = float(
-                frame_values["kl"]
+                (
+                    exact_frame_kl_total[frame_idx] / max(steps, 1)
+                ).item()
             )
+            metrics[
+                f"fcamp/frame_{frame_idx}_logratio_sq_proxy"
+            ] = float(frame_values["logratio_sq_proxy"])
             metrics[f"fcamp/frame_{frame_idx}_ratio"] = float(
                 frame_values["ratio"]
             )
@@ -2452,6 +2699,7 @@ class FCAMP(FlowCPSBase):
         channel_valid = rollout["channel_valid"]
         metrics: dict[str, float] = {}
         metrics.update(actor_metrics)
+        metrics.update(self._final_cps_statistics())
         metrics.update(critic_metrics)
         metrics.update(disc_metrics)
         metrics.update(reward_metrics)
@@ -2585,6 +2833,18 @@ class FCAMP(FlowCPSBase):
                 "act/policy_bound_violation_max": float(
                     rollout["action_bound_violation_max"]
                 ),
+                "control/raw_z_abs_max": float(
+                    rollout["raw_z_abs_max"]
+                ),
+                "control/raw_z_tanh_saturation_fraction": float(
+                    rollout["raw_z_tanh_saturation_fraction"]
+                ),
+                "control/command_rate_abs_max": float(
+                    rollout["command_rate_abs_max"]
+                ),
+                "control/command_rate_support_max": float(
+                    rollout["command_rate_support_max"]
+                ),
                 "disc_contract/fk_alignment_abs_max": float(
                     rollout["fk_alignment_abs_max"]
                 ),
@@ -2669,10 +2929,29 @@ class FCAMP(FlowCPSBase):
         print(
             f"[FCAMP] policy={metrics.get('fcamp/policy_loss', float('nan')):.5f} "
             f"kl={metrics.get('fcamp/kl', float('nan')):.6f} "
+            f"max_kl={metrics.get('fcamp/exact_frame_kl_max', float('nan')):.6f}/"
+            f"{metrics.get('fcamp/kl_acceptance_limit', float('nan')):.6f} "
             f"ratio={metrics.get('fcamp/ratio', float('nan')):.4f} "
             f"clip={metrics.get('fcamp/clip_fraction', float('nan')):.4f} "
             f"grad={metrics.get('fcamp/actor_grad_norm', float('nan')):.4f} "
-            f"lr={metrics.get('fcamp/actor_lr', float('nan')):.6f}",
+            f"lr={metrics.get('fcamp/actor_lr', float('nan')):.6f} "
+            f"accept={metrics.get('fcamp/actor_optimizer_steps', 0.0):.0f} "
+            f"reject={metrics.get('fcamp/actor_rejected_attempts', 0.0):.0f} "
+            f"skip={metrics.get('fcamp/actor_skipped_steps', 0.0):.0f}",
+            flush=True,
+        )
+        print(
+            "[FCAMP_CONTROL] "
+            f"physical_rms={metrics.get('policy/cps_physical_rms_achieved', float('nan')):.5f}/"
+            f"{metrics.get('policy/cps_physical_rms_target', float('nan')):.5f} "
+            f"cps_scale={metrics.get('policy/cps_physical_scale', float('nan')):.6f} "
+            f"mean_scale={metrics.get('policy/flow_mean_raw_scale', float('nan')):.6f} "
+            f"shape={metrics.get('policy/cps_shape_norm', float('nan')):.4f}/"
+            f"{metrics.get('policy/cps_shape_radius', float('nan')):.4f} "
+            f"raw_z_max={metrics.get('control/raw_z_abs_max', float('nan')):.4f} "
+            f"tanh_sat={metrics.get('control/raw_z_tanh_saturation_fraction', float('nan')):.6f} "
+            f"rate_support={metrics.get('control/command_rate_support_max', float('nan')):.4f} "
+            f"bound_violation={metrics.get('act/policy_bound_violation_max', float('nan')):.2e}",
             flush=True,
         )
         print(
@@ -2775,6 +3054,18 @@ class FCAMP(FlowCPSBase):
             flush=True,
         )
         print(
+            "[CONTROL] variable=raw_target_rate "
+            "decoder_owner=environment mean=initial_cps_standardized_flow "
+            "covariance=bounded_single_final_dense_cholesky "
+            "metric=finite_h_carried_rate_response "
+            f"dt={self.env.dt:.5f} rho={self.env.command_rate_decay:.8f} "
+            f"half_life={self.env.rate_half_life_seconds:.5f}s "
+            f"rate_limit=[{float(self.env.command_rate_limit.min().item()):.3f},"
+            f"{float(self.env.command_rate_limit.max().item()):.3f}]/s "
+            f"physical_rms={self.cps_physical_rms:.5f}",
+            flush=True,
+        )
+        print(
             f"[STYLE_PRIOR] discriminator=standard_mlp hidden={list(self.cfg.amp.hidden_dims)} "
             f"BCE=True GP={self.cfg.amp.grad_penalty} replay={self.cfg.amp.replay_size} "
             f"EMA=False policy_conditioning=False motion_end_terminal=True "
@@ -2783,6 +3074,8 @@ class FCAMP(FlowCPSBase):
             f"action_contract={FCAMP_CHECKPOINT_CONTRACT['action_contract']} "
             f"reset_contract={FCAMP_CHECKPOINT_CONTRACT['reset_contract']} "
             f"validation_contract={FCAMP_CHECKPOINT_CONTRACT['validation_contract']} "
+            f"actor_mean_contract={FCAMP_CHECKPOINT_CONTRACT['actor_mean_contract']} "
+            f"cps_metric_contract={FCAMP_CHECKPOINT_CONTRACT['cps_metric_contract']} "
             f"ppo_contract={FCAMP_CHECKPOINT_CONTRACT['ppo_contract']} "
             f"phase0_trajectory_attempt_stream={self.cfg.streams.phase0_fraction:.2f}",
             flush=True,

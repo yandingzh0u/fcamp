@@ -94,6 +94,10 @@ class MimicStepMixin:
         # From this point onward every post-action observation must expose the
         # target that was actually executed. Done envs overwrite this state
         # with their reconstructed reset target inside ``_reset_env_state``.
+        applied_command_rate = (
+            applied_actions - previous_action
+        ) / float(self.dt)
+        self.command_rate.copy_(applied_command_rate)
         self.last_action.copy_(applied_actions)
         # Capture the true post-action state before any optional reset.  FCAMP
         # normally disables auto-reset within a chunk, while this also makes the
@@ -156,6 +160,9 @@ class MimicStepMixin:
             "interval_push_mask": self._last_interval_push_mask.clone(),
             "intervention_edge_mask": intervention_edge_mask,
             "imitation_frame": imitation_frame,
+            "previous_action": previous_action,
+            "applied_action": applied_actions.clone(),
+            "command_rate": applied_command_rate.clone(),
         }
         if terminal_observation is not None:
             info["final_observation"] = terminal_observation

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import inspect
 from types import SimpleNamespace
 
@@ -29,76 +30,110 @@ class _RecordingSGD(torch.optim.SGD):
         return super().step(closure)
 
 
-def test_fcamp_actor_adapts_lr_from_masked_joint_path_kl_before_step() -> None:
+def test_fcamp_actor_step_is_atomic_and_uses_post_step_exact_kl() -> None:
     algo = object.__new__(FCAMP)
     algo.env = SimpleNamespace(device=torch.device("cpu"))
     algo.horizon_h = 2
     algo.chunk_dim = 2
-    algo.actor_obs_dim = 1
     algo.cfg = SimpleNamespace(
-        flow_steps=2,
-        clip_range=0.2,
-        credit=SimpleNamespace(ratio_mode="joint_path"),
-        max_grad_norm=1.0,
-        policy_epochs=1,
         desired_kl=0.01,
-        kl_early_stop_factor=100.0,
-        num_mini_batches=1,
-        micro_batch_size=0,
+        kl_acceptance_factor=4.0,
+    )
+    algo._policy = torch.nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        algo._policy.weight.fill_(1.0)
+    algo.learning_rate = 3.0e-4
+    algo.min_lr = 1.0e-5
+    algo.actor_optimizer = _RecordingSGD(
+        algo._policy.parameters(), lr=algo.learning_rate
+    )
+    algo._policy.weight.grad = torch.ones_like(algo._policy.weight)
+
+    post_step_kl = iter(
+        (
+            torch.tensor([0.20, 0.10]),
+            torch.tensor([0.03, 0.02]),
+        )
+    )
+    algo._exact_rollout_frame_kl = lambda *args, **kwargs: next(post_step_kl)
+
+    accepted, frame_kl, rejected = algo._atomic_actor_step(
+        actor_obs=torch.zeros(2, 1),
+        old_mean_z=torch.zeros(2, 2),
+        old_cps_cholesky=torch.eye(2),
+        valid=torch.ones(2, 2, dtype=torch.bool),
+        micro_batch_size=2,
+    )
+
+    assert accepted
+    assert rejected == 1
+    torch.testing.assert_close(frame_kl, torch.tensor([0.03, 0.02]))
+    assert algo.actor_optimizer.step_lrs == [
+        pytest.approx(3.0e-4),
+        pytest.approx(1.5e-4),
+    ]
+    assert float(algo._policy.weight.item()) == pytest.approx(
+        1.0 - 1.5e-4
+    )
+    assert algo.learning_rate == pytest.approx(1.5e-4)
+
+
+def test_fcamp_rejected_actor_step_restores_adam_moments_and_counter() -> None:
+    algo = object.__new__(FCAMP)
+    algo.env = SimpleNamespace(device=torch.device("cpu"))
+    algo.horizon_h = 2
+    algo.chunk_dim = 2
+    algo.cfg = SimpleNamespace(
+        desired_kl=0.01,
+        kl_acceptance_factor=4.0,
     )
     algo._policy = torch.nn.Linear(1, 1, bias=False)
     algo.learning_rate = 3.0e-4
     algo.min_lr = 1.0e-5
-    algo.max_lr = 1.0e-3
-    algo.actor_optimizer = _RecordingSGD(
-        algo._policy.parameters(), lr=algo.learning_rate
+    algo.actor_optimizer = torch.optim.AdamW(
+        algo._policy.parameters(),
+        lr=algo.learning_rate,
+        weight_decay=0.0,
+    )
+    # Prime Adam so rollback must restore moments and the step counter, not
+    # merely an uninitialized optimizer.
+    algo._policy.weight.grad = torch.ones_like(algo._policy.weight)
+    algo.actor_optimizer.step()
+    algo.actor_optimizer.zero_grad(set_to_none=True)
+    parameter_before = algo._policy.weight.detach().clone()
+    optimizer_state_before = copy.deepcopy(
+        algo.actor_optimizer.state_dict()["state"]
+    )
+    algo._policy.weight.grad = torch.full_like(algo._policy.weight, 0.5)
+    algo._exact_rollout_frame_kl = (
+        lambda *args, **kwargs: torch.tensor([0.2, 0.1])
     )
 
-    delta = torch.tensor(
-        [
-            [[0.20, 0.20], [0.20, 0.20]],
-            [[0.10, 0.30], [0.10, 0.30]],
-        ]
-    )
-    actor_obs = torch.arange(2, dtype=torch.float32).unsqueeze(-1)
-
-    def recompute(obs, _latent_path):
-        indices = obs[:, 0].long()
-        return delta.index_select(0, indices) + 0.0 * algo._policy.weight.sum()
-
-    algo._recompute_cps_path_stats = recompute
-    observed: list[float] = []
-    inherited_controller = FlowCPSBase._update_adaptive_learning_rates.__get__(
-        algo, FCAMP
+    accepted, _, rejected = algo._atomic_actor_step(
+        actor_obs=torch.zeros(2, 1),
+        old_mean_z=torch.zeros(2, 2),
+        old_cps_cholesky=torch.eye(2),
+        valid=torch.ones(2, 2, dtype=torch.bool),
+        micro_batch_size=2,
     )
 
-    def update_lr(kl: float) -> None:
-        observed.append(float(kl))
-        inherited_controller(kl)
-
-    algo._update_adaptive_learning_rates = update_lr
-    valid = torch.tensor([[[True, True], [True, False]]])
-    rollout = {
-        "actions": torch.zeros(1, 2, 2, 1),
-        "actor_obs": actor_obs.view(1, 2, 1),
-        "latents": torch.zeros(1, 2, 3, 2),
-        "old_log_probs": torch.zeros(1, 2, 2, 2),
-        "advantages": torch.ones(1, 2, 2),
-        "valid": valid,
-    }
-
-    metrics = algo._actor_update(rollout)
-    mask = valid.reshape(2, 2).float()
-    joint_path_delta = delta.sum(dim=1)
-    expected_kl = float(
-        (0.5 * joint_path_delta.square() * mask).sum().item() / mask.sum().item()
-    )
-
-    assert observed == [pytest.approx(expected_kl)]
-    assert algo.actor_optimizer.step_lrs == [pytest.approx(2.0e-4)]
-    assert metrics["fcamp/actor_lr_start"] == pytest.approx(3.0e-4)
-    assert metrics["fcamp/actor_lr"] == pytest.approx(2.0e-4)
-    assert metrics["fcamp/lr_decrease_steps"] == 1.0
+    assert not accepted
+    assert rejected == 3
+    torch.testing.assert_close(algo._policy.weight, parameter_before)
+    optimizer_state_after = algo.actor_optimizer.state_dict()["state"]
+    assert optimizer_state_after.keys() == optimizer_state_before.keys()
+    for parameter_id in optimizer_state_before:
+        assert (
+            optimizer_state_after[parameter_id].keys()
+            == optimizer_state_before[parameter_id].keys()
+        )
+        for name, expected in optimizer_state_before[parameter_id].items():
+            actual = optimizer_state_after[parameter_id][name]
+            if torch.is_tensor(expected):
+                torch.testing.assert_close(actual, expected)
+            else:
+                assert actual == expected
+    assert algo.learning_rate == pytest.approx(3.75e-5)
 
 
 def test_fcamp_owns_the_production_updater() -> None:
@@ -188,12 +223,11 @@ def test_discriminator_update_cannot_change_deterministic_actor_action() -> None
     algo.base_actor_obs_dim = 3
     algo.actor_obs_dim = 3
     algo.num_act = 1
+    algo.horizon_h = 2
     algo.empirical_normalization = False
     algo.discriminator = StyleDiscriminator(6, hidden_dims=(4,))
     algo.disc_normalizer = RunningNormalizer(6, device="cpu")
-    algo._flow_mean_actions = lambda actor_obs, prev_action: (
-        actor_obs[:, :2].reshape(-1, 2, 1) + prev_action[:, None, :]
-    )
+    algo._flow_mean_raw = lambda actor_obs: actor_obs[:, :2]
     obs = torch.tensor([[1.0, 2.0, 0.5], [3.0, 4.0, -0.25]])
 
     before = algo.deterministic_actions(obs)
@@ -211,12 +245,24 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
     algo = object.__new__(FCAMP)
     algo.action_low = torch.tensor([-5.0, -5.0])
     algo.action_high = torch.tensor([5.0, 5.0])
+    algo.env = SimpleNamespace(
+        dt=0.02,
+        command_rate_decay=2.0 ** (-0.02 / 0.08),
+        command_rate_limit=torch.tensor([80.0, 40.0]),
+    )
 
     valid_state = {
         **FCAMP_CHECKPOINT_CONTRACT,
         "discriminator_policy_conditioning": False,
         "action_low": algo.action_low.clone(),
         "action_high": algo.action_high.clone(),
+        "decoder_control_dt": float(algo.env.dt),
+        "decoder_command_rate_decay": float(
+            algo.env.command_rate_decay
+        ),
+        "decoder_command_rate_limit": (
+            algo.env.command_rate_limit.clone()
+        ),
     }
     algo.validate_checkpoint_payload({"algo_state": valid_state})
 
@@ -234,7 +280,7 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
         with pytest.raises(ValueError, match=name):
             algo.validate_checkpoint_payload({"algo_state": mismatched})
 
-    for historical_schema in (8, 9, 11, 13, 14):
+    for historical_schema in (8, 9, 11, 13, 14, 15):
         historical = dict(valid_state)
         historical["fcamp_schema_version"] = historical_schema
         with pytest.raises(ValueError, match="fcamp_schema_version"):
@@ -253,6 +299,17 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
         algo.validate_checkpoint_payload(
             {"algo_state": wrong_action_domain}
         )
+
+    decoder_mismatches = {
+        "decoder_control_dt": 0.01,
+        "decoder_command_rate_decay": 0.5,
+        "decoder_command_rate_limit": torch.tensor([80.0, 41.0]),
+    }
+    for name, mismatched_value in decoder_mismatches.items():
+        mismatched = dict(valid_state)
+        mismatched[name] = mismatched_value
+        with pytest.raises(ValueError, match=name):
+            algo.validate_checkpoint_payload({"algo_state": mismatched})
 
 
 def test_fcamp_validates_contract_before_restoring_base_state(monkeypatch) -> None:

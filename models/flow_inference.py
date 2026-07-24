@@ -6,15 +6,14 @@ from .flow_sampling import flow_ode_mean
 
 
 @torch.no_grad()
-def deterministic_flow_actions(
+def deterministic_flow_raw_targets(
     policy,
     observation: torch.Tensor,
     *,
     steps: int,
     initial_noise: torch.Tensor | None = None,
-    prev_action: torch.Tensor | None = None,
 ) -> torch.Tensor:
-
+    """Integrate the deterministic Flow ODE in final raw target-rate space."""
     if initial_noise is None:
         initial_noise = torch.zeros(
             observation.shape[0],
@@ -44,8 +43,4 @@ def deterministic_flow_actions(
         model_output = policy.velocity_field(obs_prep, latent, time_batch)
         latent = flow_ode_mean(model_output, latent, sigma_schedule, step_index)
 
-    return policy._action_transform(latent, prev_action=prev_action).view(
-        initial_noise.shape[0],
-        policy.horizon,
-        policy.action_dim,
-    )
+    return policy.reshape_raw_targets(latent)
