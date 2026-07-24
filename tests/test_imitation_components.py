@@ -13,7 +13,6 @@ from components.imitation.motion_features import (
 )
 from components.imitation.temporal_history import TemporalFeatureHistory
 from components.normalization.running_stats import RunningNormalizer
-from components.replay.sample_buffer import SampleReplayBuffer
 from components.imitation.style_reward import discriminator_style_reward
 from models.style_discriminator import StyleDiscriminator, compute_style_discriminator_loss
 
@@ -193,20 +192,6 @@ def test_standard_discriminator_loss_has_bilateral_gp_and_backpropagates() -> No
     assert "disc/replay_bce" in output.metrics
     output.loss.backward()
     assert all(parameter.grad is not None for parameter in discriminator.parameters())
-
-
-def test_replay_wrap_dtype_sample_and_stats() -> None:
-    replay = SampleReplayBuffer(5, 3, storage_dtype=torch.float16, pin_memory=False)
-    replay.push(torch.arange(12, dtype=torch.float32).reshape(4, 3), step=1)
-    replay.push(torch.arange(12, 24, dtype=torch.float32).reshape(4, 3), step=2)
-    assert len(replay) == 5
-    assert replay.is_full
-    sample = replay.sample(7, dtype=torch.float32, generator=torch.Generator().manual_seed(0))
-    assert sample.shape == (7, 3)
-    assert sample.dtype == torch.float32
-    stats = replay.statistics(current_step=3)
-    assert stats["replay/fill_fraction"] == 1.0
-    assert stats["replay/replacement_count"] == 3.0
 
 
 def test_normalizer_freeze_commit_and_state_dict_roundtrip() -> None:

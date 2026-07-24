@@ -29,7 +29,6 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
         f"anchor_pos_bad={metrics.get(f'{prefix}/anchor_pos_bad_frac', float('nan')):.5f} "
         f"anchor_ori_bad={metrics.get(f'{prefix}/anchor_ori_bad_frac', float('nan')):.5f} "
         f"ee_body_bad={metrics.get(f'{prefix}/ee_body_bad_frac', float('nan')):.5f} "
-        f"fall_contact={metrics.get(f'{prefix}/fall_contact_frac', float('nan')):.5f} "
         f"pose_fail={metrics.get(f'{prefix}/pose_fail_frac', float('nan')):.5f} "
         f"time_out={metrics.get(f'{prefix}/time_out_frac', float('nan')):.5f} "
         f"anchor_z={metrics.get(f'{prefix}/anchor_z', float('nan')):.5f} "
@@ -81,7 +80,6 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
         f"anchor_pos_p50={metrics.get(f'{prefix}/terminal/anchor_pos_bad/phase_p50', float('nan')):.1f} "
         f"anchor_ori_p50={metrics.get(f'{prefix}/terminal/anchor_ori_bad/phase_p50', float('nan')):.1f} "
         f"ee_body_p50={metrics.get(f'{prefix}/terminal/ee_body_bad/phase_p50', float('nan')):.1f} "
-        f"fall_contact_p50={metrics.get(f'{prefix}/terminal/fall_contact/phase_p50', float('nan')):.1f} "
         f"motion_complete_p50={metrics.get(f'{prefix}/terminal/motion_complete/phase_p50', float('nan')):.1f}",
         flush=True,
     )

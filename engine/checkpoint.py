@@ -33,7 +33,6 @@ _RESUME_ENV_KEYS = (
     "adaptive_uniform_ratio",
     "adaptive_kernel_size",
     "adaptive_lambda",
-    "termination_mode",
     "terminate_on_motion_end",
     "motion_reference_mode",
     "root_velocity_mode",

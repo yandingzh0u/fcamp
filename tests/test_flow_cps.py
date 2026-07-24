@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 from types import SimpleNamespace
 
@@ -8,6 +9,13 @@ import torch
 
 from components.rollout.flow_cps_base import FlowCPSBase
 from models.flow_cps_policy import FlowMatchingPolicy
+
+
+class _FlowCPSReferenceHarness(FlowCPSBase):
+    """Explicit test-only adapter for the abstract reference updater."""
+
+    def update(self, rollout: dict, collect_time: float) -> dict:
+        return super().update(rollout, collect_time)
 
 
 # --------------------------------------------------------------------------- #
@@ -98,9 +106,14 @@ def _build_algo(env, **overrides):
     )
     base.update(overrides)
     cfg = SimpleNamespace(**base)
-    algo = FlowCPSBase(cfg=cfg, env=env, simulation_app=None)
+    algo = _FlowCPSReferenceHarness(cfg=cfg, env=env, simulation_app=None)
     algo.build()
     return algo
+
+
+def test_flow_cps_base_is_not_a_concrete_production_algorithm() -> None:
+    assert inspect.isabstract(FlowCPSBase)
+    assert not inspect.isabstract(_FlowCPSReferenceHarness)
 
 
 def test_failure_has_zero_bootstrap_and_no_handwritten_penalty() -> None:

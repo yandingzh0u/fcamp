@@ -122,28 +122,6 @@ class G1MimicEnv(
             dtype=torch.long,
             device=self.device,
         )
-        amp_contact_allowed = (
-            "knee_link",
-            "ankle_pitch_link",
-            "ankle_roll_link",
-            "hip_roll_link",
-            "elbow_link",
-            "wrist_roll_link",
-            "wrist_pitch_link",
-            "wrist_yaw_link",
-            "rubber_hand",
-            "_FOOT",
-            *CONTACT_ALLOWED_SUBSTRINGS,
-        )
-        self.amp_undesired_contact_body_ids = torch.tensor(
-            [
-                self.contact_sensor.body_names.index(body_name)
-                for body_name in self.contact_sensor.body_names
-                if not any(token in body_name for token in amp_contact_allowed)
-            ],
-            dtype=torch.long,
-            device=self.device,
-        )
         self.foot_body_names = list(MIMIC_FOOT_BODY_NAMES)
         self.foot_contact_body_ids = torch.tensor(
             [self.contact_sensor.body_names.index(name) for name in self.foot_body_names],
@@ -355,6 +333,25 @@ class G1MimicEnv(
         observation = self.get_observation()
         return observation.index_select(0, env_ids)
 
+    def _reference_policy_action(
+        self,
+        env_ids: torch.Tensor,
+        reference_joint_pos: torch.Tensor,
+    ) -> torch.Tensor:
+        """Convert a clean reference pose into the matching policy command."""
+
+        default_joint_pos = self.default_action_joint_pos.index_select(0, env_ids)
+        reference_action = (
+            reference_joint_pos - default_joint_pos
+        ) / self.action_scale
+        if not bool(torch.isfinite(reference_action).all()):
+            raise RuntimeError(
+                "Reference pose produced a non-finite reset policy command"
+            )
+        if bool(getattr(self, "_strict_action_contract", False)):
+            self.validate_policy_actions(reference_action)
+        return reference_action
+
     def _reset_env_state(
         self,
         env_ids: torch.Tensor,
@@ -393,6 +390,10 @@ class G1MimicEnv(
 
         self.scene.reset(env_ids=env_ids)
         reference = self.motion.get_frame(phase_indices)
+        reference_action = self._reference_policy_action(
+            env_ids,
+            reference["joint_pos"],
+        )
         root_pos = reference["root_pos_w"].clone()
         root_quat = reference["root_quat_w"].clone()
         root_lin_vel = reference["root_lin_vel_w"].clone()
@@ -411,10 +412,10 @@ class G1MimicEnv(
             env_ids=env_ids,
             root_velocity_frame=root_velocity_frame,
         )
-        # Reset starts a new policy recurrence.  The state writer above does
-        # not execute a policy action (there is no physics step), so it must not
-        # be misrepresented as the previous action.
-        self.last_action[env_ids] = 0.0
+        # The reset pose and the actor's continuation anchor are one atomic
+        # controller state.  Use the clean reference target, not the noised
+        # plant pose written above.
+        self.last_action[env_ids] = reference_action
         self.scene.update(self.physics_dt)
 
     def begin_reset_phase_diagnostics(self) -> None:
@@ -514,7 +515,6 @@ class G1MimicEnv(
             device=self.device,
         )
         self.record_motion_failures = True
-        self.termination_mode = str(self.config.termination_mode)
         self.terminate_on_motion_end = bool(self.config.terminate_on_motion_end)
         self.policy_observation_mode = str(
             getattr(self.config, "policy_observation_mode", "tracking")

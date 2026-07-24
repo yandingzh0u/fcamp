@@ -13,7 +13,7 @@ from .metrics_logger import MetricsLogger
 from envs.g1_mimic import G1MimicEnv
 
 
-VALIDATION_PROTOCOL_VERSION = 4.0
+VALIDATION_PROTOCOL_VERSION = 5.0
 
 
 class CoreTrainer:

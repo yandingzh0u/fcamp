@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +14,7 @@ from components.rollout.training_streams import (
     CURRICULUM_STREAM,
     PHASE0_STREAM,
 )
-from method.fcamp import FCAMP
+from method.fcamp import FCAMP, FCAMP_CHECKPOINT_CONTRACT
 from models.mlp_actor_critic import EmpiricalNormalization
 from models.style_discriminator import StyleDiscriminator
 
@@ -98,6 +99,11 @@ def test_fcamp_actor_adapts_lr_from_masked_joint_path_kl_before_step() -> None:
     assert metrics["fcamp/actor_lr_start"] == pytest.approx(3.0e-4)
     assert metrics["fcamp/actor_lr"] == pytest.approx(2.0e-4)
     assert metrics["fcamp/lr_decrease_steps"] == 1.0
+
+
+def test_fcamp_owns_the_production_updater() -> None:
+    assert FCAMP.update is not FlowCPSBase.update
+    assert not inspect.isabstract(FCAMP)
 
 
 def test_prefix_context_contains_only_policy_and_value_state() -> None:
@@ -201,45 +207,76 @@ def test_discriminator_update_cannot_change_deterministic_actor_action() -> None
     torch.testing.assert_close(after, before)
 
 
-def test_fcamp_rejects_discriminator_conditioned_checkpoint_before_load() -> None:
+def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
     algo = object.__new__(FCAMP)
     algo.action_low = torch.tensor([-5.0, -5.0])
     algo.action_high = torch.tensor([5.0, 5.0])
 
-    with pytest.raises(ValueError, match="reward-only"):
-        algo.validate_checkpoint_payload(
-            {"algo_state": {"fcamp_schema_version": 5}}
+    valid_state = {
+        **FCAMP_CHECKPOINT_CONTRACT,
+        "discriminator_policy_conditioning": False,
+        "action_low": algo.action_low.clone(),
+        "action_high": algo.action_high.clone(),
+    }
+    algo.validate_checkpoint_payload({"algo_state": valid_state})
+
+    for name in FCAMP_CHECKPOINT_CONTRACT:
+        missing = dict(valid_state)
+        missing.pop(name)
+        with pytest.raises(ValueError, match=name):
+            algo.validate_checkpoint_payload({"algo_state": missing})
+
+    for name, expected in FCAMP_CHECKPOINT_CONTRACT.items():
+        mismatched = dict(valid_state)
+        mismatched[name] = (
+            expected + 1 if isinstance(expected, int) else f"{expected}_mismatch"
         )
+        with pytest.raises(ValueError, match=name):
+            algo.validate_checkpoint_payload({"algo_state": mismatched})
+
+    for historical_schema in (8, 9, 11, 13, 14):
+        historical = dict(valid_state)
+        historical["fcamp_schema_version"] = historical_schema
+        with pytest.raises(ValueError, match="fcamp_schema_version"):
+            algo.validate_checkpoint_payload({"algo_state": historical})
+
+    discriminator_conditioned = dict(valid_state)
+    discriminator_conditioned["discriminator_policy_conditioning"] = True
     with pytest.raises(ValueError, match="discriminator-conditioned"):
         algo.validate_checkpoint_payload(
-            {
-                "algo_state": {
-                    "fcamp_schema_version": 8,
-                    "discriminator_policy_conditioning": True,
-                }
-            }
+            {"algo_state": discriminator_conditioned}
         )
-    algo.validate_checkpoint_payload(
-        {
-            "algo_state": {
-                "fcamp_schema_version": 8,
-                "discriminator_policy_conditioning": False,
-                "action_low": algo.action_low.clone(),
-                "action_high": algo.action_high.clone(),
-            }
-        }
-    )
+
+    wrong_action_domain = dict(valid_state)
+    wrong_action_domain["action_high"] = algo.action_high + 0.01
     with pytest.raises(ValueError, match="action_high differs"):
         algo.validate_checkpoint_payload(
-            {
-                "algo_state": {
-                    "fcamp_schema_version": 8,
-                    "discriminator_policy_conditioning": False,
-                    "action_low": algo.action_low.clone(),
-                    "action_high": algo.action_high + 0.01,
-                }
-            }
+            {"algo_state": wrong_action_domain}
         )
+
+
+def test_fcamp_validates_contract_before_restoring_base_state(monkeypatch) -> None:
+    algo = object.__new__(FCAMP)
+    algo.action_low = torch.tensor([-5.0])
+    algo.action_high = torch.tensor([5.0])
+    base_restore_calls: list[dict] = []
+
+    def record_base_restore(self, payload, reset_optimizer=False):
+        del self, reset_optimizer
+        base_restore_calls.append(payload)
+
+    monkeypatch.setattr(
+        FlowCPSBase,
+        "load_extra_checkpoint_state",
+        record_base_restore,
+    )
+
+    with pytest.raises(ValueError, match="fcamp_schema_version"):
+        algo.load_extra_checkpoint_state(
+            {"fcamp_schema_version": 8},
+            reset_optimizer=False,
+        )
+    assert base_restore_calls == []
 
 
 def test_rollout_snapshot_optimizes_actor_and_critic_before_discriminator() -> None:

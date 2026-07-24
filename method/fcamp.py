@@ -43,6 +43,15 @@ from models.mlp_actor_critic import EmpiricalNormalization
 from models.dual_flow_critic import SharedTrunkDualFlowCritic
 
 
+FCAMP_CHECKPOINT_CONTRACT = {
+    "fcamp_schema_version": 15,
+    "action_contract": "residual_absolute_v1",
+    "reset_contract": "phase_reference_action_v1",
+    "validation_contract": "tracking_primary_v1",
+    "ppo_contract": "fcamp_joint_flow_path_sum_v1",
+}
+
+
 def _masked_stats(prefix: str, values: torch.Tensor, mask: torch.Tensor | None = None) -> dict[str, float]:
     flat = values.detach().float().reshape(-1)
     if mask is not None:
@@ -224,6 +233,25 @@ class FCAMP(FlowCPSBase):
     # ------------------------------------------------------------------ #
     # Checkpointing
     # ------------------------------------------------------------------ #
+    def _validate_checkpoint_contract(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            raise ValueError(
+                "FCAMP checkpoint is missing its algorithm contract; start a fresh run."
+            )
+        for name, expected in FCAMP_CHECKPOINT_CONTRACT.items():
+            saved = state.get(name)
+            if type(saved) is not type(expected) or saved != expected:
+                raise ValueError(
+                    f"FCAMP checkpoint {name}={saved!r} differs from "
+                    f"the required contract {expected!r}; start a fresh run."
+                )
+        if bool(state.get("discriminator_policy_conditioning", True)):
+            raise ValueError(
+                "FCAMP checkpoints with discriminator-conditioned policies "
+                "cannot be resumed."
+            )
+        self._validate_checkpoint_action_domain(state)
+
     def _validate_checkpoint_action_domain(self, state: dict) -> None:
         for name, expected in (
             ("action_low", self.action_low),
@@ -243,20 +271,8 @@ class FCAMP(FlowCPSBase):
                 )
 
     def validate_checkpoint_payload(self, payload: dict) -> None:
-        state = payload.get("algo_state")
-        if not isinstance(state, dict) or int(
-            state.get("fcamp_schema_version", 0)
-        ) != 8:
-            raise ValueError(
-                "FCAMP checkpoint predates the reward-only discriminator "
-                "architecture; start a fresh run."
-            )
-        if bool(state.get("discriminator_policy_conditioning", True)):
-            raise ValueError(
-                "FCAMP checkpoints with discriminator-conditioned policies "
-                "cannot be resumed."
-            )
-        self._validate_checkpoint_action_domain(state)
+        state = payload.get("algo_state") if isinstance(payload, dict) else None
+        self._validate_checkpoint_contract(state)
 
     def extra_checkpoint_state(self) -> dict:
         payload = super().extra_checkpoint_state()
@@ -268,7 +284,7 @@ class FCAMP(FlowCPSBase):
                 "action_low": self.action_low.detach().cpu(),
                 "action_high": self.action_high.detach().cpu(),
                 "disc_window_replay": self.disc_window_replay.state_dict(),
-                "fcamp_schema_version": 8,
+                **FCAMP_CHECKPOINT_CONTRACT,
                 "imitation_history_steps": self.imitation_history_steps,
                 "imitation_frame_dim": self.imitation_frame_dim,
                 "prefix_context_dim": self.prefix_context_dim,
@@ -286,21 +302,11 @@ class FCAMP(FlowCPSBase):
         return payload
 
     def load_extra_checkpoint_state(self, payload: dict, reset_optimizer: bool = False) -> None:
+        if payload:
+            self._validate_checkpoint_contract(payload)
         super().load_extra_checkpoint_state(payload, reset_optimizer=reset_optimizer)
         if not payload:
             return
-        schema = int(payload.get("fcamp_schema_version", 0))
-        if schema != 8:
-            raise ValueError(
-                "FCAMP checkpoint predates the reward-only discriminator "
-                "architecture; start a fresh run."
-            )
-        if bool(payload.get("discriminator_policy_conditioning", True)):
-            raise ValueError(
-                "FCAMP checkpoints with discriminator-conditioned policies "
-                "cannot be resumed."
-            )
-        self._validate_checkpoint_action_domain(payload)
         saved_stream_ids = payload.get("stream_ids")
         if not torch.is_tensor(saved_stream_ids) or not torch.equal(
             saved_stream_ids.to(dtype=torch.int8, device="cpu"),
@@ -2772,7 +2778,12 @@ class FCAMP(FlowCPSBase):
             f"[STYLE_PRIOR] discriminator=standard_mlp hidden={list(self.cfg.amp.hidden_dims)} "
             f"BCE=True GP={self.cfg.amp.grad_penalty} replay={self.cfg.amp.replay_size} "
             f"EMA=False policy_conditioning=False motion_end_terminal=True "
-            f"replay_mode=complete_window_stratified fcamp_schema=8 "
+            f"replay_mode=complete_window_stratified "
+            f"fcamp_schema={FCAMP_CHECKPOINT_CONTRACT['fcamp_schema_version']} "
+            f"action_contract={FCAMP_CHECKPOINT_CONTRACT['action_contract']} "
+            f"reset_contract={FCAMP_CHECKPOINT_CONTRACT['reset_contract']} "
+            f"validation_contract={FCAMP_CHECKPOINT_CONTRACT['validation_contract']} "
+            f"ppo_contract={FCAMP_CHECKPOINT_CONTRACT['ppo_contract']} "
             f"phase0_trajectory_attempt_stream={self.cfg.streams.phase0_fraction:.2f}",
             flush=True,
         )

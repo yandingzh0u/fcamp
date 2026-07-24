@@ -13,6 +13,7 @@ exploration branch or hand-written failure penalty.
 from __future__ import annotations
 
 import math
+from abc import abstractmethod
 from collections import deque
 
 import torch
@@ -703,9 +704,9 @@ class FlowCPSBase(Algorithm):
                 # the raw env last action at chunk start (from prev_action_buf).
                 # This is the true cross-chunk continuity metric and is NOT
                 # polluted by chunk-end resets (prev_action_buf[chunk_idx] holds
-                # the env's last_action right before this chunk, which is 0 for
-                # freshly-reset envs and the previous chunk's last action for
-                # alive envs).
+                # the env's last_action right before this chunk: the
+                # phase-reference command for freshly reset envs, or the
+                # previous chunk's last action for alive envs).
                 first_action_delta = (chunk_first_action - prev_action).abs().mean(dim=-1)
                 metric_cross_chunk_delta_sum = metric_cross_chunk_delta_sum + first_action_delta.sum()
                 metric_cross_chunk_delta_count = metric_cross_chunk_delta_count + torch.tensor(
@@ -933,7 +934,14 @@ class FlowCPSBase(Algorithm):
         for group in self.actor_optimizer.param_groups:
             group["lr"] = self.learning_rate
 
+    @abstractmethod
     def update(self, rollout: dict, collect_time: float) -> dict:
+        """Reference updater for tests; production FCAMP supplies its own updater.
+
+        Keeping this implementation behind an abstract method lets the isolated
+        Flow-CPS test harness exercise the historical reference algorithm without
+        making ``FlowCPSBase`` a constructible production algorithm.
+        """
         import time as _time
 
         device = self.env.device

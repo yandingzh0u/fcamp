@@ -179,15 +179,8 @@ def run_validation_rollout(
     original_record_failures = env.record_motion_failures
     env.record_motion_failures = False
 
-
-    # The leaderboard evaluator is method-agnostic. Training recipes may use
-    # their paper-native termination, noise and push curricula, but validation
-    # always uses the clean largebox task protocol and ends at motion completion.
-    original_termination_mode = env.termination_mode
     original_terminate_on_motion_end = env.terminate_on_motion_end
-    env.termination_mode = "amp"
     env.terminate_on_motion_end = True
-
 
     original_max_episode_steps = env.max_episode_steps
     max_steps = validation_max_steps(tcfg, env)
@@ -249,7 +242,6 @@ def run_validation_rollout(
         "anchor_pos_bad",
         "anchor_ori_bad",
         "ee_body_bad",
-        "fall_contact",
     ]
     done_term_record = {
         name: torch.zeros(num_envs, dtype=torch.bool, device=env.device)
@@ -262,18 +254,6 @@ def run_validation_rollout(
     ee_body_count = len(env.ee_body_names)
     done_ee_z_error_record = torch.zeros(num_envs, ee_body_count, device=env.device)
     done_ee_bad_record = torch.zeros(num_envs, ee_body_count, dtype=torch.bool, device=env.device)
-    contact_force_key = "amp_undesired_contact_force_by_body"
-    amp_contact_body_ids = getattr(
-        env,
-        "amp_undesired_contact_body_ids",
-        torch.empty(0, dtype=torch.long, device=env.device),
-    )
-    amp_contact_body_ids = amp_contact_body_ids.to(device=env.device, dtype=torch.long)
-    done_amp_contact_force_record = torch.zeros(
-        num_envs,
-        int(amp_contact_body_ids.numel()),
-        device=env.device,
-    )
     track_body_count = len(env.track_body_names)
     done_action_abs_record = torch.zeros(num_envs, device=env.device)
     done_action_max_record = torch.zeros(num_envs, device=env.device)
@@ -418,9 +398,6 @@ def run_validation_rollout(
                     ee_z_error_by_body = debug_terms["ee_z_error_by_body"][new_done]
                     done_ee_z_error_record[new_done] = ee_z_error_by_body
                     done_ee_bad_record[new_done] = ee_z_error_by_body > EE_Z_TERMINATION_THRESHOLD
-                    amp_contact_force = debug_terms.get(contact_force_key)
-                    if torch.is_tensor(amp_contact_force) and amp_contact_force.shape[1:] == done_amp_contact_force_record.shape[1:]:
-                        done_amp_contact_force_record[new_done] = amp_contact_force[new_done]
                     reference = env.get_reference_state()
                     robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
                     robot_body_pos = env.robot.data.body_pos_w[:, env.track_body_ids]
@@ -489,7 +466,6 @@ def run_validation_rollout(
         env.reset_noise = original_reset_noise
         env.interval_pushes = original_interval_pushes
         env.record_motion_failures = original_record_failures
-        env.termination_mode = original_termination_mode
         env.terminate_on_motion_end = original_terminate_on_motion_end
         env.max_episode_steps = original_max_episode_steps
         restore_env_state(env, training_snapshot)
@@ -551,7 +527,6 @@ def run_validation_rollout(
             "anchor_pos_bad",
             "anchor_ori_bad",
             "ee_body_bad",
-            "fall_contact",
             "pose_fail",
         )
         if name in done_term_record
@@ -565,8 +540,6 @@ def run_validation_rollout(
                 motion_end_phase=float(env.motion_end_phase),
             )
         )
-    if "fall_contact" in done_term_record:
-        metrics["validation/fall_contact_frac"] = float(done_term_record["fall_contact"].float().mean().item())
     if "pose_fail" in done_term_record:
         metrics["validation/pose_fail_frac"] = float(done_term_record["pose_fail"].float().mean().item())
     _pushed = validation_first_push_step >= 0
@@ -650,18 +623,6 @@ def run_validation_rollout(
             sname = short_body_name(body_name)
             metrics[f"validation/ee_{sname}_bad_frac"] = float(done_ee_bad_record[failure, index].float().mean().item())
             metrics[f"validation/ee_{sname}_z_error"] = float(done_ee_z_error_record[failure, index].mean().item())
-        if amp_contact_body_ids.numel() > 0:
-            failed_contact = done_amp_contact_force_record[failure]
-            contact_frac = (failed_contact > 0.1).float().mean(dim=0)
-            contact_force = failed_contact.mean(dim=0)
-            score = contact_frac * 1000.0 + contact_force
-            top_count = min(3, int(amp_contact_body_ids.numel()))
-            top_indices = torch.argsort(score, descending=True)[:top_count]
-            for rank, contact_index in enumerate(top_indices, start=1):
-                idx = int(contact_index.item())
-                metrics[f"validation/contact_top{rank}_index"] = float(idx)
-                metrics[f"validation/contact_top{rank}_frac"] = float(contact_frac[idx].item())
-                metrics[f"validation/contact_top{rank}_force"] = float(contact_force[idx].item())
 
     safe_steps = diag_steps.clamp(min=1.0)
     for key in diag_keys:

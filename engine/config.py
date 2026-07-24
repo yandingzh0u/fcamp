@@ -34,7 +34,6 @@ class EnvironmentConfig:
     adaptive_predecessor_ratio: float
     adaptive_predecessor_lookback_bins: int
     action_rate_weight: float
-    termination_mode: str
     terminate_on_motion_end: bool
     motion_reference_mode: str
     root_velocity_mode: str
@@ -275,7 +274,6 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
     source_path = Path(source).expanduser().resolve()
     environment_values = dict(normalized["environment"])
     environment_values.setdefault("platform_profile", "custom")
-    environment_values.setdefault("termination_mode", "tracking")
     environment_values.setdefault("terminate_on_motion_end", False)
     environment_values.setdefault("motion_reference_mode", "frame")
     environment_values.setdefault("root_velocity_mode", "com")
@@ -338,8 +336,6 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError(
             "environment.adaptive_motion_sampling must match adaptive reset_phase_sampling"
         )
-    if env.termination_mode != "tracking":
-        raise ValueError("environment.termination_mode must be tracking")
     if env.motion_reference_mode != "frame":
         raise ValueError("environment.motion_reference_mode must be frame")
     if env.root_velocity_mode not in {"com", "link"}:
@@ -474,4 +470,3 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError("Full FCAMP requires critics.sharing=encoder")
     if not critics.encoder_hidden_dims or not critics.head_hidden_dims:
         raise ValueError("FCAMP critic encoder/head dimensions cannot be empty")
-
