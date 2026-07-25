@@ -3,29 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-
-def _activation(name: str) -> nn.Module:
-    normalized = name.lower()
-    if normalized == "elu":
-        return nn.ELU()
-    if normalized == "relu":
-        return nn.ReLU()
-    if normalized == "silu":
-        return nn.SiLU()
-    if normalized == "tanh":
-        return nn.Tanh()
-    raise ValueError(f"Unsupported activation: {name}")
-
-
-def _build_mlp(input_dim: int, hidden_dims: tuple[int, ...], output_dim: int, activation: str) -> nn.Sequential:
-    layers: list[nn.Module] = []
-    last = input_dim
-    for hidden in hidden_dims:
-        layers.append(nn.Linear(last, int(hidden)))
-        layers.append(_activation(activation))
-        last = int(hidden)
-    layers.append(nn.Linear(last, output_dim))
-    return nn.Sequential(*layers)
+from models.mlp_layers import build_mlp
 
 
 class FlowChunkValueCritic(nn.Module):
@@ -65,7 +43,7 @@ class FlowChunkValueCritic(nn.Module):
         self.flow_steps = int(flow_steps)
         self.noise_std = float(noise_std)
         self.eval_samples = int(eval_samples)
-        self.velocity = _build_mlp(self.obs_dim + 2, tuple(hidden_dims), 1, activation)
+        self.velocity = build_mlp(self.obs_dim + 2, tuple(hidden_dims), 1, activation)
 
     @staticmethod
     def _expand_condition(condition: torch.Tensor, num_samples: int) -> torch.Tensor:

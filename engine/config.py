@@ -43,9 +43,6 @@ class EnvironmentConfig:
     root_velocity_mode: str
     policy_observation_mode: str
     motion_end_behavior: str
-    adaptive_uniform_ratio: float
-    adaptive_kernel_size: int
-    adaptive_lambda: float
     physics_material_combine_mode: str
     contact_sensor_update_period: str
 
@@ -204,7 +201,6 @@ def _construct(cls, values: dict[str, Any]):
     for name in (
         "actor_hidden_dims",
         "critic_hidden_dims",
-        "disc_hidden_dims",
         "hidden_dims",
         "encoder_hidden_dims",
         "head_hidden_dims",
@@ -283,18 +279,20 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
     environment_values.setdefault("root_velocity_mode", "com")
     environment_values.setdefault("policy_observation_mode", "tracking")
     environment_values.setdefault("motion_end_behavior", "hold_last")
-    environment_values.setdefault("adaptive_uniform_ratio", 0.1)
-    environment_values.setdefault("adaptive_kernel_size", 1)
-    environment_values.setdefault("adaptive_lambda", 0.8)
     environment_values.setdefault("physics_material_combine_mode", "average")
     environment_values.setdefault("contact_sensor_update_period", "control")
     training_values = dict(normalized["training"])
     training_values.setdefault("official_reset_every", 0)
     training_values["resume"] = _resolve_path(str(training_values["resume"]), source_path)
+    parameters_values = dict(normalized["parameters"])
+    # Reference Flow-CPS / throwaway base critic only; FCAMP uses critics.*.
+    parameters_values.setdefault("critic_hidden_dims", (512, 256, 128))
+    parameters_values.setdefault("value_loss_coef", 1.0)
+    parameters_values.setdefault("advantage_normalization", "global")
     config = ExperimentConfig(
         method=method,
         environment=_construct(EnvironmentConfig, environment_values),
-        parameters=_construct_method_config(method, dict(normalized["parameters"]), source_path),
+        parameters=_construct_method_config(method, parameters_values, source_path),
         training=_construct(TrainingConfig, training_values),
     )
     _validate(config)
@@ -373,10 +371,6 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError("environment.physics_material_combine_mode must be average or multiply")
     if env.contact_sensor_update_period not in {"control", "physics"}:
         raise ValueError("environment.contact_sensor_update_period must be control or physics")
-    if not (0.0 < env.adaptive_uniform_ratio <= 1.0):
-        raise ValueError("environment.adaptive_uniform_ratio must be in (0, 1]")
-    if env.adaptive_kernel_size < 1 or not (0.0 < env.adaptive_lambda <= 1.0):
-        raise ValueError("environment adaptive kernel settings are invalid")
     if env.platform_profile == "g1_largebox_50hz":
         if env.task != "largebox_plane":
             raise ValueError("g1_largebox_50hz requires environment.task=largebox_plane")
@@ -443,8 +437,8 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError("FCstyle discriminator hidden_dims cannot be empty")
     if style.reward_scale <= 0.0 or not (0.0 < style.reward_epsilon < 1.0):
         raise ValueError("FCAMP style reward scale/epsilon are invalid")
-    if style.optimizer.lower() not in {"sgd", "adam", "adamw"}:
-        raise ValueError("FCAMP style_prior.optimizer must be sgd, adam, or adamw")
+    if style.optimizer.lower() != "sgd":
+        raise ValueError("FCAMP style_prior.optimizer must be sgd")
     if style.learning_rate <= 0.0 or style.batch_size < 2 or style.epochs < 1:
         raise ValueError("FCstyle discriminator optimizer/batch/epoch settings are invalid")
     if style.max_updates_per_iteration < 1:
@@ -482,8 +476,8 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError(
             "FCAMP replay size/replacement quotas cannot realize both streams"
         )
-    if credit.mode not in {"causal_frame", "chunk_shared"}:
-        raise ValueError("FCAMP credit.mode must be causal_frame or chunk_shared")
+    if credit.mode != "causal_frame":
+        raise ValueError("FCAMP credit.mode must be causal_frame")
     if credit.advantage_normalization != "global":
         raise ValueError(
             "FCAMP actor advantage must normalize the weighted reward mixture "

@@ -19,7 +19,6 @@ from components.credit.temporal_credit import (
     compute_dual_channel_gae,
     normalize_actor_mixture,
     resolve_terminal_masks,
-    with_chunk_shared_actor_credit,
 )
 from components.rollout.flow_cps_base import FlowCPSBase
 from components.rollout.training_streams import (
@@ -189,21 +188,16 @@ class FCAMP(FlowCPSBase):
             pin_memory=False,
         )
         disc_parameters = [p for p in self.discriminator.parameters() if p.requires_grad]
-        optimizer_name = amp_cfg.optimizer.lower()
-        optimizer_kwargs = {
-            "lr": float(amp_cfg.learning_rate),
-            "weight_decay": float(amp_cfg.weight_decay),
-        }
-        if optimizer_name == "sgd":
-            # MimicKit's MPOptimizer uses momentum=0.9 and no gradient clip for
-            # the standard G1 style discriminator.
-            self.disc_optimizer = torch.optim.SGD(
-                disc_parameters, momentum=0.9, **optimizer_kwargs
-            )
-        elif optimizer_name == "adam":
-            self.disc_optimizer = torch.optim.Adam(disc_parameters, **optimizer_kwargs)
-        else:
-            self.disc_optimizer = torch.optim.AdamW(disc_parameters, **optimizer_kwargs)
+        if amp_cfg.optimizer.lower() != "sgd":
+            raise ValueError("FCAMP style discriminator requires optimizer=sgd")
+        # MimicKit's MPOptimizer uses momentum=0.9 and no gradient clip for
+        # the standard G1 style discriminator.
+        self.disc_optimizer = torch.optim.SGD(
+            disc_parameters,
+            lr=float(amp_cfg.learning_rate),
+            momentum=0.9,
+            weight_decay=float(amp_cfg.weight_decay),
+        )
         self.disc_version = 0
         self.warmup_env_transitions = 0
 
@@ -746,7 +740,7 @@ class FCAMP(FlowCPSBase):
         rollout_info_items: list[tuple[dict, torch.Tensor]] = []
         task_weight = float(self.cfg.credit.task_weight)
         amp_weight = float(self.cfg.credit.amp_weight)
-        amp_dt_scale = float(env.dt) if self.cfg.credit.integrate_amp_reward_dt else 1.0
+        amp_dt_scale = float(env.dt)
         action_abs_max = 0.0
         action_bound_violation_max = 0.0
         raw_z_abs_max = 0.0
@@ -1134,18 +1128,6 @@ class FCAMP(FlowCPSBase):
             values = self._evaluate_prefix_values(context_buf)
             next_values = self._evaluate_prefix_values(next_context_buf)
 
-            # [chunk,env,frame] -> chronological [time,env].
-            def chronological(value: torch.Tensor) -> torch.Tensor:
-                dims = list(range(value.ndim))
-                order = [0, 2, 1] + dims[3:]
-                return value.permute(*order).reshape(chunks * h, n_envs, *value.shape[3:])
-
-            def chunk_layout(value: torch.Tensor) -> torch.Tensor:
-                tail = value.shape[2:]
-                return value.reshape(chunks, h, n_envs, *tail).permute(
-                    0, 2, 1, *range(3, 3 + len(tail))
-                )
-
         if not geometry_checked:
             self.disc_window_replay.abort_update()
             current_window_buffer.abort_update()
@@ -1330,14 +1312,6 @@ class FCAMP(FlowCPSBase):
             channel_bootstrap_mask=channel_bootstrap_time,
             channel_trace_mask=channel_trace_time,
         )
-        if self.cfg.credit.mode == "chunk_shared":
-            credit = with_chunk_shared_actor_credit(
-                credit,
-                valid_time,
-                chunk_horizon=h,
-                normalization="none",
-                actor_weights=(task_weight, amp_weight),
-            )
 
         # Match the exact actor objective q_s * mean_s(loss): every valid sample
         # in stream s carries q_s / N_s normalization mass.  This is one global

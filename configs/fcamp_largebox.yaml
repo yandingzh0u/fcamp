@@ -42,7 +42,6 @@ parameters:
   # Causal Flow-CPS chunk actor (kept aligned with the Flow-CPS actor).
   horizon: 4
   actor_hidden_dims: [512, 256, 128]
-  critic_hidden_dims: [512, 256, 128]
   activation: elu
   flow_steps: 4
   # Aggregate RMS in normalized-action units after the fixed decoder response
@@ -59,7 +58,6 @@ parameters:
   policy_epochs: 5
   num_mini_batches: 4
   micro_batch_size: 4096
-  value_loss_coef: 1.0
   policy_lr: 0.0003
   value_lr: 0.0003
   weight_decay: 0.0
@@ -70,9 +68,6 @@ parameters:
   # A tentative actor step is committed only when every frame's exact expected
   # conditional KL is at most this multiple of desired_kl.
   kl_acceptance_factor: 4.0
-  # Retained for inherited Flow-CPS helpers; FCAMP uses credit.* below.
-  advantage_normalization: global
-
   style_prior:
     enabled: true
     # 16 states at 50 Hz span 0.30 s (15 transitions).

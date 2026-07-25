@@ -5,7 +5,6 @@ import torch
 from components.credit.temporal_credit import (
     compute_dual_channel_gae,
     normalize_actor_mixture,
-    with_chunk_shared_actor_credit,
 )
 
 
@@ -36,8 +35,7 @@ def _compute(
         actor_weights=(1.0, 1.0),
         channel_valid_mask=channel_valid,
         channel_bootstrap_mask=channel_bootstrap,
-        channel_trace_mask=channel_trace,
-    )
+        channel_trace_mask=channel_trace)
 
 
 def test_amp_push_edge_dirty_gap_and_recovery_form_separate_segments() -> None:
@@ -67,8 +65,7 @@ def test_amp_push_edge_dirty_gap_and_recovery_form_separate_segments() -> None:
         values=values,
         channel_valid=channel_valid,
         channel_bootstrap=channel_bootstrap,
-        channel_trace=channel_trace,
-    )
+        channel_trace=channel_trace)
 
     # Task credit is unaffected and crosses the entire rollout.
     torch.testing.assert_close(
@@ -103,8 +100,7 @@ def test_amp_push_edge_cuts_channel_bootstrap_without_cutting_task() -> None:
         gae_lambda=1.0,
         chunk_horizon=1,
         normalization="none",
-        channel_bootstrap_mask=channel_bootstrap,
-    )
+        channel_bootstrap_mask=channel_bootstrap)
     torch.testing.assert_close(result.advantages[0, 0], torch.tensor([1.5, 0.0]))
 
 
@@ -119,8 +115,7 @@ def test_weighted_normalizer_excludes_invalid_amp_samples() -> None:
     normalized = normalize_actor_mixture(
         raw,
         valid,
-        torch.full((4, 1), 0.25),
-    )
+        torch.full((4, 1), 0.25))
 
     # Invalid AMP is absent, not treated as an ordinary zero and then centered
     # into a non-zero negative AMP component.
@@ -128,31 +123,7 @@ def test_weighted_normalizer_excludes_invalid_amp_samples() -> None:
     assert normalized.actor_advantage_components[1, 0, 0].item() != 0.0
     torch.testing.assert_close(
         normalized.actor_advantage,
-        normalized.actor_advantage_components.sum(dim=-1),
-    )
-
-
-def test_chunk_shared_masks_invalid_amp_at_the_receiving_offset() -> None:
-    rewards = torch.tensor(
-        [[[1.0, 10.0]], [[2.0, 20.0]], [[3.0, 30.0]], [[4.0, 40.0]]]
-    )
-    channel_valid = torch.ones_like(rewards, dtype=torch.bool)
-    channel_valid[1, :, 1] = False
-    primitive = _compute(rewards, channel_valid=channel_valid)
-    valid = torch.ones(4, 1, dtype=torch.bool)
-    shared = with_chunk_shared_actor_credit(
-        primitive,
-        valid,
-        chunk_horizon=2,
-        normalization="none",
-    )
-
-    assert shared.actor_advantage_components[1, 0, 1].item() == 0.0
-    assert shared.actor_advantage_components[1, 0, 0].item() != 0.0
-    torch.testing.assert_close(
-        shared.mixed_advantage,
-        shared.actor_advantage_components.sum(dim=-1),
-    )
+        normalized.actor_advantage_components.sum(dim=-1))
 
 
 def test_legacy_api_matches_explicit_shared_channel_masks() -> None:
@@ -180,15 +151,13 @@ def test_legacy_api_matches_explicit_shared_channel_masks() -> None:
         gae_lambda=0.91,
         chunk_horizon=2,
         normalization="global",
-        actor_weights=(1.0, 0.25),
-    )
+        actor_weights=(1.0, 0.25))
     legacy = compute_dual_channel_gae(**common)
     explicit = compute_dual_channel_gae(
         **common,
         channel_valid_mask=base_valid.unsqueeze(-1).expand_as(rewards),
         channel_bootstrap_mask=shared_bootstrap.unsqueeze(-1).expand_as(rewards),
-        channel_trace_mask=shared_trace.unsqueeze(-1).expand_as(rewards),
-    )
+        channel_trace_mask=shared_trace.unsqueeze(-1).expand_as(rewards))
     for name in (
         "td_errors",
         "advantages",
@@ -196,6 +165,5 @@ def test_legacy_api_matches_explicit_shared_channel_masks() -> None:
         "mixed_advantage",
         "actor_advantage",
         "actor_advantage_components",
-        "channel_valid_mask",
-    ):
+        "channel_valid_mask"):
         torch.testing.assert_close(getattr(legacy, name), getattr(explicit, name))

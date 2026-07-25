@@ -5,39 +5,10 @@ from collections.abc import Mapping, Sequence
 import torch
 from torch import nn
 
+from models.mlp_layers import build_mlp
+
 
 CHANNELS = ("task", "amp")
-
-
-def _activation(name: str) -> nn.Module:
-    normalized = name.lower()
-    if normalized == "elu":
-        return nn.ELU()
-    if normalized == "relu":
-        return nn.ReLU()
-    if normalized == "silu":
-        return nn.SiLU()
-    if normalized == "tanh":
-        return nn.Tanh()
-    raise ValueError(f"Unsupported activation: {name}")
-
-
-def _build_mlp(
-    input_dim: int,
-    hidden_dims: Sequence[int],
-    output_dim: int,
-    activation: str,
-) -> nn.Sequential:
-    layers: list[nn.Module] = []
-    last_dim = int(input_dim)
-    for hidden_dim in hidden_dims:
-        hidden_dim = int(hidden_dim)
-        if hidden_dim < 1:
-            raise ValueError(f"hidden dimensions must be positive, got {hidden_dim}")
-        layers.extend((nn.Linear(last_dim, hidden_dim), _activation(activation)))
-        last_dim = hidden_dim
-    layers.append(nn.Linear(last_dim, int(output_dim)))
-    return nn.Sequential(*layers)
 
 
 class SharedEncoderDualFlowCritic(nn.Module):
@@ -86,14 +57,14 @@ class SharedEncoderDualFlowCritic(nn.Module):
             raise ValueError(f"embedding_dim must be positive, got {embedding_dim}")
 
         if encoder_body_dims or int(context_dim) != int(embedding_dim):
-            self.encoder = _build_mlp(
+            self.encoder = build_mlp(
                 context_dim, encoder_body_dims, embedding_dim, activation
             )
         else:
             self.encoder = nn.Identity()
         head_input_dim = int(embedding_dim) + 2  # encoded context, y_t, t
-        self.task_head = _build_mlp(head_input_dim, head_hidden_dims, 1, activation)
-        self.amp_head = _build_mlp(head_input_dim, head_hidden_dims, 1, activation)
+        self.task_head = build_mlp(head_input_dim, head_hidden_dims, 1, activation)
+        self.amp_head = build_mlp(head_input_dim, head_hidden_dims, 1, activation)
 
         if isinstance(noise_std, Mapping):
             noise_by_channel = {name: float(noise_std[name]) for name in CHANNELS}

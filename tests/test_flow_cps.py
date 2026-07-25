@@ -8,15 +8,13 @@ import pytest
 import torch
 
 from components.rollout.flow_cps_base import FlowCPSBase
+from components.rollout.flow_cps_reference import FlowCPSReferenceAlgorithm
 from envs.action_rate import decode_raw_target_rate
 from models.flow_cps_policy import FlowMatchingPolicy
 
 
-class _FlowCPSReferenceHarness(FlowCPSBase):
+class _FlowCPSReferenceHarness(FlowCPSReferenceAlgorithm):
     """Explicit test-only adapter for the abstract reference updater."""
-
-    def update(self, rollout: dict, collect_time: float) -> dict:
-        return super().update(rollout, collect_time)
 
 
 # --------------------------------------------------------------------------- #
