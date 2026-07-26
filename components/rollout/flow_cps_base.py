@@ -16,11 +16,20 @@ from collections import deque
 import torch
 from torch import nn
 
+from components.normalization.running_stats import EmpiricalNormalization
 from method.base import Algorithm
-from models.flow_value_critic import FlowChunkValueCritic
 from models.flow_cps_policy import FlowMatchingPolicy
-from models.flow_sampling import flow_ode_mean
-from models.mlp_actor_critic import EmpiricalNormalization
+
+
+def _consume_legacy_value_critic_initialization(
+    observation_dim: int,
+    hidden_dims: tuple[int, ...],
+) -> None:
+    """Preserve schema-16 fresh-run RNG after removing its discarded critic."""
+
+    dimensions = (int(observation_dim) + 2, *map(int, hidden_dims), 1)
+    for input_dim, output_dim in zip(dimensions, dimensions[1:]):
+        nn.Linear(input_dim, output_dim)
 
 
 class FlowCPSBase(Algorithm):
@@ -61,7 +70,7 @@ class FlowCPSBase(Algorithm):
             )
         self._cps_flat_dim = self.horizon_h * self.num_act
         self._policy.cps_cholesky_raw.requires_grad_(self.cps_trainable)
-        physical_response, physical_rms, decoder_contract = self._build_cps_physical_response()
+        physical_response, physical_rms = self._build_cps_physical_response()
         self._policy.register_buffer("cps_physical_response", physical_response, persistent=False)
         self._policy.register_buffer(
             "cps_physical_rms",
@@ -81,30 +90,23 @@ class FlowCPSBase(Algorithm):
             / torch.sqrt(identity_energy.clamp(min=1.0e-12)),
             persistent=False,
         )
-        self.cps_decoder_dt, self.cps_decoder_rho, self.cps_decoder_rate_limit = decoder_contract
         self.flow_critic_steps = int(getattr(cfg, "flow_critic_steps", cfg.flow_steps))
         self.flow_critic_samples = int(getattr(cfg, "flow_critic_samples", 4))
         self.flow_critic_fm_samples = int(getattr(cfg, "flow_critic_fm_samples", 1))
-        self.critic = FlowChunkValueCritic(
+        _consume_legacy_value_critic_initialization(
             self.critic_obs_dim,
             tuple(cfg.critic_hidden_dims),
-            cfg.activation,
-            flow_steps=self.flow_critic_steps,
-            eval_samples=self.flow_critic_samples,
-        ).to(env.device)
+        )
         self.chunk_dim = self._policy.chunk_dim
 
         self.empirical_normalization = bool(cfg.empirical_normalization)
         if self.empirical_normalization:
             self.actor_obs_normalizer: nn.Module = EmpiricalNormalization(self.actor_obs_dim, env.device)
-            self.critic_obs_normalizer: nn.Module = EmpiricalNormalization(self.critic_obs_dim, env.device)
         else:
             self.actor_obs_normalizer = nn.Identity()
-            self.critic_obs_normalizer = nn.Identity()
 
         self.learning_rate = float(cfg.policy_lr)
         self.critic_learning_rate = float(cfg.value_lr)
-        self.max_lr = 1e-2
         self.min_lr = 1e-5
         if self.learning_rate <= 0.0:
             raise ValueError(f"policy_lr must be > 0, got {cfg.policy_lr}")
@@ -118,22 +120,9 @@ class FlowCPSBase(Algorithm):
             eps=1.0e-8,
             weight_decay=float(cfg.weight_decay),
         )
-        self.critic_optimizer = torch.optim.AdamW(
-            self.critic.parameters(),
-            lr=self.critic_learning_rate,
-            betas=(0.9, 0.999),
-            eps=1.0e-8,
-            weight_decay=float(cfg.critic_weight_decay),
-        )
-
-        self.advantage_normalization = str(cfg.advantage_normalization).lower()
-        # KL controller: prefix KL (cumsum per-frame log-ratio / prefix length),
-        # updated before each minibatch optimizer step (clipped-ratio-aligned), with an
-        # actor epoch early-stop when prefix KL exceeds the adaptive threshold.
-        self.kl_early_stop_factor = float(getattr(cfg, "kl_early_stop_factor", 4.0))
 
         self.max_episode_steps = env.max_episode_steps
-        self._policy_module = nn.ModuleDict({"actor": self._policy, "critic": self.critic})
+        self._policy_module = nn.ModuleDict({"actor": self._policy})
         self._init_train_episode_stats()
 
     # ------------------------------------------------------------------ #
@@ -165,7 +154,6 @@ class FlowCPSBase(Algorithm):
             "learning_rate": float(self.learning_rate),
             "critic_learning_rate": float(self.critic_learning_rate),
             "actor_obs_normalizer": self.actor_obs_normalizer.state_dict() if self.empirical_normalization else None,
-            "critic_obs_normalizer": self.critic_obs_normalizer.state_dict() if self.empirical_normalization else None,
         }
 
     def load_extra_checkpoint_state(self, payload: dict, reset_optimizer: bool = False) -> None:
@@ -190,8 +178,6 @@ class FlowCPSBase(Algorithm):
         if self.empirical_normalization:
             if payload.get("actor_obs_normalizer") is not None:
                 self.actor_obs_normalizer.load_state_dict(payload["actor_obs_normalizer"])
-            if payload.get("critic_obs_normalizer") is not None:
-                self.critic_obs_normalizer.load_state_dict(payload["critic_obs_normalizer"])
 
     # ------------------------------------------------------------------ #
     # Geometry helpers
@@ -199,12 +185,9 @@ class FlowCPSBase(Algorithm):
     def _chunks_per_update(self) -> int:
         return max(1, int(self.cfg.rollout_env_steps) // max(1, self.horizon_h))
 
-    def _training_rollout_horizon(self) -> int:
-        return self.horizon_h * self._chunks_per_update()
-
     def _build_cps_physical_response(
         self,
-    ) -> tuple[torch.Tensor, float, tuple[float, float, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, float]:
         """Build the fixed zero-point response used to scale final CPS noise.
 
         All rows have normalized-action units.  They contain the mean per-frame
@@ -276,13 +259,10 @@ class FlowCPSBase(Algorithm):
             ],
             dim=0,
         )
-        return response, self.cps_physical_rms, (dt, rho, rate_limit.detach().clone())
+        return response, self.cps_physical_rms
 
     def _norm_actor(self, obs: torch.Tensor, update: bool = True) -> torch.Tensor:
         return self.actor_obs_normalizer(obs, update=update) if self.empirical_normalization else obs
-
-    def _norm_critic(self, obs: torch.Tensor, update: bool = True) -> torch.Tensor:
-        return self.critic_obs_normalizer(obs, update=update) if self.empirical_normalization else obs
 
     def _init_train_episode_stats(self) -> None:
         env = self.env
@@ -290,7 +270,6 @@ class FlowCPSBase(Algorithm):
         self._train_episode_length = torch.zeros(env.num_envs, dtype=torch.float32, device=env.device)
         self._train_reward_buffer: deque[float] = deque(maxlen=100)
         self._train_length_buffer: deque[float] = deque(maxlen=100)
-        self._train_completed_episodes = 0
 
     def _record_train_episode_stats(self, rewards, dones, step_counts=None) -> None:
         self._train_reward_sum += rewards.to(dtype=torch.float32)
@@ -303,16 +282,8 @@ class FlowCPSBase(Algorithm):
             return
         self._train_reward_buffer.extend(self._train_reward_sum.index_select(0, done_ids).detach().cpu().tolist())
         self._train_length_buffer.extend(self._train_episode_length.index_select(0, done_ids).detach().cpu().tolist())
-        self._train_completed_episodes += int(done_ids.numel())
         self._train_reward_sum[done_ids] = 0.0
         self._train_episode_length[done_ids] = 0.0
-
-    def _deterministic_actor_raw_targets(self, actor_obs: torch.Tensor) -> torch.Tensor:
-        return self._flow_mean_raw(actor_obs).view(
-            actor_obs.shape[0],
-            self.horizon_h,
-            self.num_act,
-        )
 
     def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
         """Return deterministic raw target rates.
@@ -345,7 +316,15 @@ class FlowCPSBase(Algorithm):
                 dtype=latent.dtype,
             )
             velocity = self._policy.velocity_field(obs_prep, latent, timestep)
-            latent = flow_ode_mean(velocity, latent, sigma_schedule, step_index)
+            sigma_now = sigma_schedule[step_index].to(
+                device=velocity.device,
+                dtype=velocity.dtype,
+            )
+            sigma_next = sigma_schedule[step_index + 1].to(
+                device=velocity.device,
+                dtype=velocity.dtype,
+            )
+            latent = latent + velocity * (sigma_next - sigma_now)
         # The Flow network evolves in a fixed likelihood-standardized
         # coordinate.  Mapping its output through the initial effective CPS
         # standard deviation keeps one network unit commensurate with one
@@ -601,4 +580,3 @@ class FlowCPSBase(Algorithm):
             value = float(value)
             if math.isfinite(value):
                 metrics[f"sampler/{key}"] = value
-

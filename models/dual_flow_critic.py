@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 import torch
 from torch import nn
 
-from models.mlp_layers import build_mlp
+from components.nn import build_mlp
 
 
 CHANNELS = ("task", "amp")

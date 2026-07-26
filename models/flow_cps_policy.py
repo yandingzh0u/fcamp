@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from models.mlp_layers import build_mlp
+from components.nn import build_mlp
 
 
 class FlowMatchingPolicy(nn.Module):
@@ -49,7 +49,6 @@ class FlowMatchingPolicy(nn.Module):
         # This makes logp_k a genuine conditional density
         # log pi(z_k | s, z_0..z_{k-1}), so per-frame clipped-ratio is valid.
         hidden = int(hidden_dims[-1])
-        self._causal_hidden = hidden
         self.obs_encoder = build_mlp(self.obs_dim + 1, tuple(hidden_dims), hidden, activation)
         self.frame_pos_embed = nn.Parameter(torch.zeros(self.horizon, hidden))
         nn.init.normal_(self.frame_pos_embed, std=0.02)
@@ -108,14 +107,6 @@ class FlowMatchingPolicy(nn.Module):
             velocity_frames.append(self.vel_head(torch.cat([obs_h, state], dim=-1)))
         vel = torch.stack(velocity_frames, dim=1)
         return vel.reshape(b, self.chunk_dim)
-
-    def reshape_raw_targets(self, raw_target_rate: torch.Tensor) -> torch.Tensor:
-        """Return the frame-major raw target-rate chunk as ``[..., H, A]``."""
-        if raw_target_rate.shape[-1] != self.chunk_dim:
-            raise ValueError(
-                f"Expected raw target-rate dim {self.chunk_dim}, got {raw_target_rate.shape[-1]}"
-            )
-        return raw_target_rate.view(*raw_target_rate.shape[:-1], self.horizon, self.action_dim)
 
     def raw_cps_cholesky(
         self,

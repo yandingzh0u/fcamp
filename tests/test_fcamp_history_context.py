@@ -9,14 +9,16 @@ import torch
 
 from components.imitation.style_reward import discriminator_style_reward
 from components.imitation.window_pipeline import TemporalWindowPipeline
-from components.normalization.running_stats import RunningNormalizer
+from components.normalization.running_stats import (
+    EmpiricalNormalization,
+    RunningNormalizer,
+)
 from components.rollout.flow_cps_base import FlowCPSBase
 from components.rollout.training_streams import (
     CURRICULUM_STREAM,
     PHASE0_STREAM,
 )
 from method.fcamp import FCAMP, FCAMP_CHECKPOINT_CONTRACT
-from models.mlp_actor_critic import EmpiricalNormalization
 from models.style_discriminator import StyleDiscriminator
 
 

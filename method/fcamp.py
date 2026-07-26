@@ -33,13 +33,15 @@ from components.imitation.style_reward import (
 )
 from components.imitation.temporal_history import TemporalFeatureHistory
 from components.imitation.window_pipeline import TemporalWindowPipeline
-from components.normalization.running_stats import RunningNormalizer
+from components.normalization.running_stats import (
+    EmpiricalNormalization,
+    RunningNormalizer,
+)
 from components.replay.fcamp_window_buffer import FCAMPWindowReplay
 from models.style_discriminator import (
     StyleDiscriminator,
     compute_style_discriminator_loss,
 )
-from models.mlp_actor_critic import EmpiricalNormalization
 from models.dual_flow_critic import SharedTrunkDualFlowCritic
 from engine.checkpoint import (
     FCAMP_CHECKPOINT_CONTRACT,
@@ -693,7 +695,6 @@ class FCAMP(FlowCPSBase):
 
         actor_obs_buf = torch.zeros(chunks, n_envs, self.actor_obs_dim, device=device)
         actor_obs_raw_buf = torch.zeros_like(actor_obs_buf)
-        actions_buf = torch.zeros(chunks, n_envs, h, self.num_act, device=device)
         raw_z_buf = torch.zeros(chunks, n_envs, self.chunk_dim, device=device)
         old_mean_z_buf = torch.zeros_like(raw_z_buf)
         old_log_probs_buf = torch.zeros(chunks, n_envs, h, device=device)
@@ -737,7 +738,6 @@ class FCAMP(FlowCPSBase):
         obs = current_obs
         critic_obs = self._critic_obs
         collection_start_phases = env.phase_steps.detach().clone()
-        rollout_info_items: list[tuple[dict, torch.Tensor]] = []
         task_weight = float(self.cfg.credit.task_weight)
         amp_weight = float(self.cfg.credit.amp_weight)
         amp_dt_scale = float(env.dt)
@@ -831,7 +831,6 @@ class FCAMP(FlowCPSBase):
                             "FCAMP target-rate decoder did not report its applied "
                             "action and carried command rate"
                         )
-                    actions_buf[chunk_idx, :, frame_idx] = applied_action
                     action_abs_max = max(
                         action_abs_max,
                         float(applied_action.abs().max().item()),
@@ -1094,7 +1093,6 @@ class FCAMP(FlowCPSBase):
                         new_done,
                         step_counts=active_float,
                     )
-                    rollout_info_items.append((info, alive_before.detach()))
                     alive = alive_before & ~done.bool()
                     obs = next_obs
                     critic_obs = next_critic_obs
@@ -1142,8 +1140,8 @@ class FCAMP(FlowCPSBase):
             raise RuntimeError(
                 "FCAMP actor emitted an action outside its configured policy command domain"
             )
-        replay_commit_report = self.disc_window_replay.commit_update()
-        current_commit_report = current_window_buffer.commit_update()
+        self.disc_window_replay.commit_update()
+        current_window_buffer.commit_update()
         current_disc_windows: list[torch.Tensor] = []
         current_disc_end_times: list[torch.Tensor] = []
         current_disc_stream_ids: list[torch.Tensor] = []
@@ -1168,7 +1166,6 @@ class FCAMP(FlowCPSBase):
         rollout = {
             "actor_obs": actor_obs_buf,
             "actor_obs_raw": actor_obs_raw_buf,
-            "actions": actions_buf,
             "raw_z": raw_z_buf,
             "old_mean_z": old_mean_z_buf,
             "old_cps_cholesky": old_cps_cholesky,
@@ -1207,7 +1204,6 @@ class FCAMP(FlowCPSBase):
             "amp_logits": amp_logit_buf,
             "disc_version_used": rollout_disc_version,
             "disc_normalizer_count_used": rollout_disc_normalizer_count,
-            "rollout_info_items": rollout_info_items,
             "stream_ids": self.training_streams.stream_ids,
             "collection_start_phases": collection_start_phases,
             "action_abs_max": action_abs_max,
@@ -1223,8 +1219,6 @@ class FCAMP(FlowCPSBase):
                 fk_alignment_abs_sum / max(fk_alignment_count, 1)
             ),
             "dirty_window_excluded_count": float(dirty_window_excluded_count),
-            "replay_commit_report": replay_commit_report,
-            "current_commit_report": current_commit_report,
             "window_latest_root_xy_abs_max": float(
                 window_latest_root_xy_abs_max.item()
             ),
@@ -1493,7 +1487,7 @@ class FCAMP(FlowCPSBase):
 
     def _actor_update(self, rollout: dict) -> dict[str, float]:
         device = self.env.device
-        chunks, n_envs = rollout["actions"].shape[:2]
+        chunks, n_envs = rollout["actor_obs"].shape[:2]
         batch_size = chunks * n_envs
         h = self.horizon_h
         actor_obs = rollout["actor_obs"].reshape(batch_size, self.actor_obs_dim)
@@ -1570,7 +1564,7 @@ class FCAMP(FlowCPSBase):
         exact_frame_kl_total = torch.zeros(h, device=device)
         exact_frame_kl_max = 0.0
 
-        for epoch in range(int(self.cfg.policy_epochs)):
+        for _ in range(int(self.cfg.policy_epochs)):
             stream_splits: dict[str, tuple[float, tuple[torch.Tensor, ...]]] = {}
             for name, _, objective_weight, indices in stream_specs:
                 shuffled = indices.index_select(
@@ -2518,7 +2512,6 @@ class FCAMP(FlowCPSBase):
         stream_ids = rollout["stream_ids"]
         valid = rollout["valid"]
         amp_valid = rollout["amp_valid"]
-        channel_valid = rollout["channel_valid"]
         done = rollout["done"]
         failure = rollout["failure"]
         timeout = rollout["timeout"]
