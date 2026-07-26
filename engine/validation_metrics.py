@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 
 
@@ -253,6 +255,310 @@ class ChunkBoundaryDiagnostics:
                 f"mask must contain {self.num_envs} values, got {tuple(selected.shape)}"
             )
         return selected
+
+
+class RateControllerDiagnostics:
+    """Diagnose the one-pole target-rate decoder without changing control.
+
+    FCAMP predicts a raw target rate ``z``.  For an unprojected action, the
+    decoder implies the exact causal identity
+
+    ``d2(action) = dt * (1 - decay) * (rate_limit * tanh(z) - previous_rate)``.
+
+    The first transition after reset is excluded because a reference second
+    difference needs two in-episode reference deltas.  This also keeps offset
+    zero restricted to real chunk boundaries instead of mixing in reset.
+    """
+
+    _VALUES = (
+        "target_rate_abs",
+        "target_rate_support",
+        "previous_command_rate_abs",
+        "previous_command_rate_support",
+        "rate_error_abs",
+        "predicted_action_d2_abs",
+        "actual_action_d2_abs",
+        "reference_action_d2_abs",
+        "prediction_residual_abs",
+        "projection_joint_fraction",
+    )
+
+    def __init__(
+        self,
+        *,
+        horizon: int,
+        control_dt: float,
+        decay: float,
+        initial_reference_action: torch.Tensor,
+        command_rate_limit: torch.Tensor,
+        transition_end_phase_window: tuple[float, float] = (280.0, 310.0),
+    ) -> None:
+        if int(horizon) <= 0:
+            raise ValueError(f"horizon must be positive, got {horizon}")
+        if initial_reference_action.ndim != 2:
+            raise ValueError("initial_reference_action must be rank 2")
+        control_dt = float(control_dt)
+        decay = float(decay)
+        if not math.isfinite(control_dt) or control_dt <= 0.0:
+            raise ValueError("control_dt must be finite and positive")
+        if not math.isfinite(decay) or not 0.0 < decay < 1.0:
+            raise ValueError("decay must lie strictly between zero and one")
+        phase_low, phase_high = map(float, transition_end_phase_window)
+        if (
+            not math.isfinite(phase_low)
+            or not math.isfinite(phase_high)
+            or phase_low > phase_high
+        ):
+            raise ValueError(
+                "transition_end_phase_window must be finite and ordered"
+            )
+
+        self.horizon = int(horizon)
+        self.control_dt = control_dt
+        self.decay = decay
+        self.num_envs, self.action_dim = initial_reference_action.shape
+        self.device = initial_reference_action.device
+        self.dtype = initial_reference_action.dtype
+        self.phase_low = phase_low
+        self.phase_high = phase_high
+        self._phase_label = (
+            f"transition_end_phase{_metric_number(phase_low)}_{_metric_number(phase_high)}"
+        )
+        if command_rate_limit.shape != (self.action_dim,):
+            raise ValueError(
+                "command_rate_limit must have shape "
+                f"{(self.action_dim,)}, got {tuple(command_rate_limit.shape)}"
+            )
+        if (
+            not bool(torch.isfinite(command_rate_limit).all())
+            or bool((command_rate_limit <= 0.0).any())
+        ):
+            raise ValueError("command_rate_limit must be finite and positive")
+        self._command_rate_limit = command_rate_limit.to(
+            device=self.device, dtype=self.dtype
+        ).detach().clone()
+        self._previous_reference_action = initial_reference_action.detach().clone()
+        self._previous_reference_delta = torch.zeros_like(initial_reference_action)
+        self._has_previous_reference_delta = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._tracked_offsets = max(4, self.horizon)
+        self._offset_values: dict[str, list[list[torch.Tensor]]] = {
+            name: [[] for _ in range(self._tracked_offsets)]
+            for name in self._VALUES
+        }
+        self._phase_offset_values: dict[str, list[list[torch.Tensor]]] = {
+            name: [[] for _ in range(self._tracked_offsets)]
+            for name in self._VALUES
+        }
+
+    def update(
+        self,
+        *,
+        active_mask: torch.Tensor,
+        chunk_offset: int | torch.Tensor,
+        transition_end_phase_steps: torch.Tensor,
+        raw_target_rate: torch.Tensor,
+        previous_command_rate: torch.Tensor,
+        actual_command_rate: torch.Tensor,
+        reference_action: torch.Tensor,
+    ) -> None:
+        active = self._validate_mask(active_mask)
+        expected = (self.num_envs, self.action_dim)
+        for name, value in (
+            ("raw_target_rate", raw_target_rate),
+            ("previous_command_rate", previous_command_rate),
+            ("actual_command_rate", actual_command_rate),
+            ("reference_action", reference_action),
+        ):
+            if value.shape != expected:
+                raise ValueError(
+                    f"{name} must have shape {expected}, got {tuple(value.shape)}"
+                )
+
+        phases = transition_end_phase_steps.to(
+            device=self.device, dtype=torch.float32
+        ).reshape(-1)
+        if phases.shape != (self.num_envs,):
+            raise ValueError(
+                "transition_end_phase_steps must contain "
+                f"{self.num_envs} values, got {tuple(phases.shape)}"
+            )
+
+        rate_limit = self._command_rate_limit
+        target_rate = rate_limit * torch.tanh(raw_target_rate)
+        rate_error = target_rate - previous_command_rate
+        predicted_action_d2 = (
+            self.control_dt * (1.0 - self.decay) * rate_error
+        )
+        actual_action_d2 = self.control_dt * (
+            actual_command_rate - previous_command_rate
+        )
+        prediction_residual = actual_action_d2 - predicted_action_d2
+
+        reference_delta = reference_action - self._previous_reference_action
+        reference_action_d2 = reference_delta - self._previous_reference_delta
+        # Test projection in normalized-action units.  This tolerance is well
+        # above float32 subtraction noise but far below a meaningful clamp.
+        projection_joint_fraction = (
+            prediction_residual.abs() > 1.0e-5
+        ).float().mean(dim=-1)
+        values = {
+            "target_rate_abs": target_rate.abs().mean(dim=-1),
+            "target_rate_support": (
+                target_rate / rate_limit
+            ).abs().mean(dim=-1),
+            "previous_command_rate_abs": previous_command_rate.abs().mean(dim=-1),
+            "previous_command_rate_support": (
+                previous_command_rate / rate_limit
+            ).abs().mean(dim=-1),
+            "rate_error_abs": rate_error.abs().mean(dim=-1),
+            "predicted_action_d2_abs": predicted_action_d2.abs().mean(dim=-1),
+            "actual_action_d2_abs": actual_action_d2.abs().mean(dim=-1),
+            "reference_action_d2_abs": reference_action_d2.abs().mean(dim=-1),
+            "prediction_residual_abs": prediction_residual.abs().mean(dim=-1),
+            "projection_joint_fraction": projection_joint_fraction,
+        }
+
+        # A terminal transition remains a valid sample.  Later transitions for
+        # that environment are removed by active_mask in the caller.
+        eligible = active & self._has_previous_reference_delta
+        in_phase_window = (
+            eligible
+            & (phases >= self.phase_low)
+            & (phases <= self.phase_high)
+        )
+        if torch.is_tensor(chunk_offset):
+            offsets = self._offset_tensor(chunk_offset)
+            offset_masks = (
+                (
+                    offset,
+                    eligible & (offsets == offset),
+                    in_phase_window & (offsets == offset),
+                )
+                for offset in range(self._tracked_offsets)
+            )
+        else:
+            offset = int(chunk_offset)
+            if offset < 0 or offset >= self.horizon:
+                raise ValueError(
+                    f"chunk offsets must lie in [0, {self.horizon - 1}]"
+                )
+            offset_masks = ((offset, eligible, in_phase_window),)
+        for offset, offset_mask, phase_offset_mask in offset_masks:
+            has_offset = bool(offset_mask.any())
+            has_phase_offset = bool(phase_offset_mask.any())
+            if not has_offset and not has_phase_offset:
+                continue
+            for name, value in values.items():
+                if has_offset:
+                    self._offset_values[name][offset].append(
+                        value[offset_mask].detach().clone()
+                    )
+                if has_phase_offset:
+                    self._phase_offset_values[name][offset].append(
+                        value[phase_offset_mask].detach().clone()
+                    )
+
+        self._previous_reference_action[active] = reference_action[active]
+        self._previous_reference_delta[active] = reference_delta[active]
+        self._has_previous_reference_delta[active] = True
+
+    def metrics(self, prefix: str = "validation") -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        self._add_group_metrics(
+            metrics,
+            prefix=prefix,
+            group_prefix="rate",
+            values=self._offset_values,
+        )
+        self._add_group_metrics(
+            metrics,
+            prefix=prefix,
+            group_prefix=f"rate_{self._phase_label}",
+            values=self._phase_offset_values,
+        )
+        return metrics
+
+    def _add_group_metrics(
+        self,
+        metrics: dict[str, float],
+        *,
+        prefix: str,
+        group_prefix: str,
+        values: dict[str, list[list[torch.Tensor]]],
+    ) -> None:
+        for name in self._VALUES:
+            for offset in range(self._tracked_offsets):
+                summary = _distribution_summary(values[name][offset])
+                for statistic, value in summary.items():
+                    metrics[
+                        f"{prefix}/{group_prefix}_offset{offset}_{name}_{statistic}"
+                    ] = value
+
+            boundary_summary = _distribution_summary(values[name][0])
+            internal_parts = [
+                part
+                for offset in range(1, self.horizon)
+                for part in values[name][offset]
+            ]
+            internal_summary = _distribution_summary(internal_parts)
+            for category, summary in (
+                ("boundary", boundary_summary),
+                ("internal", internal_summary),
+            ):
+                for statistic, value in summary.items():
+                    metrics[
+                        f"{prefix}/{group_prefix}_{name}_{category}_{statistic}"
+                    ] = value
+            if (
+                boundary_summary["count"] > 0.0
+                and internal_summary["count"] > 0.0
+                and internal_summary["mean"] > 1.0e-12
+            ):
+                ratio = boundary_summary["mean"] / internal_summary["mean"]
+            else:
+                ratio = -1.0
+            metrics[
+                f"{prefix}/{group_prefix}_{name}_boundary_internal_ratio"
+            ] = float(ratio)
+
+    def _validate_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        selected = mask.to(device=self.device, dtype=torch.bool).reshape(-1)
+        if selected.shape != (self.num_envs,):
+            raise ValueError(
+                f"mask must contain {self.num_envs} values, got {tuple(selected.shape)}"
+            )
+        return selected
+
+    def _offset_tensor(self, chunk_offset: int | torch.Tensor) -> torch.Tensor:
+        if torch.is_tensor(chunk_offset):
+            offsets = chunk_offset.to(device=self.device, dtype=torch.long)
+            if offsets.ndim == 0:
+                offsets = offsets.expand(self.num_envs)
+            else:
+                offsets = offsets.reshape(-1)
+            if offsets.shape != (self.num_envs,):
+                raise ValueError(
+                    "chunk_offset tensor must contain "
+                    f"{self.num_envs} values, got {tuple(offsets.shape)}"
+                )
+        else:
+            offsets = torch.full(
+                (self.num_envs,),
+                int(chunk_offset),
+                dtype=torch.long,
+                device=self.device,
+            )
+        if bool(((offsets < 0) | (offsets >= self.horizon)).any()):
+            raise ValueError(f"chunk offsets must lie in [0, {self.horizon - 1}]")
+        return offsets
+
+
+def _metric_number(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:g}".replace("-", "m").replace(".", "p")
 
 
 def _distribution_summary(parts: list[torch.Tensor]) -> dict[str, float]:

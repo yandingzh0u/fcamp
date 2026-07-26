@@ -129,6 +129,23 @@ def test_projection_is_reconciled_by_the_applied_action_difference() -> None:
     torch.testing.assert_close(held_action, next_action)
 
 
+def test_one_pole_prediction_equals_unprojected_action_second_difference() -> None:
+    action = torch.tensor([[0.25, -0.50], [-0.75, 0.40]])
+    previous_rate = torch.tensor([[1.50, -2.00], [0.25, 1.00]])
+    raw = torch.tensor([[0.30, -0.20], [0.10, 0.40]])
+    decay = command_rate_decay(DT, HALF_LIFE)
+
+    next_action = _decode(raw, action, previous_rate)
+    actual_d2 = (next_action - action) - DT * previous_rate
+    target_rate = 10.0 * torch.tanh(raw)
+    predicted_d2 = DT * (1.0 - decay) * (
+        target_rate - previous_rate
+    )
+
+    assert bool((next_action.abs() < 5.0).all())
+    torch.testing.assert_close(actual_d2, predicted_d2, atol=1.0e-7, rtol=1.0e-6)
+
+
 def test_inactive_environment_holds_its_actual_command() -> None:
     action = torch.tensor([[1.0, -1.0], [2.0, -2.0]])
     rate = torch.tensor([[3.0, -3.0], [4.0, -4.0]])

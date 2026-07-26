@@ -124,6 +124,72 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
         f"d2_internal_p99={metrics.get(f'{prefix}/chunk_action_d2_internal_p99', float('nan')):.6f}",
         flush=True,
     )
+    if f"{prefix}/rate_offset0_rate_error_abs_count" in metrics:
+        print(
+            f"[{label}_RATE_CAUSAL] "
+            f"error_boundary={metrics.get(f'{prefix}/rate_rate_error_abs_boundary_mean', float('nan')):.6f} "
+            f"error_internal={metrics.get(f'{prefix}/rate_rate_error_abs_internal_mean', float('nan')):.6f} "
+            f"error_ratio={metrics.get(f'{prefix}/rate_rate_error_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"pred_d2_ratio={metrics.get(f'{prefix}/rate_predicted_action_d2_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"actual_d2_ratio={metrics.get(f'{prefix}/rate_actual_action_d2_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"reference_d2_ratio={metrics.get(f'{prefix}/rate_reference_action_d2_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"residual_boundary={metrics.get(f'{prefix}/rate_prediction_residual_abs_boundary_mean', float('nan')):.8f} "
+            f"residual_internal={metrics.get(f'{prefix}/rate_prediction_residual_abs_internal_mean', float('nan')):.8f} "
+            f"projection_joint_boundary={metrics.get(f'{prefix}/rate_projection_joint_fraction_boundary_mean', float('nan')):.6f} "
+            f"projection_joint_internal={metrics.get(f'{prefix}/rate_projection_joint_fraction_internal_mean', float('nan')):.6f}",
+            flush=True,
+        )
+        print(
+            f"[{label}_RATE_PHASE280_310] "
+            f"error_boundary={metrics.get(f'{prefix}/rate_transition_end_phase280_310_rate_error_abs_boundary_mean', float('nan')):.6f} "
+            f"error_internal={metrics.get(f'{prefix}/rate_transition_end_phase280_310_rate_error_abs_internal_mean', float('nan')):.6f} "
+            f"error_ratio={metrics.get(f'{prefix}/rate_transition_end_phase280_310_rate_error_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"actual_d2_ratio={metrics.get(f'{prefix}/rate_transition_end_phase280_310_actual_action_d2_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"reference_d2_ratio={metrics.get(f'{prefix}/rate_transition_end_phase280_310_reference_action_d2_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"residual_boundary={metrics.get(f'{prefix}/rate_transition_end_phase280_310_prediction_residual_abs_boundary_mean', float('nan')):.8f} "
+            f"projection_joint_boundary={metrics.get(f'{prefix}/rate_transition_end_phase280_310_projection_joint_fraction_boundary_mean', float('nan')):.6f}",
+            flush=True,
+        )
+        for offset in range(4):
+            for phase_label, metric_stem in (
+                ("", "rate"),
+                ("_P280_310", "rate_transition_end_phase280_310"),
+            ):
+                key = f"{prefix}/{metric_stem}_offset{offset}"
+                print(
+                    f"[{label}_RATE_LEVEL_OFFSET{offset}{phase_label}] "
+                    f"target_mean={metrics.get(f'{key}_target_rate_abs_mean', float('nan')):.6f} "
+                    f"target_p95={metrics.get(f'{key}_target_rate_abs_p95', float('nan')):.6f} "
+                    f"target_p99={metrics.get(f'{key}_target_rate_abs_p99', float('nan')):.6f} "
+                    f"previous_mean={metrics.get(f'{key}_previous_command_rate_abs_mean', float('nan')):.6f} "
+                    f"previous_p95={metrics.get(f'{key}_previous_command_rate_abs_p95', float('nan')):.6f} "
+                    f"previous_p99={metrics.get(f'{key}_previous_command_rate_abs_p99', float('nan')):.6f} "
+                    f"error_mean={metrics.get(f'{key}_rate_error_abs_mean', float('nan')):.6f} "
+                    f"error_p95={metrics.get(f'{key}_rate_error_abs_p95', float('nan')):.6f} "
+                    f"error_p99={metrics.get(f'{key}_rate_error_abs_p99', float('nan')):.6f} "
+                    f"target_support_mean={metrics.get(f'{key}_target_rate_support_mean', float('nan')):.6f} "
+                    f"previous_support_mean={metrics.get(f'{key}_previous_command_rate_support_mean', float('nan')):.6f} "
+                    f"count={metrics.get(f'{key}_rate_error_abs_count', 0.0):.0f}",
+                    flush=True,
+                )
+                print(
+                    f"[{label}_RATE_D2_OFFSET{offset}{phase_label}] "
+                    f"pred_mean={metrics.get(f'{key}_predicted_action_d2_abs_mean', float('nan')):.6f} "
+                    f"pred_p95={metrics.get(f'{key}_predicted_action_d2_abs_p95', float('nan')):.6f} "
+                    f"pred_p99={metrics.get(f'{key}_predicted_action_d2_abs_p99', float('nan')):.6f} "
+                    f"actual_mean={metrics.get(f'{key}_actual_action_d2_abs_mean', float('nan')):.6f} "
+                    f"actual_p95={metrics.get(f'{key}_actual_action_d2_abs_p95', float('nan')):.6f} "
+                    f"actual_p99={metrics.get(f'{key}_actual_action_d2_abs_p99', float('nan')):.6f} "
+                    f"reference_mean={metrics.get(f'{key}_reference_action_d2_abs_mean', float('nan')):.6f} "
+                    f"reference_p95={metrics.get(f'{key}_reference_action_d2_abs_p95', float('nan')):.6f} "
+                    f"reference_p99={metrics.get(f'{key}_reference_action_d2_abs_p99', float('nan')):.6f} "
+                    f"residual_mean={metrics.get(f'{key}_prediction_residual_abs_mean', float('nan')):.8f} "
+                    f"residual_p95={metrics.get(f'{key}_prediction_residual_abs_p95', float('nan')):.8f} "
+                    f"residual_p99={metrics.get(f'{key}_prediction_residual_abs_p99', float('nan')):.8f} "
+                    f"projection_joint={metrics.get(f'{key}_projection_joint_fraction_mean', float('nan')):.6f} "
+                    f"count={metrics.get(f'{key}_rate_error_abs_count', 0.0):.0f}",
+                    flush=True,
+                )
     print(
         f"[{label}_CHUNK_STATE] "
         f"joint_vel_boundary={metrics.get(f'{prefix}/chunk_joint_vel_jump_boundary_mean', float('nan')):.6f} "

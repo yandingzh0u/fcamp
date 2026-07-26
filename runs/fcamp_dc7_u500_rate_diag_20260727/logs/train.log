@@ -1,0 +1,50 @@
+[RUN] dir=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_dc7_u500_rate_diag_20260727
+[RUN] log_file=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_dc7_u500_rate_diag_20260727/logs/train.log
+[RUN] method=fcamp task=largebox_plane seed=0
+[RUN] resolved_config_sha256=d0cd85a1ec5cdbd57494dcfcfc950d45e79819b533e8fca8d868fca15afd82a3
+[RUN] source_snapshot_sha256=8bad45496419535724f179151b679ccfe0d933447ef26699df4d74f14733ae17
+[INFO] IsaacLab logging to file: /tmp/isaaclab_2026-07-27_00-50-40.log
+[METRICS] jsonl=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_dc7_u500_rate_diag_20260727/logs/metrics.jsonl tensorboard=True
+[CHECKPOINT] restored adaptive sampler state.
+[CHECKPOINT] loaded /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_stageb_final_u500_s0_20260724_2313/checkpoints/update_0500.pt, resuming from update 501.
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.027s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.487s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.663s
+[VALIDATION_PROGRESS] step=100/500 done=0.04028 alive=0.95972 elapsed=14.739s
+[VALIDATION_PROGRESS] step=150/500 done=0.04871 alive=0.95129 elapsed=22.106s
+[VALIDATION_PROGRESS] step=200/500 done=0.04932 alive=0.95068 elapsed=29.502s
+[VALIDATION_PROGRESS] step=250/500 done=0.04980 alive=0.95020 elapsed=37.244s
+[VALIDATION_PROGRESS] step=300/500 done=0.31104 alive=0.68896 elapsed=45.017s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=48.814s
+[VAL] steps_mean=305.47 steps_min=70 steps_p50=324 steps_p95=324 steps_max=324 fail_phase_mean=270.8 return=19.51746 done=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.00024 anchor_ori_bad=0.00037 ee_body_bad=0.34802 pose_fail=nan time_out=0.00000 anchor_z=0.17483 anchor_grav=0.30261 ee_z_max=0.26125 ee_z_mean=0.16676
+[VAL_FAIL] act_abs=1.08893 act_max=4.14176 root_pos=0.38321 root_ori=36.128deg anchor_pos=0.39548 anchor_ori=22.390deg joint_pos=0.20540 joint_vel=0.89509 body_pos=0.39653 body_pos_top=left_wrist:0.46225 body_z=0.17733 body_z_top=left_elbow:0.25975
+[VAL_OUTCOME] failure=0.3485 motion_complete=0.6515 time_out=0.0000 steps_p50=324
+[VAL_PHASE] failure_p50=300.0 failure_p95=312.0 anchor_pos_p50=295.5 anchor_ori_p50=265.0 ee_body_p50=300.0 motion_complete_p50=324.0
+[VAL_MOTION] window_mmd2_w16=0.2423668 window_mmd2_w32=0.1477572 raw_w16=0.2423668 raw_w32=0.1477572 pairs_w16=18106 pairs_w32=16179 gap_w16=16 gap_w32=32 phase_mean_w16=165.75 phase_max_w16=323.00 phase_mean_w32=173.96 phase_max_w32=323.00 progress_max_w16=0.9969 progress_max_w32=0.9969 progress_span_w16=0.9475 progress_span_w32=0.8981 samples_w16=37528 samples_w32=35480 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.043198 delta_internal=0.049186 delta_ratio=0.8783 delta_boundary_p95=0.074796 delta_boundary_p99=0.090417 delta_internal_p95=0.083169 delta_internal_p99=0.101335 d2_boundary=0.031227 d2_internal=0.015570 d2_ratio=2.0056 d2_boundary_p95=0.049978 d2_boundary_p99=0.056921 d2_internal_p95=0.026312 d2_internal_p99=0.034168
+[VAL_RATE_CAUSAL] error_boundary=9.894512 error_internal=4.976414 error_ratio=1.9883 pred_d2_ratio=1.9883 actual_d2_ratio=2.0056 reference_d2_ratio=0.9272 residual_boundary=0.00054795 residual_internal=0.00058008 projection_joint_boundary=0.013987 projection_joint_internal=0.015238
+[VAL_RATE_PHASE280_310] error_boundary=9.351032 error_internal=4.469011 error_ratio=2.0924 actual_d2_ratio=2.1281 reference_d2_ratio=1.3134 residual_boundary=0.00060155 projection_joint_boundary=0.021343
+[VAL_RATE_LEVEL_OFFSET0] target_mean=8.889386 target_p95=14.078032 target_p99=15.766967 previous_mean=2.554701 previous_p95=4.206710 previous_p99=5.137423 error_mean=9.894512 error_p95=15.688106 error_p99=17.857967 target_support_mean=0.117671 previous_support_mean=0.043611 count=617815
+[VAL_RATE_D2_OFFSET0] pred_mean=0.031485 pred_p95=0.049921 pred_p99=0.056825 actual_mean=0.031227 actual_p95=0.049978 actual_p99=0.056921 reference_mean=0.005102 reference_p95=0.013250 reference_p99=0.018904 residual_mean=0.00054795 residual_p95=0.00263133 residual_p99=0.00699519 projection_joint=0.013987 count=617815
+[VAL_RATE_LEVEL_OFFSET0_P280_310] target_mean=8.661901 target_p95=11.965526 target_p99=13.645884 previous_mean=2.288213 previous_p95=3.123422 previous_p99=3.713652 error_mean=9.351032 error_p95=13.308995 error_p99=15.384359 target_support_mean=0.117546 previous_support_mean=0.042064 count=55670
+[VAL_RATE_D2_OFFSET0_P280_310] pred_mean=0.029756 pred_p95=0.042350 pred_p99=0.048954 actual_mean=0.029285 actual_p95=0.042037 actual_p99=0.048484 reference_mean=0.004725 reference_p95=0.011542 reference_p99=0.011542 residual_mean=0.00060155 residual_p95=0.00199126 residual_p99=0.00400352 projection_joint=0.021343 count=55670
+[VAL_RATE_LEVEL_OFFSET1] target_mean=6.569562 target_p95=10.701042 target_p99=13.560347 previous_mean=2.170128 previous_p95=3.730341 previous_p99=4.519207 error_mean=6.145373 error_p95=10.063141 error_p99=11.489039 target_support_mean=0.099131 previous_support_mean=0.036647 count=625846
+[VAL_RATE_D2_OFFSET1] pred_mean=0.019555 pred_p95=0.032022 pred_p99=0.036559 actual_mean=0.019402 actual_p95=0.032624 actual_p99=0.036969 reference_mean=0.005637 reference_p95=0.014924 reference_p99=0.037809 residual_mean=0.00054111 residual_p95=0.00290488 residual_p99=0.00696644 projection_joint=0.013772 count=625846
+[VAL_RATE_LEVEL_OFFSET1_P280_310] target_mean=5.889350 target_p95=8.319777 target_p99=9.654428 previous_mean=2.015834 previous_p95=2.998582 previous_p99=3.917690 error_mean=5.356262 error_p95=7.801841 error_p99=9.119765 target_support_mean=0.094454 previous_support_mean=0.036485 count=55605
+[VAL_RATE_D2_OFFSET1_P280_310] pred_mean=0.017044 pred_p95=0.024826 pred_p99=0.029020 actual_mean=0.016695 actual_p95=0.024563 actual_p99=0.028828 reference_mean=0.003788 reference_p95=0.006153 reference_p99=0.006153 residual_mean=0.00049447 residual_p95=0.00193009 residual_p99=0.00412857 projection_joint=0.019437 count=55605
+[VAL_RATE_LEVEL_OFFSET2] target_mean=5.426169 target_p95=7.944953 target_p99=9.385120 previous_mean=2.364912 previous_p95=4.055525 previous_p99=4.677612 error_mean=4.877100 error_p95=7.338910 error_p99=8.231546 target_support_mean=0.085233 previous_support_mean=0.038291 count=625540
+[VAL_RATE_D2_OFFSET2] pred_mean=0.015519 pred_p95=0.023353 pred_p99=0.026193 actual_mean=0.015257 actual_p95=0.023364 actual_p99=0.026373 reference_mean=0.005780 reference_p95=0.018336 reference_p99=0.040086 residual_mean=0.00054290 residual_p95=0.00222493 residual_p99=0.00571400 projection_joint=0.015178 count=625540
+[VAL_RATE_LEVEL_OFFSET2_P280_310] target_mean=5.321731 target_p95=6.878973 target_p99=7.540700 previous_mean=2.193011 previous_p95=3.224436 previous_p99=4.224362 error_mean=4.542620 error_p95=6.101691 error_p99=6.744422 target_support_mean=0.084040 previous_support_mean=0.038213 count=50013
+[VAL_RATE_D2_OFFSET2_P280_310] pred_mean=0.014455 pred_p95=0.019416 pred_p99=0.021461 actual_mean=0.013968 actual_p95=0.018905 actual_p99=0.021107 reference_mean=0.003054 reference_p95=0.005203 reference_p99=0.005203 residual_mean=0.00061793 residual_p95=0.00165253 residual_p99=0.00376550 projection_joint=0.022709 count=50013
+[VAL_RATE_LEVEL_OFFSET3] target_mean=4.877388 target_p95=6.964859 target_p99=9.412059 previous_mean=2.454872 previous_p95=4.236868 previous_p99=5.088294 error_mean=3.905339 error_p95=5.943364 error_p99=7.240105 target_support_mean=0.078334 previous_support_mean=0.040996 count=625039
+[VAL_RATE_D2_OFFSET3] pred_mean=0.012427 pred_p95=0.018912 pred_p99=0.023039 actual_mean=0.012045 actual_p95=0.019037 actual_p99=0.023217 reference_mean=0.005089 reference_p95=0.012203 reference_p99=0.024798 residual_mean=0.00065630 residual_p95=0.00237920 residual_p99=0.00563181 projection_joint=0.016767 count=625039
+[VAL_RATE_LEVEL_OFFSET3_P280_310] target_mean=4.590733 target_p95=6.247921 target_p99=7.027313 previous_mean=2.199004 previous_p95=3.186752 previous_p99=4.106962 error_mean=3.545983 error_p95=4.845047 error_p99=5.503665 target_support_mean=0.075632 previous_support_mean=0.039695 count=57438
+[VAL_RATE_D2_OFFSET3_P280_310] pred_mean=0.011284 pred_p95=0.015417 pred_p99=0.017513 actual_mean=0.010741 actual_p95=0.014924 actual_p99=0.017022 reference_mean=0.003886 reference_p95=0.010568 reference_p99=0.010568 residual_mean=0.00074525 residual_p95=0.00194337 residual_p99=0.00519676 projection_joint=0.024856 count=57438
+[VAL_CHUNK_STATE] joint_vel_boundary=0.230624 joint_vel_internal=0.255639 joint_vel_ratio=0.9021 joint_vel_boundary_p95=0.513707 joint_vel_boundary_p99=0.902235 joint_vel_internal_p95=0.555240 joint_vel_internal_p99=1.120073 root_ang_boundary=0.222771 root_ang_internal=0.256775 root_ang_ratio=0.8676 root_ang_boundary_p95=0.616962 root_ang_boundary_p99=1.017562 root_ang_internal_p95=0.659972 root_ang_internal_p99=1.370250
+[VAL_CHUNK_RESET] action_delta=0.059345 action_delta_p95=0.060005 joint_vel_jump=0.832486 joint_vel_jump_p95=0.915173 root_ang_vel_jump=0.632803 root_ang_vel_jump_p95=0.678210 joint_pos_error=0.010915 joint_vel_error=0.728261 root_ang_vel_error=0.627515
+[VAL_OFFSET0] joint_pos=0.116499 joint_pos_p95=0.168460 joint_vel=0.592191 joint_vel_p95=0.957567 root_ang_vel=0.635553 root_ang_vel_p95=1.466130 count=626007
+[VAL_OFFSET1] joint_pos=0.117123 joint_pos_p95=0.168723 joint_vel=0.578240 joint_vel_p95=0.944660 root_ang_vel=0.629346 root_ang_vel_p95=1.574040 count=625846
+[VAL_OFFSET2] joint_pos=0.117510 joint_pos_p95=0.169070 joint_vel=0.579035 joint_vel_p95=0.980748 root_ang_vel=0.641941 root_ang_vel_p95=1.568968 count=625540
+[VAL_OFFSET3] joint_pos=0.117752 joint_pos_p95=0.169077 joint_vel=0.597922 joint_vel_p95=0.992381 root_ang_vel=0.645141 root_ang_vel_p95=1.483558 count=625039

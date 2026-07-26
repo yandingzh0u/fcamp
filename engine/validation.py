@@ -13,7 +13,11 @@ from components.evaluation import (
 from envs.spec import EE_Z_TERMINATION_THRESHOLD
 from method.base import classify_mimickit_done_terms
 from .env_state import restore_env_state, snapshot_env_state
-from .validation_metrics import ChunkBoundaryDiagnostics, terminal_phase_metrics
+from .validation_metrics import (
+    ChunkBoundaryDiagnostics,
+    RateControllerDiagnostics,
+    terminal_phase_metrics,
+)
 
 
 def short_body_name(body_name: str) -> str:
@@ -192,6 +196,17 @@ def run_validation_rollout(
         initial_joint_vel=initial_joint_vel,
         initial_root_ang_vel=initial_root_ang_vel,
     )
+    rate_diagnostics = (
+        RateControllerDiagnostics(
+            horizon=horizon,
+            control_dt=float(env.dt),
+            decay=float(env.command_rate_decay),
+            initial_reference_action=env.last_action,
+            command_rate_limit=env.command_rate_limit,
+        )
+        if getattr(algo, "control_parameterization", None) == "raw_target_rate"
+        else None
+    )
 
     demo_frame_indices = torch.arange(
         env.motion.num_frames, dtype=torch.long, device=env.device
@@ -289,6 +304,11 @@ def run_validation_rollout(
                 frame_payload, reference_dt = algo.split_deployment_frame(frame_payload)
                 chunk_index += 1
                 active_mask = ~done
+                previous_command_rate = (
+                    env.command_rate.detach().clone()
+                    if rate_diagnostics is not None
+                    else None
+                )
 
                 current_obs, reward, step_done, info = algo.evaluation_step_payload(
                     frame_payload,
@@ -301,6 +321,26 @@ def run_validation_rollout(
                     + env.action_scale * applied_action
                 )
                 reference_post = env.motion.get_frame(info["reference_phase_steps"])
+                if rate_diagnostics is not None:
+                    actual_command_rate = info.get("command_rate")
+                    if not torch.is_tensor(actual_command_rate):
+                        raise RuntimeError(
+                            "Raw target-rate validation requires info['command_rate']"
+                        )
+                    reference_action = (
+                        reference_post["joint_pos"] - env.default_action_joint_pos
+                    ) / env.action_scale
+                    rate_diagnostics.update(
+                        active_mask=active_mask,
+                        chunk_offset=primitive_offset,
+                        transition_end_phase_steps=info[
+                            "termination_phase_steps"
+                        ],
+                        raw_target_rate=frame_payload,
+                        previous_command_rate=previous_command_rate,
+                        actual_command_rate=actual_command_rate,
+                        reference_action=reference_action,
+                    )
                 robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
                 robot_root_ang_vel = env.get_mimic_root_velocity_w()[:, 3:]
                 chunk_diagnostics.update(
@@ -485,6 +525,8 @@ def run_validation_rollout(
     }
     metrics.update(motion_metric.metrics())
     metrics.update(chunk_diagnostics.metrics())
+    if rate_diagnostics is not None:
+        metrics.update(rate_diagnostics.metrics())
     metrics.update(reset_metrics)
     timeout, motion_complete, failure = classify_mimickit_done_terms(done, done_term_record)
     metrics.update({

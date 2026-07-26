@@ -71,6 +71,8 @@ def _masked_stats(prefix: str, values: torch.Tensor, mask: torch.Tensor | None =
 class FCAMP(FlowCPSBase):
     """Full H=4 causal Flow-CPS policy with W=16 temporal discriminator prior."""
 
+    control_parameterization = "raw_target_rate"
+
     def build(self) -> None:
         cfg = self.cfg
         amp_cfg = cfg.amp
