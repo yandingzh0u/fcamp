@@ -146,21 +146,6 @@ class Algorithm(ABC):
             )
         return payload
 
-    def split_deployment_frame(
-        self,
-        frame_payload: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Separate an optional legacy reference-time channel."""
-        if not bool(getattr(self, "uses_reference_dt", False)):
-            return frame_payload, None
-        expected_dim = int(self.env.action_dim) + 1
-        if frame_payload.shape[-1] != expected_dim:
-            raise ValueError(
-                f"{self.__class__.__name__} uses reference_dt but returned "
-                f"payload dim {frame_payload.shape[-1]}, expected {expected_dim}"
-            )
-        return frame_payload[..., : self.env.action_dim], frame_payload[..., -1]
-
     def require_applied_action(self, info: dict) -> torch.Tensor:
         """Return the normalized command actually sent by the environment."""
         action = info.get("applied_action")
@@ -180,62 +165,15 @@ class Algorithm(ABC):
         """Reset for validation/playback and return this method's policy observation."""
         return self.env.reset(phase_indices=phase_indices)
 
-    def evaluation_step(
-        self,
-        actions: torch.Tensor,
-        reference_dt: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
-        """Advance one clean evaluator transition.
-
-        Methods with private observation state override this while retaining
-        the shared evaluator reward/termination.
-        """
-        return self.env.step(
-            actions,
-            auto_reset=False,
-            reference_dt=reference_dt,
-        )
-
+    @abstractmethod
     def evaluation_step_payload(
         self,
         frame_payload: torch.Tensor,
-        reference_dt: torch.Tensor | None,
         *,
         active_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
-        """Decode and execute one cached deployment frame.
-
-        The default implementation treats ``frame_payload`` as an absolute
-        environment action.  Stateful methods override this method so the
-        payload is decoded against the environment's current carried state at
-        the instant it is executed.  Inactive environments hold their last
-        applied command; callers must never manufacture a zero action.
-        """
-        actions = frame_payload
-        if active_mask is not None:
-            if active_mask.dtype != torch.bool or active_mask.shape != (self.env.num_envs,):
-                raise ValueError(
-                    "active_mask must be bool [num_envs], got "
-                    f"dtype={active_mask.dtype} shape={tuple(active_mask.shape)}"
-                )
-            if actions.shape != self.env.last_action.shape:
-                raise ValueError(
-                    "The default deployment step only accepts absolute actions "
-                    f"with shape {tuple(self.env.last_action.shape)}, got "
-                    f"{tuple(actions.shape)}"
-                )
-            actions = torch.where(
-                active_mask.unsqueeze(-1),
-                actions,
-                self.env.last_action,
-            )
-            if reference_dt is not None:
-                reference_dt = torch.where(
-                    active_mask,
-                    reference_dt,
-                    torch.full_like(reference_dt, float(self.env.dt)),
-                )
-        return self.evaluation_step(actions, reference_dt)
+        """Decode and execute one cached FCAMP frame."""
+        ...
 
     def snapshot_runtime_state(self):
         """Return method-owned rollout state that validation must restore."""

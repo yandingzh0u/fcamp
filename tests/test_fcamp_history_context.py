@@ -9,14 +9,16 @@ import torch
 
 from components.imitation.style_reward import discriminator_style_reward
 from components.imitation.window_pipeline import TemporalWindowPipeline
-from components.normalization.running_stats import RunningNormalizer
+from components.normalization.running_stats import (
+    EmpiricalNormalization,
+    RunningNormalizer,
+)
 from components.rollout.flow_cps_base import FlowCPSBase
 from components.rollout.training_streams import (
     CURRICULUM_STREAM,
     PHASE0_STREAM,
 )
 from method.fcamp import FCAMP, FCAMP_CHECKPOINT_CONTRACT
-from models.mlp_actor_critic import EmpiricalNormalization
 from models.style_discriminator import StyleDiscriminator
 
 
@@ -191,7 +193,7 @@ def test_amp_reward_uses_full_independent_discriminator() -> None:
     torch.manual_seed(5)
     algo = object.__new__(FCAMP)
     algo.cfg = SimpleNamespace(
-        amp=SimpleNamespace(
+        style_prior=SimpleNamespace(
             reward_eval_batch_size=1,
             reward_scale=2.0,
             reward_epsilon=1.0e-4,
@@ -224,7 +226,7 @@ def test_discriminator_update_cannot_change_deterministic_actor_action() -> None
     algo.actor_obs_dim = 3
     algo.num_act = 1
     algo.horizon_h = 2
-    algo.empirical_normalization = False
+    algo.actor_obs_normalizer = EmpiricalNormalization(3, "cpu")
     algo.discriminator = StyleDiscriminator(6, hidden_dims=(4,))
     algo.disc_normalizer = RunningNormalizer(6, device="cpu")
     algo._flow_mean_raw = lambda actor_obs: actor_obs[:, :2]
@@ -340,7 +342,6 @@ def test_rollout_snapshot_optimizes_actor_and_critic_before_discriminator() -> N
     algo = object.__new__(FCAMP)
     algo.disc_version = 7
     algo.disc_normalizer = SimpleNamespace(count=torch.tensor(12.0))
-    algo.empirical_normalization = False
     events: list[str] = []
 
     def actor_update(_rollout):
@@ -367,11 +368,19 @@ def test_rollout_snapshot_optimizes_actor_and_critic_before_discriminator() -> N
     algo._actor_update = actor_update
     algo._critic_update = critic_update
     algo._discriminator_update = disc_update
+    algo.actor_obs_normalizer = object()
+    algo.prefix_context_normalizer = object()
+    algo._update_empirical_normalizer_chunked = lambda *_args, **_kwargs: None
     rollout = {
         "disc_version_used": 7,
         "disc_normalizer_count_used": 12.0,
         "amp_valid": torch.tensor([[[False, True]]]),
         "imitation_window_age": torch.tensor([[[-1, 16]]]),
+        "valid": torch.ones(1, 1, 2, dtype=torch.bool),
+        "stream_ids": torch.zeros(1, dtype=torch.int8),
+        "actor_obs_raw": torch.empty(1, 1, 0),
+        "contexts_raw": torch.empty(1, 1, 2, 0),
+        "next_contexts_raw": torch.empty(1, 1, 2, 0),
     }
 
     result = algo._optimize_rollout_snapshot(rollout, update_idx=3)
@@ -385,7 +394,6 @@ def test_no_current_disc_window_does_not_skip_actor_or_critic() -> None:
     algo = object.__new__(FCAMP)
     algo.disc_version = 2
     algo.disc_normalizer = SimpleNamespace(count=torch.tensor(0.0))
-    algo.empirical_normalization = False
     events: list[str] = []
     algo._actor_update = lambda _rollout: events.append("actor") or {}
     algo._critic_update = lambda _rollout: events.append("critic") or {}
@@ -397,11 +405,19 @@ def test_no_current_disc_window_does_not_skip_actor_or_critic() -> None:
             "disc/update_steps": 0.0,
         }
     )
+    algo.actor_obs_normalizer = object()
+    algo.prefix_context_normalizer = object()
+    algo._update_empirical_normalizer_chunked = lambda *_args, **_kwargs: None
     rollout = {
         "disc_version_used": 2,
         "disc_normalizer_count_used": 0.0,
         "amp_valid": torch.zeros(1, 1, 2, dtype=torch.bool),
         "imitation_window_age": torch.full((1, 1, 2), -1, dtype=torch.long),
+        "valid": torch.ones(1, 1, 2, dtype=torch.bool),
+        "stream_ids": torch.zeros(1, dtype=torch.int8),
+        "actor_obs_raw": torch.empty(1, 1, 0),
+        "contexts_raw": torch.empty(1, 1, 2, 0),
+        "next_contexts_raw": torch.empty(1, 1, 2, 0),
     }
 
     algo._optimize_rollout_snapshot(rollout, update_idx=1)
@@ -431,7 +447,7 @@ def test_discriminator_trains_on_old_normalizer_then_commits_next_snapshot() -> 
     algo = object.__new__(FCAMP)
     algo.env = SimpleNamespace(device=torch.device("cpu"))
     algo.cfg = SimpleNamespace(
-        amp=SimpleNamespace(
+        style_prior=SimpleNamespace(
             batch_size=2,
             epochs=1,
             max_updates_per_iteration=1,
@@ -487,13 +503,25 @@ def test_discriminator_trains_on_old_normalizer_then_commits_next_snapshot() -> 
 def test_chunked_context_normalizer_matches_one_shot_valid_moments() -> None:
     torch.manual_seed(19)
     algo = object.__new__(FCAMP)
-    algo.cfg = SimpleNamespace(micro_batch_size=3)
+    algo.cfg = SimpleNamespace(
+        micro_batch_size=3,
+        streams=SimpleNamespace(phase0_fraction=0.1),
+    )
     chunked = EmpiricalNormalization(4, "cpu")
     expected = EmpiricalNormalization(4, "cpu")
-    samples = torch.randn(2, 5, 3, 4)
-    valid = torch.rand(2, 5, 3) > 0.3
+    samples = torch.randn(2, 10, 3, 4)
+    valid = torch.tensor([True, False, True]).view(1, 1, 3).expand(2, 10, 3)
+    stream_labels = torch.tensor(
+        [PHASE0_STREAM] + [CURRICULUM_STREAM] * 9,
+        dtype=torch.int8,
+    ).view(1, 10, 1).expand_as(valid)
 
-    algo._update_empirical_normalizer_chunked(chunked, samples, valid)
+    algo._update_empirical_normalizer_chunked(
+        chunked,
+        samples,
+        valid,
+        stream_labels=stream_labels,
+    )
     expected._update(samples.reshape(-1, 4)[valid.reshape(-1)])
 
     assert int(chunked.count.item()) == int(valid.sum().item())

@@ -35,14 +35,12 @@ environment:
      50.5, 45.0, 14.5, 68.0, 13.0, 155.0, 124.5,
      26.0, 33.0, 61.0, 55.5, 4.5, 112.0, 98.5]
   rate_half_life_seconds: 0.08
-  motion_reference_mode: frame
   root_velocity_mode: com
 
 parameters:
   # Causal Flow-CPS chunk actor (kept aligned with the Flow-CPS actor).
   horizon: 4
   actor_hidden_dims: [512, 256, 128]
-  critic_hidden_dims: [512, 256, 128]
   activation: elu
   flow_steps: 4
   # Aggregate RMS in normalized-action units after the fixed decoder response
@@ -50,7 +48,6 @@ parameters:
   # absolute physical budget, not a fraction of the very large target-rate
   # support.
   cps_physical_rms: 0.05
-  cps_trainable: true
   rollout_env_steps: 24
   discount_gamma: 0.99
   gae_lambda: 0.95
@@ -59,22 +56,16 @@ parameters:
   policy_epochs: 5
   num_mini_batches: 4
   micro_batch_size: 4096
-  value_loss_coef: 1.0
   policy_lr: 0.0003
   value_lr: 0.0003
   weight_decay: 0.0
   critic_weight_decay: 0.0
-  empirical_normalization: true
   init_at_random_ep_len: true
   max_grad_norm: 1.0
   # A tentative actor step is committed only when every frame's exact expected
   # conditional KL is at most this multiple of desired_kl.
   kl_acceptance_factor: 4.0
-  # Retained for inherited Flow-CPS helpers; FCAMP uses credit.* below.
-  advantage_normalization: global
-
   style_prior:
-    enabled: true
     # 16 states at 50 Hz span 0.30 s (15 transitions).
     obs_steps: 16
     hidden_dims: [1024, 512]
@@ -89,8 +80,6 @@ parameters:
     current_buffer_size: 65536
     replay_size: 200000
     replay_samples: 1000
-    replay_dtype: float32
-    replay_device: cpu
     grad_penalty: 10.0
     logit_reg: 0.01
     normalizer_clip: 10.0
@@ -100,20 +89,12 @@ parameters:
     discriminator_warmup_rollouts: 1
 
   credit:
-    mode: causal_frame
     task_weight: 1.0
     amp_weight: 1.0
-    # Current handcrafted task reward is already multiplied by dt.
-    integrate_amp_reward_dt: true
-    # Form the weighted task/style advantage first, then normalize that single
-    # scalar objective once over the fixed 10/90 training measure.
-    advantage_normalization: global
-    ratio_mode: conditional_frame
 
   critics:
     encoder_hidden_dims: [512, 256, 128]
     head_hidden_dims: [128, 64]
-    sharing: encoder
     task_loss_weight: 1.0
     amp_loss_weight: 1.0
 

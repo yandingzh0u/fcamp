@@ -5,19 +5,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Training artifacts are local-only by default.
-runs/*
-# Whitelist every run's train.log (un-ignore parents layer by layer).
-!runs/*/
-runs/*/*
-!runs/*/logs/
-runs/*/logs/*
-!runs/*/logs/train.log
-# Keep the FCAMP baseline run: logs + config (no checkpoints / snapshot).
-!runs/fcamp_2_fix_bugs/
-!runs/fcamp_2_fix_bugs/**
-runs/fcamp_2_fix_bugs/checkpoints/
-runs/fcamp_2_fix_bugs/source_snapshot.tar.gz
+# Training artifacts are always local.
+runs/
 
 .vscode/
 .idea/

@@ -66,12 +66,13 @@ class _Algorithm(Algorithm):
     def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
         return obs + 1.0
 
-    def evaluation_step(self, actions, reference_dt):
-        self.last_step = (actions.clone(), reference_dt.clone())
-        info = {"applied_action": actions.clone()}
-        count = actions.shape[0]
+    def evaluation_step_payload(self, frame_payload, *, active_mask=None):
+        del active_mask
+        self.last_step = frame_payload.clone()
+        info = {"applied_action": frame_payload.clone()}
+        count = frame_payload.shape[0]
         return (
-            torch.zeros_like(actions),
+            torch.zeros_like(frame_payload),
             torch.zeros(count),
             torch.zeros(count, dtype=torch.bool),
             info,
@@ -110,40 +111,11 @@ def test_validated_deployment_chunk_enforces_full_horizon() -> None:
     )
 
 
-def test_default_deployment_step_holds_inactive_env_without_zero_jump() -> None:
-    algo = _Algorithm(_env())
-    payload = torch.tensor([[9.0, 8.0], [-7.0, -6.0]])
-    reference_dt = torch.tensor([0.03, 0.04])
-
-    _, _, _, info = algo.evaluation_step_payload(
-        payload,
-        reference_dt,
-        active_mask=torch.tensor([True, False]),
-    )
-
-    expected_action = torch.tensor([[9.0, 8.0], [3.0, 4.0]])
-    expected_dt = torch.tensor([0.03, 0.02])
-    torch.testing.assert_close(algo.last_step[0], expected_action)
-    torch.testing.assert_close(algo.last_step[1], expected_dt)
-    torch.testing.assert_close(info["applied_action"], expected_action)
-
-
 def test_applied_action_diagnostic_rejects_raw_policy_payload() -> None:
     algo = _Algorithm(_env())
 
     with pytest.raises(RuntimeError, match="applied_action"):
         algo.require_applied_action({"raw_z": torch.zeros(2, 2)})
-
-
-def test_default_deployment_step_rejects_non_boolean_active_mask() -> None:
-    algo = _Algorithm(_env())
-
-    with pytest.raises(ValueError, match="active_mask must be bool"):
-        algo.evaluation_step_payload(
-            torch.zeros(2, 2),
-            None,
-            active_mask=torch.ones(2),
-        )
 
 
 def test_checkpoint_preflight_runs_method_contract_before_loading() -> None:

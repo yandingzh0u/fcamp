@@ -43,14 +43,6 @@ def _load_observation_mixin(monkeypatch):
             build_g1_imitation_frame=lambda **_kwargs: torch.empty(0),
         ),
     )
-    monkeypatch.setitem(
-        sys.modules,
-        "envs.contracts",
-        _module(
-            "envs.contracts",
-            select_imitation_root_domain=lambda **_kwargs: (),
-        ),
-    )
     path = Path(__file__).parents[1] / "envs" / "observation.py"
     spec = importlib.util.spec_from_file_location(
         "envs._command_state_observation_test",

@@ -13,7 +13,6 @@ from isaaclab.utils.math import (
 
 from .spec import CRITIC_OBS_DIM, OBS_DIM
 from .imitation_data import build_g1_imitation_frame
-from .contracts import select_imitation_root_domain
 from .action_rate import normalize_command_rate
 
 
@@ -48,21 +47,7 @@ class MimicObservationMixin:
         if env_ids.ndim != 1:
             raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
         joint_pos, joint_vel = self.get_action_joint_state()
-        fcamp_contract = bool(
-            getattr(self, "_strict_action_contract", False)
-        )
-        root_pos_source, root_quat_source, root_velocity_source = (
-            select_imitation_root_domain(
-                strict_fcamp=fcamp_contract,
-                legacy_root_pos=self.robot.data.root_pos_w,
-                legacy_root_quat=self.robot.data.root_quat_w,
-                legacy_root_velocity=self.get_mimic_root_velocity_w(),
-                root_link_pos=self.robot.data.root_link_pos_w,
-                root_link_quat=self.robot.data.root_link_quat_w,
-                root_link_velocity=self.robot.data.root_link_vel_w,
-            )
-        )
-        root_pos = root_pos_source.index_select(0, env_ids)
+        root_pos = self.robot.data.root_link_pos_w.index_select(0, env_ids)
         env_origins = self.scene.env_origins.index_select(0, env_ids)
         key_body_pos = self.robot.data.body_pos_w.index_select(0, env_ids)[..., self.imitation_key_body_ids, :]
         # Scene origins are translations only.  Subtracting them from both root
@@ -70,12 +55,12 @@ class MimicObservationMixin:
         # the vectorized-environment grid from the discriminator input.
         root_pos_local = root_pos - env_origins
         key_body_pos_local = key_body_pos - env_origins.unsqueeze(-2)
-        # FCAMP expert data is explicitly reconstructed in the root-link
-        # domain. Other methods retain their exact 2db configured convention.
-        root_velocity = root_velocity_source.index_select(0, env_ids)
+        root_velocity = self.robot.data.root_link_vel_w.index_select(0, env_ids)
         return build_g1_imitation_frame(
             root_pos=root_pos_local,
-            root_quat_wxyz=root_quat_source.index_select(0, env_ids),
+            root_quat_wxyz=self.robot.data.root_link_quat_w.index_select(
+                0, env_ids
+            ),
             joint_pos=joint_pos.index_select(0, env_ids),
             key_body_pos=key_body_pos_local,
             root_lin_vel=root_velocity[:, :3],
@@ -106,36 +91,7 @@ class MimicObservationMixin:
         self,
         env_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Return the method-independent policy frame used only by validation.
-
-        Training imitation features intentionally preserve each paper's native
-        root-velocity convention. Cross-method evaluation must not: it always
-        uses the physical root-link pose/velocity exposed by Isaac Lab, so ADD's
-        link convention and the other methods' COM convention cannot change the
-        external metric for an identical simulator state.
-        """
-
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
-        if env_ids.ndim != 1:
-            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
-        joint_pos, joint_vel = self.get_action_joint_state()
-        root_pos = self.robot.data.root_link_pos_w.index_select(0, env_ids)
-        root_quat = self.robot.data.root_link_quat_w.index_select(0, env_ids)
-        root_velocity = self.robot.data.root_link_vel_w.index_select(0, env_ids)
-        env_origins = self.scene.env_origins.index_select(0, env_ids)
-        key_body_pos = self.robot.data.body_pos_w.index_select(0, env_ids)[
-            ..., self.imitation_key_body_ids, :
-        ]
-        return build_g1_imitation_frame(
-            root_pos=root_pos - env_origins,
-            root_quat_wxyz=root_quat,
-            joint_pos=joint_pos.index_select(0, env_ids),
-            key_body_pos=key_body_pos - env_origins.unsqueeze(-2),
-            root_lin_vel=root_velocity[:, :3],
-            root_ang_vel=root_velocity[:, 3:],
-            joint_vel=joint_vel.index_select(0, env_ids),
-        )
+        return self.get_imitation_policy_frame(env_ids)
 
     def get_reference_state(self) -> dict[str, torch.Tensor]:
         reference = dict(self.motion.get_frame(self.phase_steps))

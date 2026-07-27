@@ -5,7 +5,6 @@ import torch
 from components.credit.temporal_credit import (
     compute_dual_channel_gae,
     normalize_actor_mixture,
-    with_chunk_shared_actor_credit,
 )
 
 
@@ -129,29 +128,6 @@ def test_weighted_normalizer_excludes_invalid_amp_samples() -> None:
     torch.testing.assert_close(
         normalized.actor_advantage,
         normalized.actor_advantage_components.sum(dim=-1),
-    )
-
-
-def test_chunk_shared_masks_invalid_amp_at_the_receiving_offset() -> None:
-    rewards = torch.tensor(
-        [[[1.0, 10.0]], [[2.0, 20.0]], [[3.0, 30.0]], [[4.0, 40.0]]]
-    )
-    channel_valid = torch.ones_like(rewards, dtype=torch.bool)
-    channel_valid[1, :, 1] = False
-    primitive = _compute(rewards, channel_valid=channel_valid)
-    valid = torch.ones(4, 1, dtype=torch.bool)
-    shared = with_chunk_shared_actor_credit(
-        primitive,
-        valid,
-        chunk_horizon=2,
-        normalization="none",
-    )
-
-    assert shared.actor_advantage_components[1, 0, 1].item() == 0.0
-    assert shared.actor_advantage_components[1, 0, 0].item() != 0.0
-    torch.testing.assert_close(
-        shared.mixed_advantage,
-        shared.actor_advantage_components.sum(dim=-1),
     )
 
 

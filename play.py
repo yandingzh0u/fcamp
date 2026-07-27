@@ -55,7 +55,7 @@ from engine.config import (
     config_from_dict,
 )
 from envs.g1_mimic import G1MimicEnv
-from method import load_method_class
+from method.fcamp import FCAMP
 
 
 def _rebuild_config(payload: dict) -> ExperimentConfig:
@@ -99,7 +99,7 @@ def main() -> None:
         render=not args_cli.headless,
         render_every=args_cli.render_every,
     )
-    algo = load_method_class(cfg.method)(cfg.parameters, env, simulation_app)
+    algo = FCAMP(cfg.parameters, env, simulation_app)
     algo.build()
     preflight_checkpoint_payload(algo, payload)
     algo.policy.load_state_dict(payload["policy"])
@@ -137,11 +137,9 @@ def main() -> None:
                 cached_chunk = algo.validated_deployment_chunk(current_obs)
             chunk_index = 0
         frame_payload = cached_chunk[:, chunk_index, :]
-        frame_payload, reference_dt = algo.split_deployment_frame(frame_payload)
         chunk_index += 1
         current_obs, reward, done, info = algo.evaluation_step_payload(
             frame_payload,
-            reference_dt,
             active_mask=~terminal_mask,
         )
         applied_action = algo.require_applied_action(info)
@@ -159,10 +157,9 @@ def main() -> None:
         if args_cli.log_every > 0 and total_steps % args_cli.log_every == 0:
             frame_delta = info.get("reference_frame_delta")
             frame_delta_mean = float(frame_delta.mean().item()) if torch.is_tensor(frame_delta) else 1.0
-            reference_dt_mean = float(reference_dt.mean().item()) if torch.is_tensor(reference_dt) else float(env.dt)
             print(
                 f"[PLAY] step={total_steps} phase={float(env.phase_steps[0].item()):.2f} "
-                f"reference_dt={reference_dt_mean:.5f} "
+                f"reference_dt={float(env.dt):.5f} "
                 f"frame_delta={frame_delta_mean:.3f} "
                 f"action_abs={float(applied_action.abs().mean().item()):.5f} "
                 f"reward={float(reward.mean().item()):.5f} "

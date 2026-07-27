@@ -20,28 +20,6 @@ def resolve_root_velocity_frame(
     return resolved  # type: ignore[return-value]
 
 
-def select_imitation_root_domain(
-    *,
-    strict_fcamp: bool,
-    legacy_root_pos: torch.Tensor,
-    legacy_root_quat: torch.Tensor,
-    legacy_root_velocity: torch.Tensor,
-    root_link_pos: torch.Tensor,
-    root_link_quat: torch.Tensor,
-    root_link_velocity: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Select FCAMP root-link features without changing other methods."""
-
-    if not isinstance(strict_fcamp, bool):
-        raise TypeError("strict_fcamp must be bool")
-    legacy = (legacy_root_pos, legacy_root_quat, legacy_root_velocity)
-    link = (root_link_pos, root_link_quat, root_link_velocity)
-    for legacy_value, link_value in zip(legacy, link, strict=True):
-        if legacy_value.shape != link_value.shape:
-            raise ValueError("legacy and root-link state tensors must have matching shapes")
-    return link if strict_fcamp else legacy
-
-
 def validate_actions_in_bounds(
     actions: torch.Tensor,
     low: torch.Tensor,

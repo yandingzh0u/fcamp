@@ -53,12 +53,7 @@ def preflight_static_checkpoint_payload(
         raise KeyError("Checkpoint must contain a 'policy' state dict.")
 
     config = payload.get("config")
-    configured_method = None
-    if isinstance(config, dict):
-        configured_method = config.get(
-            "method",
-            config.get("algorithm", config.get("algo_name")),
-        )
+    configured_method = config.get("method") if isinstance(config, dict) else None
     method = expected_method if expected_method is not None else configured_method
     if (
         expected_method is not None
@@ -101,14 +96,7 @@ _RESUME_ENV_KEYS = (
     "adaptive_alpha",
     "adaptive_predecessor_ratio",
     "adaptive_predecessor_lookback_bins",
-    "adaptive_uniform_ratio",
-    "adaptive_kernel_size",
-    "adaptive_lambda",
-    "terminate_on_motion_end",
-    "motion_reference_mode",
     "root_velocity_mode",
-    "policy_observation_mode",
-    "motion_end_behavior",
     "action_rate_weight",
     "policy_action_bound",
     "command_rate_limit",
@@ -117,26 +105,33 @@ _RESUME_ENV_KEYS = (
     "contact_sensor_update_period",
 )
 
-_RESUME_ENV_DEFAULTS = {
-    "adaptive_uniform_ratio": 0.1,
-    "adaptive_kernel_size": 1,
-    "adaptive_lambda": 0.8,
-    "policy_observation_mode": "tracking",
-    "motion_end_behavior": "hold_last",
-    "physics_material_combine_mode": "average",
-    "contact_sensor_update_period": "control",
+_REMOVED_FIXED_PARAMETER_KEYS = {
+    "style_prior": ("enabled", "replay_dtype", "replay_device"),
+    "credit": (
+        "mode",
+        "integrate_amp_reward_dt",
+        "advantage_normalization",
+        "ratio_mode",
+    ),
+    "critics": ("sharing",),
 }
 
 
 def _resume_signature(config: dict) -> dict:
-    environment = config.get("environment", {})
+    environment = config["environment"]
+    parameters = dict(config["parameters"])
+    for section, removed_keys in _REMOVED_FIXED_PARAMETER_KEYS.items():
+        section_values = dict(parameters[section])
+        for key in removed_keys:
+            section_values.pop(key, None)
+        parameters[section] = section_values
     return {
-        "method": config.get("method", config.get("algorithm")),
+        "method": config["method"],
         "environment": {
-            key: environment.get(key, _RESUME_ENV_DEFAULTS.get(key))
+            key: environment[key]
             for key in _RESUME_ENV_KEYS
         },
-        "parameters": config.get("parameters"),
+        "parameters": parameters,
     }
 
 

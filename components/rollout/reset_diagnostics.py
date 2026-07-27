@@ -172,30 +172,29 @@ class ResetPhaseRecorder:
                     f"{prefix}/phase_max": float(self.phase_max[group].item()),
                 }
             )
-        if sampler is not None and hasattr(sampler, "frames_to_bins"):
-            frame_ids = torch.arange(
-                self.num_frames,
-                dtype=torch.long,
-                device=self.device,
+        frame_ids = torch.arange(
+            self.num_frames,
+            dtype=torch.long,
+            device=self.device,
+        )
+        bin_ids = sampler.frames_to_bins(frame_ids).to(self.device)
+        num_bins = int(sampler.num_bins)
+        bin_counts = torch.zeros(
+            num_bins,
+            dtype=torch.long,
+            device=self.device,
+        )
+        bin_counts.scatter_add_(0, bin_ids, histogram)
+        for index, bin_count in enumerate(bin_counts):
+            value = float(bin_count.item())
+            metrics[f"{prefix}/bin_{index}_count"] = value
+            metrics[f"{prefix}/bin_{index}_fraction"] = (
+                value / float(count) if count > 0 else 0.0
             )
-            bin_ids = sampler.frames_to_bins(frame_ids).to(self.device)
-            num_bins = int(sampler.num_bins)
-            bin_counts = torch.zeros(
-                num_bins,
-                dtype=torch.long,
-                device=self.device,
-            )
-            bin_counts.scatter_add_(0, bin_ids, histogram)
-            for index, bin_count in enumerate(bin_counts):
-                value = float(bin_count.item())
-                metrics[f"{prefix}/bin_{index}_count"] = value
-                metrics[f"{prefix}/bin_{index}_fraction"] = (
-                    value / float(count) if count > 0 else 0.0
-                )
         return metrics
 
     @torch.no_grad()
-    def finish(self, sampler=None) -> dict[str, float]:
+    def finish(self, sampler) -> dict[str, float]:
         self.active = False
         metrics = self._group_metrics(
             self._ALL,
@@ -218,4 +217,3 @@ class ResetPhaseRecorder:
                 )
             )
         return metrics
-

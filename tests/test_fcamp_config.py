@@ -1,9 +1,9 @@
-from dataclasses import asdict, fields
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
-from engine.config import FCAMPConfig, FlowCPSConfig, TrainingConfig, load_config, config_from_dict
+from engine.config import FCAMPConfig, TrainingConfig, load_config, config_from_dict
 from envs.tasks import TASKS
 
 
@@ -20,14 +20,11 @@ def test_fcamp_config_is_h4_w16_flow_cps() -> None:
     assert cfg.parameters.rollout_env_steps % cfg.parameters.horizon == 0
     assert cfg.parameters.flow_steps == 4
     assert cfg.parameters.cps_physical_rms == 0.05
-    assert cfg.parameters.cps_trainable is True
     assert cfg.parameters.desired_kl == 0.01
     assert cfg.parameters.policy_lr == 0.0003
     assert cfg.parameters.value_lr == 0.0003
     assert cfg.parameters.style_prior.obs_steps == 16
     assert cfg.parameters.style_prior.discriminator_warmup_rollouts == 1
-    assert cfg.parameters.credit.advantage_normalization == "global"
-    assert cfg.parameters.credit.integrate_amp_reward_dt is True
     assert cfg.parameters.streams.phase0_fraction == 0.10
     assert cfg.training.max_updates == 500
 
@@ -67,16 +64,6 @@ def test_fcamp_requires_two_streams_and_integer_reset_phases() -> None:
         )
 
 
-def test_legacy_fcamp_config_defaults_to_no_discriminator_warmup() -> None:
-    cfg = load_config(ROOT / "configs" / "fcamp_largebox.yaml")
-    tree = asdict(cfg)
-    tree["parameters"]["style_prior"].pop("discriminator_warmup_rollouts")
-
-    rebuilt = config_from_dict(tree, ROOT / "configs" / "legacy_fcamp.yaml")
-
-    assert rebuilt.parameters.style_prior.discriminator_warmup_rollouts == 0
-
-
 def test_validation_has_no_fractional_early_stop() -> None:
     assert "validation_done_frac_early_stop" not in {
         field.name for field in fields(TrainingConfig)
@@ -87,22 +74,13 @@ def test_validation_has_no_fractional_early_stop() -> None:
         load_config(ROOT / "configs" / name)
 
 
-def test_flow_cps_config_has_no_legacy_algorithm_fields() -> None:
-    fields_by_name = {field.name for field in fields(FlowCPSConfig)}
+def test_fcamp_config_has_no_legacy_algorithm_fields() -> None:
+    fields_by_name = {field.name for field in fields(FCAMPConfig)}
     assert "init_noise_std" not in fields_by_name
     assert "num_generations" not in fields_by_name
     assert "tail_bootstrap_steps" not in fields_by_name
     assert "actor_density" not in fields_by_name
     assert "failure_penalty" not in fields_by_name
-
-
-def test_legacy_algorithm_key_is_normalized_to_method() -> None:
-    cfg = load_config(ROOT / "configs" / "fcamp_largebox.yaml")
-    tree = asdict(cfg)
-    tree["algorithm"] = tree.pop("method")
-    rebuilt = config_from_dict(tree, ROOT / "configs" / "legacy.yaml")
-    assert rebuilt.method == "fcamp"
-    assert rebuilt.algorithm == "fcamp"
 
 
 def test_task_binds_motion_and_terrain() -> None:

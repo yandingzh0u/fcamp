@@ -64,16 +64,11 @@ class TemporalFeatureHistory:
         # Cursor is the slot overwritten by the next post-action push.
         self._cursor = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self._initialized = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
-        self._seeded = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._age = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
 
     @property
     def initialized(self) -> torch.Tensor:
         return self._initialized.clone()
-
-    @property
-    def seeded(self) -> torch.Tensor:
-        return self._seeded.clone()
 
     @property
     def push_count(self) -> torch.Tensor:
@@ -85,9 +80,7 @@ class TemporalFeatureHistory:
 
     @property
     def ready(self) -> torch.Tensor:
-        legacy_ready = ~self._seeded & (self._age >= self.history_len)
-        seeded_ready = self._seeded & (self._age >= 1)
-        return self._initialized & (legacy_ready | seeded_ready)
+        return self._initialized & (self._age >= 1)
 
     @property
     def pending_intervention(self) -> torch.Tensor:
@@ -152,25 +145,6 @@ class TemporalFeatureHistory:
         return values
 
     @torch.no_grad()
-    def reset(self, initial_frame: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
-        """Reset selected rings with one simulator frame ``[M,F]`` at age 0."""
-
-        ids = self._ids(env_ids)
-        frames = self._check_frames("initial_frame", initial_frame, ids.numel())
-        if ids.numel() == 0:
-            return
-        self._data[ids] = 0.0
-        self._slot_ages[ids] = -1
-        self._incoming_edge_clean[ids] = True
-        self._pending_intervention[ids] = False
-        self._data[ids, 0] = frames
-        self._slot_ages[ids, 0] = 0
-        self._cursor[ids] = 1 % self.history_len
-        self._initialized[ids] = True
-        self._seeded[ids] = False
-        self._age[ids] = 0
-
-    @torch.no_grad()
     def reset_seeded(
         self,
         seed_windows: torch.Tensor,
@@ -191,7 +165,6 @@ class TemporalFeatureHistory:
         # Slot zero is the oldest demo predecessor and is replaced first.
         self._cursor[ids] = 0
         self._initialized[ids] = True
-        self._seeded[ids] = True
         self._age[ids] = 0
 
     @torch.no_grad()
@@ -248,9 +221,6 @@ class TemporalFeatureHistory:
         expected = self._age[ids, None] - (self.history_len - 1) + offsets[None, :]
         if not torch.equal(slot_ages, expected):
             raise RuntimeError("corrupt imitation history: legal window ages must be contiguous")
-        legacy = ~self._seeded[ids]
-        if bool(legacy.any()) and bool((slot_ages[legacy] <= 0).any()):
-            raise RuntimeError("corrupt imitation history: legacy window ages must be positive")
         return slot_ages
 
     def window(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
@@ -289,9 +259,8 @@ class TemporalFeatureHistory:
         ready = self.ready
         causal_ready = self.causal_ready
         dirty = ready & ~causal_ready
-        seeded = initialized & self._seeded
         seed_frames_remaining = torch.where(
-            seeded,
+            initialized,
             torch.clamp(self.history_len - self._age, min=0, max=self.history_len),
             torch.zeros_like(self._age),
         )
@@ -306,8 +275,8 @@ class TemporalFeatureHistory:
             "history/pending_intervention_count": float(self._pending_intervention.sum().item()),
             "history/age0_count": float((initialized & (self._age == 0)).sum().item()),
             "history/age0_in_legal_window_count": 0.0,
-            "history/seeded_fraction": float(seeded.float().mean().item()),
-            "history/seeded_count": float(seeded.sum().item()),
+            "history/seeded_fraction": float(initialized.float().mean().item()),
+            "history/seeded_count": float(initialized.sum().item()),
             "history/seed_frames_remaining_mean": float(seed_frames_remaining.float().mean().item()),
         }
         if bool(initialized.any()):

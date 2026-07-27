@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 from torch import nn
 
 from engine.checkpoint import Checkpointer, _resume_signature
+from engine.config import load_config
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class _FakeSampler:
@@ -32,21 +38,17 @@ class _FakeAlgo:
 
 
 def test_resume_signature_contains_the_complete_physical_decoder() -> None:
-    environment = {
-        "policy_action_bound": 5.0,
-        "command_rate_limit": [80.0, 40.0],
-        "rate_half_life_seconds": 0.08,
-    }
-    signature = _resume_signature(
-        {
-            "method": "fcamp",
-            "environment": environment,
-            "parameters": {},
-        }
+    config = asdict(
+        load_config(ROOT / "configs" / "fcamp_largebox.yaml")
     )
+    signature = _resume_signature(config)
 
-    for name, expected in environment.items():
-        assert signature["environment"][name] == expected
+    for name in (
+        "policy_action_bound",
+        "command_rate_limit",
+        "rate_half_life_seconds",
+    ):
+        assert signature["environment"][name] == config["environment"][name]
 
 
 def test_reset_sampler_on_resume_skips_compatible_checkpoint_state(tmp_path) -> None:

@@ -61,7 +61,6 @@ def mimic_env_type(monkeypatch):
             "envs.imitation_data",
             G1_IMITATION_FRAME_DIM=1,
             G1_IMITATION_KEY_BODY_NAMES=(),
-            g1_add_disc_frame_dim=lambda _count: 1,
         ),
     )
     monkeypatch.setitem(
@@ -69,7 +68,6 @@ def mimic_env_type(monkeypatch):
         "envs.spec",
         _module(
             "envs.spec",
-            ADD_DISC_BODY_NAMES=(),
             CRITIC_OBS_DIM=2,
             OBS_DIM=2,
             PROJECT_ROOT=Path("."),
@@ -187,7 +185,6 @@ def _make_env(
     env_type,
     *,
     reference_joint_pos: torch.Tensor,
-    strict: bool,
     reset_noise: bool,
 ):
     env = object.__new__(env_type)
@@ -214,7 +211,6 @@ def _make_env(
         ]
     )
     env.action_scale = torch.tensor([[0.50, 0.25]])
-    env._strict_action_contract = strict
     env.reset_noise = reset_noise
     env.scene = _Scene(env)
     env.reset_phase_recorder = SimpleNamespace(record=lambda *_args: None)
@@ -269,7 +265,6 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
     env = _make_env(
         mimic_env_type,
         reference_joint_pos=references,
-        strict=True,
         reset_noise=True,
     )
     env_ids = torch.tensor([3, 1, 2])
@@ -328,7 +323,6 @@ def test_reset_rate_queries_only_absolute_past_for_nonzero_phases(
     env = _make_env(
         mimic_env_type,
         reference_joint_pos=references,
-        strict=True,
         reset_noise=False,
     )
     env_ids = torch.tensor([2, 0, 3])
@@ -352,31 +346,3 @@ def test_reset_rate_queries_only_absolute_past_for_nonzero_phases(
         torch.zeros(2),
     )
     assert bool((env.command_rate[env_ids[1:]].abs().sum(dim=-1) > 0.0).all())
-
-
-def test_pre_contract_reset_is_finite_and_does_not_clamp(
-    mimic_env_type,
-) -> None:
-    references = torch.tensor(
-        [
-            [3.5, 0.0],
-            [0.0, 0.0],
-            [0.0, 0.0],
-        ]
-    )
-    env = _make_env(
-        mimic_env_type,
-        reference_joint_pos=references,
-        strict=False,
-        reset_noise=False,
-    )
-    env_ids = torch.tensor([0])
-
-    observation = env.reset_envs(env_ids, phase_indices=torch.tensor([0]))
-
-    torch.testing.assert_close(observation, torch.tensor([[7.0, 0.0]]))
-    assert env.validated_actions == []
-
-    env.action_scale[0, 0] = 0.0
-    with pytest.raises(RuntimeError, match="non-finite reset policy command"):
-        env.reset_envs(env_ids, phase_indices=torch.tensor([0]))

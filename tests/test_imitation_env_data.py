@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import ast
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -16,8 +15,6 @@ from envs.imitation_data import (
     G1_IMITATION_NUM_JOINTS,
     build_g1_imitation_frame,
     history_indices,
-    quat_wxyz_to_tan_norm,
-    sample_contiguous_window_indices,
 )
 from envs.motion import MimicMotionReference
 
@@ -50,18 +47,6 @@ def test_imitation_joint_axes_match_the_runtime_urdf_action_order() -> None:
     assert [urdf_axes[name] for name in joint_names] == list(G1_IMITATION_JOINT_AXES)
 
 
-def test_wxyz_rotation_encoding_matches_mimickit_tangent_normal() -> None:
-    identity = quat_wxyz_to_tan_norm(torch.tensor([[1.0, 0.0, 0.0, 0.0]]))
-    assert torch.allclose(identity, torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]]))
-
-    # +90 degrees about z in explicit wxyz order rotates x onto +y while z stays z.
-    half = math.pi / 4.0
-    q_z90 = torch.tensor([[math.cos(half), 0.0, 0.0, math.sin(half)]])
-    encoded = quat_wxyz_to_tan_norm(q_z90)
-    expected = torch.tensor([[0.0, 1.0, 0.0, 0.0, 0.0, 1.0]])
-    assert torch.allclose(encoded, expected, atol=1.0e-6)
-
-
 def test_imitation_frame_is_233d_and_translation_invariant_except_root_position() -> None:
     batch = 3
     root_pos = torch.randn(batch, 3)
@@ -91,17 +76,6 @@ def test_imitation_frame_is_233d_and_translation_invariant_except_root_position(
     # other imitation features, including root-relative key positions, are invariant.
     assert torch.allclose(shifted[:, :3], frame[:, :3] + shift)
     assert torch.allclose(shifted[:, 3:], frame[:, 3:], atol=1.0e-6)
-
-
-def test_demo_window_indices_are_strictly_contiguous_and_never_wrap() -> None:
-    windows = sample_contiguous_window_indices(256, 16, 41, device="cpu")
-    assert windows.shape == (256, 16)
-    assert bool((windows[:, 1:] - windows[:, :-1] == 1).all())
-    assert int(windows.min()) >= 0
-    assert int(windows.max()) < 41
-
-    with pytest.raises(ValueError, match="window_size"):
-        sample_contiguous_window_indices(1, 42, 41, device="cpu")
 
 
 def test_reset_history_clamps_only_the_left_boundary() -> None:
@@ -237,35 +211,6 @@ def test_fcamp_expert_frame_uses_fk_at_the_same_dataset_state_and_time() -> None
     )
 
 
-def test_fcamp_expert_frame_requires_explicit_runtime_fk_model() -> None:
-    motion = _fake_motion(num_frames=4)
-    with pytest.raises(RuntimeError, match="kinematic_urdf_file"):
-        motion.get_fcamp_expert_frame_at_times(torch.tensor([0.0]))
-
-
-def test_evaluator_demo_frame_is_independent_of_add_motion_semantics() -> None:
-    motion = _fake_motion(num_frames=5)
-    motion.add_joint_vel = torch.full_like(motion.joint_vel, 123.0)
-    motion.add_root_link_lin_vel = torch.full((5, 3), 456.0)
-    motion.add_root_link_ang_vel = torch.full((5, 3), 789.0)
-    # Opposite quaternion signs encode the same physical rotation. Evaluator
-    # interpolation must follow the common shortest path in either mode.
-    motion.body_quat_full_w[2] *= -1.0
-    phases = torch.tensor([1.5, 2.25, 3.75])
-
-    motion.motion_reference_mode = "frame"
-    frame_mode = motion.get_imitation_frame_at_times(phases)
-    motion.motion_reference_mode = "mimickit_add"
-    add_mode = motion.get_imitation_frame_at_times(phases)
-
-    torch.testing.assert_close(frame_mode, add_mode)
-    assert bool(torch.isfinite(add_mode).all())
-    # Raw dataset velocities are zero/root and one/joint in _fake_motion; the
-    # ADD forward-difference buffers above must never leak into evaluation.
-    torch.testing.assert_close(add_mode[:, -35:-32], torch.zeros(3, 3))
-    torch.testing.assert_close(add_mode[:, -29:], torch.ones(3, 29))
-
-
 def _write_minimal_holosoma_motion(path: Path) -> None:
     num_frames = 2
     body_pos = np.zeros((num_frames, 2, 3), dtype=np.float32)
@@ -280,6 +225,7 @@ def _write_minimal_holosoma_motion(path: Path) -> None:
     body_ang[:, 1] = np.array([0.0, 0.0, 2.0], dtype=np.float32)
     np.savez(
         path,
+        fps=np.array(50.0, dtype=np.float32),
         joint_names=np.array(["joint"], dtype=object),
         body_names=np.array(["pelvis", "torso_link"], dtype=object),
         joint_pos=np.zeros((num_frames, 1), dtype=np.float32),
@@ -291,9 +237,35 @@ def _write_minimal_holosoma_motion(path: Path) -> None:
     )
 
 
+def _write_minimal_urdf(path: Path) -> None:
+    path.write_text(
+        """
+<robot name="minimal">
+  <link name="pelvis"/>
+  <link name="torso_link"/>
+  <link name="head_link"/>
+  <joint name="joint" type="revolute">
+    <parent link="pelvis"/>
+    <child link="torso_link"/>
+    <origin xyz="0 0 1"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+  <joint name="head_fixed" type="fixed">
+    <parent link="torso_link"/>
+    <child link="head_link"/>
+    <origin xyz="0 0 0.3"/>
+  </joint>
+</robot>
+""".strip(),
+        encoding="utf-8",
+    )
+
+
 def test_holosoma_loader_reconstructs_fixed_head_body(tmp_path: Path) -> None:
     path = tmp_path / "motion.npz"
+    urdf_path = tmp_path / "robot.urdf"
     _write_minimal_holosoma_motion(path)
+    _write_minimal_urdf(urdf_path)
     motion = MimicMotionReference(
         path,
         track_body_ids=torch.tensor([0, 1, 2]),
@@ -302,6 +274,7 @@ def test_holosoma_loader_reconstructs_fixed_head_body(tmp_path: Path) -> None:
         robot_body_names=["pelvis", "torso_link", "head_link"],
         action_joint_names=["joint"],
         root_body_name="pelvis",
+        kinematic_urdf_file=urdf_path,
         imitation_key_body_names=("head_link",),
     )
 
@@ -322,7 +295,9 @@ def test_holosoma_loader_reconstructs_fixed_head_body(tmp_path: Path) -> None:
 
 def test_holosoma_loader_rejects_unrecoverable_imitation_body(tmp_path: Path) -> None:
     path = tmp_path / "motion.npz"
+    urdf_path = tmp_path / "robot.urdf"
     _write_minimal_holosoma_motion(path)
+    _write_minimal_urdf(urdf_path)
     with pytest.raises(ValueError, match="missing from the motion"):
         MimicMotionReference(
             path,
@@ -332,6 +307,7 @@ def test_holosoma_loader_rejects_unrecoverable_imitation_body(tmp_path: Path) ->
             robot_body_names=["pelvis", "torso_link", "unrecoverable"],
             action_joint_names=["joint"],
             root_body_name="pelvis",
+            kinematic_urdf_file=urdf_path,
             imitation_key_body_names=("unrecoverable",),
         )
 

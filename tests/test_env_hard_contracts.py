@@ -8,7 +8,6 @@ import torch
 
 from envs.contracts import (
     resolve_root_velocity_frame,
-    select_imitation_root_domain,
     validate_actions_in_bounds,
 )
 
@@ -47,39 +46,6 @@ def test_fcamp_policy_command_domain_is_fixed_symmetric_scale() -> None:
         validate_actions_in_bounds(
             invalid.unsqueeze(0), low, high
         )
-
-
-def test_fcamp_imitation_root_link_domain_is_strictly_scoped() -> None:
-    legacy = (
-        torch.tensor([[1.0, 2.0, 3.0]]),
-        torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
-        torch.tensor([[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]]),
-    )
-    link = (
-        torch.tensor([[4.0, 5.0, 6.0]]),
-        torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
-        torch.tensor([[7.0, 8.0, 9.0, 10.0, 11.0, 12.0]]),
-    )
-    kwargs = {
-        "legacy_root_pos": legacy[0],
-        "legacy_root_quat": legacy[1],
-        "legacy_root_velocity": legacy[2],
-        "root_link_pos": link[0],
-        "root_link_quat": link[1],
-        "root_link_velocity": link[2],
-    }
-
-    selected_legacy = select_imitation_root_domain(
-        strict_fcamp=False, **kwargs
-    )
-    selected_fcamp = select_imitation_root_domain(
-        strict_fcamp=True, **kwargs
-    )
-
-    for actual, expected in zip(selected_legacy, legacy, strict=True):
-        torch.testing.assert_close(actual, expected)
-    for actual, expected in zip(selected_fcamp, link, strict=True):
-        torch.testing.assert_close(actual, expected)
 
 
 def test_root_velocity_frame_is_explicit_not_inferred_from_the_tensor() -> None:

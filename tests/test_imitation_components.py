@@ -81,17 +81,14 @@ def test_imitation_window_canonicalization_uses_final_root_xy_and_preserves_heig
 def test_history_order_push_and_subset_expert_reset() -> None:
     history = TemporalFeatureHistory(2, history_len=4, feature_dim=1)
     initial = torch.tensor([[[0.0], [1.0], [2.0], [3.0]], [[10.0], [11.0], [12.0], [13.0]]])
-    history.reset(initial[:, 0])
-    for frame_idx in range(1, 4):
-        history.push(initial[:, frame_idx])
+    history.reset_seeded(initial)
     history.push(torch.tensor([[4.0], [14.0]]))
     assert history.flatten().tolist() == [[1.0, 2.0, 3.0, 4.0], [11.0, 12.0, 13.0, 14.0]]
 
     env1 = torch.tensor([1])
     env1_history = torch.tensor([[[19.0], [20.0], [21.0], [22.0], [23.0]]])
-    history.reset(env1_history[:, 0], env1)
-    for frame_idx in range(1, 5):
-        history.push(env1_history[:, frame_idx], env1)
+    history.reset_seeded(env1_history[:, :4], env1)
+    history.push(env1_history[:, 4], env1)
     assert history.flatten(env1).tolist() == [[20.0, 21.0, 22.0, 23.0]]
     # Resetting env1 must not alter env0 or reset at a chunk boundary.
     assert history.flatten(torch.tensor([0])).tolist() == [[1.0, 2.0, 3.0, 4.0]]
@@ -102,9 +99,7 @@ def test_history_canonicalized_flatten_does_not_modify_raw_ring_frames() -> None
     initial = torch.tensor(
         [[[10.0, -4.0, 0.72, 1.0, 2.0], [12.0, -1.0, 0.76, 3.0, 4.0], [15.0, 3.0, 0.80, 5.0, 6.0]]]
     )
-    history.reset(initial[:, 0])
-    history.push(initial[:, 1])
-    history.push(initial[:, 2])
+    history.reset_seeded(initial)
     history.push(torch.tensor([[19.0, 8.0, 0.84, 7.0, 8.0]]))
     raw_window = torch.tensor(
         [[[12.0, -1.0, 0.76, 3.0, 4.0], [15.0, 3.0, 0.80, 5.0, 6.0], [19.0, 8.0, 0.84, 7.0, 8.0]]]
@@ -125,7 +120,6 @@ def test_demo_seeded_history_is_fixed_width_from_first_policy_step() -> None:
     seed = torch.tensor([[[0.0], [1.0], [2.0], [3.0]]], dtype=torch.float32)
     history.reset_seeded(seed)
 
-    assert history.seeded.tolist() == [True]
     assert history.ready.tolist() == [False]
     history.push(torch.tensor([[4.0]], dtype=torch.float32))
 
@@ -133,6 +127,9 @@ def test_demo_seeded_history_is_fixed_width_from_first_policy_step() -> None:
     assert history.causal_ready.tolist() == [True]
     assert history.window_ages().tolist() == [[-2, -1, 0, 1]]
     assert history.flatten().tolist() == [[1.0, 2.0, 3.0, 4.0]]
+    stats = history.statistics()
+    assert stats["history/seeded_count"] == 1.0
+    assert stats["history/seed_frames_remaining_mean"] == 3.0
 
 
 def test_intervention_after_excludes_exactly_next_w_minus_one_windows() -> None:

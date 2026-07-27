@@ -40,7 +40,7 @@ def _build_mlp(
     return nn.Sequential(*layers)
 
 
-class SharedEncoderDualFlowCritic(nn.Module):
+class DualFlowCritic(nn.Module):
     """Two scalar flow-value heads conditioned by one shared prefix encoder.
 
     ``context`` is deliberately opaque to this module. The algorithm must build
@@ -53,8 +53,6 @@ class SharedEncoderDualFlowCritic(nn.Module):
     flow-matching targets and generated value samples are independent.
     Channel order in tensor APIs is always ``[task, amp]``.
     """
-
-    channels = CHANNELS
 
     def __init__(
         self,
@@ -196,21 +194,6 @@ class SharedEncoderDualFlowCritic(nn.Module):
             value = value + dt * self._velocity(condition, value, time, channel)
         return value.view(batch_size, num_samples)
 
-    def sample_channel(
-        self,
-        context: torch.Tensor,
-        channel: str,
-        num_samples: int | None = None,
-        *,
-        deterministic: bool = False,
-    ) -> torch.Tensor:
-        num_samples = int(num_samples or self.eval_samples)
-        if num_samples < 1:
-            raise ValueError(f"num_samples must be >= 1, got {num_samples}")
-        return self._sample_encoded(
-            self.encode(context), channel, num_samples, deterministic
-        )
-
     def sample(
         self,
         context: torch.Tensor,
@@ -228,11 +211,6 @@ class SharedEncoderDualFlowCritic(nn.Module):
             for channel in CHANNELS
         ]
         return torch.stack(samples, dim=-1)
-
-    def evaluate_channel(self, context: torch.Tensor, channel: str) -> torch.Tensor:
-        return self.sample_channel(
-            context, channel, self.eval_samples, deterministic=True
-        ).mean(dim=1, keepdim=True)
 
     def evaluate(self, context: torch.Tensor) -> torch.Tensor:
         """Return deterministic means with shape ``[batch, 2]``."""
@@ -275,18 +253,6 @@ class SharedEncoderDualFlowCritic(nn.Module):
             .mean(dim=1)
         )
 
-    def flow_matching_loss_channel(
-        self,
-        context: torch.Tensor,
-        target_return: torch.Tensor,
-        channel: str,
-        *,
-        fm_samples: int = 1,
-    ) -> torch.Tensor:
-        return self._flow_matching_loss_encoded(
-            self.encode(context), target_return, channel, fm_samples
-        )
-
     def flow_matching_loss(
         self,
         context: torch.Tensor,
@@ -307,8 +273,3 @@ class SharedEncoderDualFlowCritic(nn.Module):
             for index, channel in enumerate(CHANNELS)
         ]
         return torch.stack(losses, dim=-1)
-
-
-# Descriptive alias retained for configuration/build code that uses the phrase
-# "shared trunk + dual head" rather than "shared encoder".
-SharedTrunkDualFlowCritic = SharedEncoderDualFlowCritic

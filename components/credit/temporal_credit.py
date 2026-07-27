@@ -22,8 +22,7 @@ class DualChannelCredit:
     normalized exactly once for the actor; both components share that same
     normalization factor, so reward weights and physical scales cannot be
     erased by independent channel standardization. ``channel_valid_mask`` is
-    the effective ``[time, env, 2]`` critic/credit mask.  It is optional only
-    so callers that construct this dataclass directly remain source compatible.
+    the effective ``[time, env, 2]`` critic/credit mask.
     """
 
     td_errors: torch.Tensor
@@ -32,7 +31,7 @@ class DualChannelCredit:
     mixed_advantage: torch.Tensor
     actor_advantage: torch.Tensor
     actor_advantage_components: torch.Tensor
-    channel_valid_mask: torch.Tensor | None = None
+    channel_valid_mask: torch.Tensor
 
     @property
     def normalized_advantages(self) -> torch.Tensor:
@@ -202,12 +201,9 @@ def normalize_actor_mixture(
         raise ValueError("sample_weights contain no valid actor mass")
 
     raw_components = credit.actor_advantage_components
-    if credit.channel_valid_mask is None:
-        channel_valid = valid.unsqueeze(-1).expand_as(raw_components)
-    else:
-        if credit.channel_valid_mask.shape != raw_components.shape:
-            raise ValueError("credit.channel_valid_mask must match channel advantages")
-        channel_valid = credit.channel_valid_mask.bool() & valid.unsqueeze(-1)
+    if credit.channel_valid_mask.shape != raw_components.shape:
+        raise ValueError("credit.channel_valid_mask must match channel advantages")
+    channel_valid = credit.channel_valid_mask.bool() & valid.unsqueeze(-1)
     channel_weights = weights.unsqueeze(-1) * channel_valid.to(weights.dtype)
     channel_weight_sum = channel_weights.sum(dim=(0, 1))
     component_mean = torch.where(
@@ -342,101 +338,4 @@ def compute_dual_channel_gae(
         actor_advantage=actor_advantage,
         actor_advantage_components=actor_components,
         channel_valid_mask=effective_channel_valid,
-    )
-
-
-def with_chunk_shared_actor_credit(
-    credit: DualChannelCredit,
-    valid_mask: torch.Tensor,
-    *,
-    chunk_horizon: int,
-    normalization: NormalizationMode = "global",
-    actor_weights: Sequence[float] | torch.Tensor = (1.0, 1.0),
-    normalization_epsilon: float = 1e-8,
-) -> DualChannelCredit:
-    """Replace causal per-frame actor credit with one advantage per chunk.
-
-    This is the explicit ``w/ chunk advantage`` ablation.  The primitive dual
-    GAE and value targets remain unchanged for the two Flow critics.  For the
-    actor, each valid conditional in chunk ``k`` receives the normalized
-    start-of-chunk advantage ``A[k, 0]``.  Since primitive GAE recursively
-    expands across all ``H`` steps, that start advantage is exactly the
-    discounted chunk reward plus the ``(gamma * lambda) ** H`` continuation.
-    """
-
-    if chunk_horizon < 1:
-        raise ValueError(f"chunk_horizon must be >= 1, got {chunk_horizon}")
-    if credit.advantages.ndim != 3 or credit.advantages.shape[-1] != len(CHANNELS):
-        raise ValueError("credit advantages must have shape [time, env, 2]")
-    if valid_mask.shape != credit.advantages.shape[:2]:
-        raise ValueError("valid_mask must match credit time/env dimensions")
-    time_steps, num_envs, _ = credit.advantages.shape
-    if time_steps % chunk_horizon != 0:
-        raise ValueError(
-            f"time dimension {time_steps} is not divisible by chunk_horizon {chunk_horizon}"
-        )
-
-    num_chunks = time_steps // chunk_horizon
-    chunk_advantages = credit.advantages.view(
-        num_chunks, chunk_horizon, num_envs, len(CHANNELS)
-    )[:, 0]
-    chunk_valid = valid_mask.view(num_chunks, chunk_horizon, num_envs)[:, 0]
-    if credit.channel_valid_mask is None:
-        channel_valid = valid_mask.unsqueeze(-1).expand_as(credit.advantages)
-    else:
-        if credit.channel_valid_mask.shape != credit.advantages.shape:
-            raise ValueError("credit.channel_valid_mask must match channel advantages")
-        channel_valid = credit.channel_valid_mask.bool() & valid_mask.unsqueeze(-1)
-    chunk_channel_valid = channel_valid.view(
-        num_chunks, chunk_horizon, num_envs, len(CHANNELS)
-    )[:, 0]
-    chunk_norm_mode: NormalizationMode = (
-        "none" if normalization == "none" else "global"
-    )
-    _, _, component_chunks = _mix_then_normalize_masked(
-        chunk_advantages,
-        chunk_valid,
-        chunk_channel_valid,
-        actor_weights,
-        chunk_norm_mode,
-        chunk_horizon=1,
-        epsilon=float(normalization_epsilon),
-    )
-    weights = torch.as_tensor(
-        actor_weights,
-        device=chunk_advantages.device,
-        dtype=chunk_advantages.dtype,
-    ).reshape(1, 1, len(CHANNELS))
-    raw_chunk_components = torch.where(
-        chunk_channel_valid,
-        chunk_advantages * weights,
-        torch.zeros_like(chunk_advantages),
-    )
-    shared_raw_components = raw_chunk_components[:, None].expand(
-        -1, chunk_horizon, -1, -1
-    ).reshape(time_steps, num_envs, len(CHANNELS))
-    shared_raw_components = torch.where(
-        channel_valid,
-        shared_raw_components,
-        torch.zeros_like(shared_raw_components),
-    )
-    shared_mixed = shared_raw_components.sum(dim=-1)
-    shared_components = component_chunks[:, None].expand(
-        -1, chunk_horizon, -1, -1
-    ).reshape(time_steps, num_envs, len(CHANNELS))
-    shared_components = torch.where(
-        channel_valid,
-        shared_components,
-        torch.zeros_like(shared_components),
-    )
-    actor_advantage = shared_components.sum(dim=-1)
-
-    return DualChannelCredit(
-        td_errors=credit.td_errors,
-        advantages=credit.advantages,
-        value_targets=credit.value_targets,
-        mixed_advantage=shared_mixed,
-        actor_advantage=actor_advantage,
-        actor_advantage_components=shared_components,
-        channel_valid_mask=channel_valid,
     )

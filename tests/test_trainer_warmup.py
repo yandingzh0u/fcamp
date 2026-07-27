@@ -66,7 +66,7 @@ class _WarmupAlgorithm:
 
     def update(self, rollout: dict, collect_time: float) -> dict[str, float]:
         del rollout, collect_time
-        return {}
+        return {"system/parameters_finite": 1.0}
 
 
 class _MetricsLogger:
@@ -114,6 +114,7 @@ def _trainer(*, resume: str = "") -> CoreTrainer:
     trainer.start_update = 1
     trainer.env_transitions_total = 0
     trainer.train_wall_seconds_total = 0.0
+    trainer._pre_training_warmup_ran = False
     trainer.checkpoint_dir = SimpleNamespace(__str__=lambda self: "unused")
     trainer.metrics_logger = _MetricsLogger()
     trainer.checkpointer = _Checkpointer()

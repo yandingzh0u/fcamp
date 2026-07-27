@@ -160,7 +160,6 @@ class G1Env:
             self.num_envs, self.action_dim, device=self.device
         )
         self.command_rate = torch.zeros_like(self.last_action)
-        self._strict_action_contract = True
         self._action_space = self._build_action_space()
         self._push_interval_step_range = PUSH_INTERVAL_STEP_RANGE
         min_push, max_push = self._push_interval_step_range
@@ -228,12 +227,6 @@ class G1Env:
         *,
         tolerance: float = 1.0e-6,
     ) -> None:
-        if (
-            not self._strict_action_contract
-            or self._policy_action_low is None
-            or self._policy_action_high is None
-        ):
-            raise RuntimeError("No strict policy action contract is installed")
         validate_actions_in_bounds(
             actions,
             self._policy_action_low,
@@ -266,9 +259,6 @@ class G1Env:
         raw_target_rate: torch.Tensor,
         *,
         active_mask: torch.Tensor | None = None,
-        auto_reset: bool = False,
-        reset_horizon: int = 1,
-        reference_dt: torch.Tensor | float | None = None,
     ):
         """Decode and execute exactly one physical policy frame."""
 
@@ -276,12 +266,7 @@ class G1Env:
             raw_target_rate,
             active_mask=active_mask,
         )
-        return self.step(
-            requested_action,
-            auto_reset=auto_reset,
-            reset_horizon=reset_horizon,
-            reference_dt=reference_dt,
-        )
+        return self.step(requested_action)
 
     def get_action_joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         joint_pos = self.robot.data.joint_pos.index_select(1, self.action_joint_ids)

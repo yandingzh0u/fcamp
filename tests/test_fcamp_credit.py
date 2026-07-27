@@ -9,9 +9,8 @@ from components.credit.temporal_credit import (
     compute_dual_channel_gae,
     normalize_actor_mixture,
     resolve_terminal_masks,
-    with_chunk_shared_actor_credit,
 )
-from models.dual_flow_critic import SharedEncoderDualFlowCritic
+from models.dual_flow_critic import DualFlowCritic
 from components.rollout.training_streams import Phase0CurriculumStreams
 from method.fcamp import FCAMP
 
@@ -189,10 +188,8 @@ def test_fcamp_assign_credit_has_one_normalizer_across_10_90_streams() -> None:
     algo = object.__new__(FCAMP)
     algo.cfg = SimpleNamespace(
         credit=SimpleNamespace(
-            advantage_normalization="global",
             task_weight=1.0,
             amp_weight=1.0,
-            mode="causal_frame",
         ),
         discount_gamma=0.0,
         gae_lambda=0.0,
@@ -229,6 +226,9 @@ def test_fcamp_assign_credit_has_one_normalizer_across_10_90_streams() -> None:
         "bootstrap_mask": valid,
         "trace_mask": valid,
         "valid": valid,
+        "amp_valid": valid,
+        "amp_bootstrap_mask": valid,
+        "amp_trace_mask": valid,
     }
 
     algo._assign_credit(rollout)
@@ -309,89 +309,9 @@ def test_multi_normalizer_actor_credit_modes_are_rejected(
         )
 
 
-def test_chunk_shared_ablation_broadcasts_start_credit_only_to_actor() -> None:
-    rewards = torch.tensor(
-        [[[1.0, 10.0]], [[2.0, 20.0]], [[3.0, 30.0]], [[4.0, 40.0]]]
-    )
-    primitive = _credit(rewards)
-    valid = torch.ones(4, 1, dtype=torch.bool)
-    shared = with_chunk_shared_actor_credit(
-        primitive,
-        valid,
-        chunk_horizon=2,
-        normalization="none",
-        actor_weights=(2.0, 3.0),
-    )
-
-    expected_channels = torch.tensor(
-        [[[10.0, 100.0]], [[10.0, 100.0]], [[7.0, 70.0]], [[7.0, 70.0]]]
-    )
-    expected_components = expected_channels * torch.tensor([2.0, 3.0])
-    torch.testing.assert_close(shared.normalized_advantages, expected_components)
-    torch.testing.assert_close(
-        shared.actor_advantage,
-        2.0 * expected_channels[..., 0] + 3.0 * expected_channels[..., 1],
-    )
-    # Dual Flow critics still receive the same primitive-step targets; this
-    # ablation isolates actor credit assignment rather than changing critics.
-    torch.testing.assert_close(shared.value_targets, primitive.value_targets)
-    torch.testing.assert_close(shared.advantages, primitive.advantages)
-
-
-def test_chunk_shared_uses_the_same_single_scalar_normalizer() -> None:
-    rewards = torch.tensor(
-        [
-            [[1.0, 10.0], [2.0, 40.0]],
-            [[3.0, 5.0], [4.0, 7.0]],
-            [[8.0, 20.0], [5.0, 15.0]],
-            [[2.0, 1.0], [6.0, 3.0]],
-        ]
-    )
-    primitive = compute_dual_channel_gae(
-        rewards,
-        torch.zeros_like(rewards),
-        torch.zeros_like(rewards),
-        torch.ones(4, 2),
-        torch.ones(4, 2),
-        torch.ones(4, 2, dtype=torch.bool),
-        gamma=1.0,
-        gae_lambda=0.0,
-        chunk_horizon=2,
-        normalization="none",
-        actor_weights=(1.0, 1.0),
-    )
-    shared_raw = with_chunk_shared_actor_credit(
-        primitive,
-        torch.ones(4, 2, dtype=torch.bool),
-        chunk_horizon=2,
-        normalization="none",
-        actor_weights=(2.0, 0.5),
-    )
-    valid = torch.ones(4, 2, dtype=torch.bool)
-    shared = normalize_actor_mixture(
-        shared_raw,
-        valid,
-        torch.full((4, 2), 1.0 / 8.0),
-    )
-
-    # Every frame receives its chunk-start credit and both reward components use
-    # one common scalar normalizer.
-    torch.testing.assert_close(shared.actor_advantage[0], shared.actor_advantage[1])
-    torch.testing.assert_close(shared.actor_advantage[2], shared.actor_advantage[3])
-    torch.testing.assert_close(
-        shared.actor_advantage,
-        shared.normalized_advantages.sum(dim=-1),
-    )
-    assert abs(float(shared.actor_advantage.mean())) < 1.0e-6
-    assert abs(
-        float(shared.actor_advantage.square().mean()) - 1.0
-    ) < 1.0e-5
-    torch.testing.assert_close(shared.value_targets, primitive.value_targets)
-
-
 def test_dual_flow_critic_shares_encoder_but_not_heads() -> None:
     torch.manual_seed(7)
-    critic = SharedEncoderDualFlowCritic(
+    critic = DualFlowCritic(
         context_dim=6,
         encoder_hidden_dims=(12,),
         embedding_dim=8,
@@ -413,13 +333,6 @@ def test_dual_flow_critic_shares_encoder_but_not_heads() -> None:
     assert values.shape == (5, 2)
     assert samples.shape == (5, 3, 2)
     assert losses.shape == (5, 2)
-
-    # One channel updates the shared encoder and only its own value head.
-    critic.zero_grad(set_to_none=True)
-    critic.flow_matching_loss_channel(context, targets[:, 0], "task").mean().backward()
-    assert all(parameter.grad is not None for parameter in critic.encoder.parameters())
-    assert all(parameter.grad is not None for parameter in critic.task_head.parameters())
-    assert all(parameter.grad is None for parameter in critic.amp_head.parameters())
 
     # The joint objective reaches both independent heads.
     critic.zero_grad(set_to_none=True)

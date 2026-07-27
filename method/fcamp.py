@@ -19,7 +19,6 @@ from components.credit.temporal_credit import (
     compute_dual_channel_gae,
     normalize_actor_mixture,
     resolve_terminal_masks,
-    with_chunk_shared_actor_credit,
 )
 from components.rollout.flow_cps_base import FlowCPSBase
 from components.rollout.training_streams import (
@@ -30,41 +29,28 @@ from components.rollout.training_streams import (
 )
 from components.imitation.style_reward import (
     discriminator_style_reward,
-    style_reward_statistics,
 )
 from components.imitation.temporal_history import TemporalFeatureHistory
 from components.imitation.window_pipeline import TemporalWindowPipeline
-from components.normalization.running_stats import RunningNormalizer
+from components.normalization.running_stats import (
+    EmpiricalNormalization,
+    RunningNormalizer,
+)
 from components.replay.fcamp_window_buffer import FCAMPWindowReplay
+from components.rollout.fcamp_diagnostics import (
+    collect_update_metrics,
+    log_banner,
+    log_update,
+)
 from models.style_discriminator import (
     StyleDiscriminator,
     compute_style_discriminator_loss,
 )
-from models.mlp_actor_critic import EmpiricalNormalization
-from models.dual_flow_critic import SharedTrunkDualFlowCritic
+from models.dual_flow_critic import DualFlowCritic
 from engine.checkpoint import (
     FCAMP_CHECKPOINT_CONTRACT,
     validate_static_fcamp_checkpoint_contract,
 )
-
-
-def _masked_stats(prefix: str, values: torch.Tensor, mask: torch.Tensor | None = None) -> dict[str, float]:
-    flat = values.detach().float().reshape(-1)
-    if mask is not None:
-        flat = flat[mask.reshape(-1).bool()]
-    if flat.numel() == 0:
-        return {f"{prefix}/count": 0.0}
-    q = torch.quantile(flat, torch.tensor([0.05, 0.5, 0.95], device=flat.device))
-    return {
-        f"{prefix}/count": float(flat.numel()),
-        f"{prefix}/mean": float(flat.mean().item()),
-        f"{prefix}/std": float(flat.std(unbiased=False).item()),
-        f"{prefix}/min": float(flat.min().item()),
-        f"{prefix}/max": float(flat.max().item()),
-        f"{prefix}/p05": float(q[0].item()),
-        f"{prefix}/p50": float(q[1].item()),
-        f"{prefix}/p95": float(q[2].item()),
-    }
 
 
 class FCAMP(FlowCPSBase):
@@ -72,11 +58,11 @@ class FCAMP(FlowCPSBase):
 
     def build(self) -> None:
         cfg = self.cfg
-        amp_cfg = cfg.amp
+        style_cfg = cfg.style_prior
         critic_cfg = cfg.critics
         env = self.env
 
-        self.imitation_history_steps = int(amp_cfg.obs_steps)
+        self.imitation_history_steps = int(style_cfg.obs_steps)
         super().build()
 
         # Bounds and carried-rate dynamics exist before the first reset and are
@@ -84,10 +70,6 @@ class FCAMP(FlowCPSBase):
         # domain as part of its fresh-checkpoint contract.
         self.action_low = env.action_low
         self.action_high = env.action_high
-        if not bool(env.motion.fcamp_has_runtime_fk):
-            raise RuntimeError(
-                "FCAMP requires the configured runtime URDF FK for expert/policy alignment"
-            )
 
         self.training_streams = Phase0CurriculumStreams.create(
             env.num_envs,
@@ -105,9 +87,6 @@ class FCAMP(FlowCPSBase):
             self.training_streams.curriculum_mask
         )
 
-        # A temporal discriminator must never observe a silent motion teleport.
-        env.terminate_on_motion_end = True
-
         # Context = current privileged state, chunk-start privileged and actor
         # states, previous action, padded causal raw-z prefix, prefix mask and
         # offset one-hot.  The online discriminator state is deliberately absent.
@@ -118,7 +97,13 @@ class FCAMP(FlowCPSBase):
             + self.chunk_dim
             + 2 * self.horizon_h
         )
-        self.critic = SharedTrunkDualFlowCritic(
+        self.flow_critic_steps = int(cfg.flow_steps)
+        self.flow_critic_samples = 4
+        self.flow_critic_fm_samples = 1
+        self.critic_learning_rate = float(cfg.value_lr)
+        if self.critic_learning_rate <= 0.0:
+            raise ValueError(f"value_lr must be > 0, got {cfg.value_lr}")
+        self.critic = DualFlowCritic(
             context_dim=self.prefix_context_dim,
             encoder_hidden_dims=critic_cfg.encoder_hidden_dims,
             head_hidden_dims=critic_cfg.head_hidden_dims,
@@ -144,12 +129,12 @@ class FCAMP(FlowCPSBase):
             self.imitation_frame_dim,
         )
         self.discriminator = StyleDiscriminator(
-            self.imitation_window_dim, tuple(amp_cfg.hidden_dims)
+            self.imitation_window_dim, tuple(style_cfg.hidden_dims)
         ).to(env.device)
         self.disc_normalizer = RunningNormalizer(
             self.imitation_window_dim,
             device=env.device,
-            clip=float(amp_cfg.normalizer_clip),
+            clip=float(style_cfg.normalizer_clip),
         )
         self.imitation_history = TemporalFeatureHistory(
             env.num_envs,
@@ -157,8 +142,8 @@ class FCAMP(FlowCPSBase):
             self.imitation_frame_dim,
             device=env.device,
         )
-        replay_capacity = int(amp_cfg.replay_size)
-        replay_replace = int(amp_cfg.replay_samples)
+        replay_capacity = int(style_cfg.replay_size)
+        replay_replace = int(style_cfg.replay_samples)
         phase0_fraction = float(cfg.streams.phase0_fraction)
         phase0_capacity = int(round(replay_capacity * phase0_fraction))
         phase0_replace = int(round(replay_replace * phase0_fraction))
@@ -170,7 +155,7 @@ class FCAMP(FlowCPSBase):
             PHASE0_STREAM: phase0_replace,
             CURRICULUM_STREAM: replay_replace - phase0_replace,
         }
-        current_capacity = int(amp_cfg.current_buffer_size)
+        current_capacity = int(style_cfg.current_buffer_size)
         current_phase0_capacity = int(round(current_capacity * phase0_fraction))
         self.current_stream_capacities = {
             PHASE0_STREAM: current_phase0_capacity,
@@ -189,10 +174,10 @@ class FCAMP(FlowCPSBase):
             pin_memory=False,
         )
         disc_parameters = [p for p in self.discriminator.parameters() if p.requires_grad]
-        optimizer_name = amp_cfg.optimizer.lower()
+        optimizer_name = style_cfg.optimizer.lower()
         optimizer_kwargs = {
-            "lr": float(amp_cfg.learning_rate),
-            "weight_decay": float(amp_cfg.weight_decay),
+            "lr": float(style_cfg.learning_rate),
+            "weight_decay": float(style_cfg.weight_decay),
         }
         if optimizer_name == "sgd":
             # MimicKit's MPOptimizer uses momentum=0.9 and no gradient clip for
@@ -269,6 +254,8 @@ class FCAMP(FlowCPSBase):
         payload = super().extra_checkpoint_state()
         payload.update(
             {
+                "critic_optimizer": self.critic_optimizer.state_dict(),
+                "critic_learning_rate": float(self.critic_learning_rate),
                 "disc_optimizer": self.disc_optimizer.state_dict(),
                 "disc_version": int(self.disc_version),
                 "warmup_env_transitions": int(self.warmup_env_transitions),
@@ -305,6 +292,20 @@ class FCAMP(FlowCPSBase):
         super().load_extra_checkpoint_state(payload, reset_optimizer=reset_optimizer)
         if not payload:
             return
+        if reset_optimizer:
+            self.critic_learning_rate = float(self.cfg.value_lr)
+        else:
+            self.critic_learning_rate = float(
+                payload.get(
+                    "critic_learning_rate",
+                    self.critic_learning_rate,
+                )
+            )
+            self.critic_optimizer.load_state_dict(
+                payload["critic_optimizer"]
+            )
+        for group in self.critic_optimizer.param_groups:
+            group["lr"] = self.critic_learning_rate
         saved_stream_ids = payload.get("stream_ids")
         if not torch.is_tensor(saved_stream_ids) or not torch.equal(
             saved_stream_ids.to(dtype=torch.int8, device="cpu"),
@@ -391,7 +392,8 @@ class FCAMP(FlowCPSBase):
         normalizer: EmpiricalNormalization,
         samples: torch.Tensor,
         valid: torch.Tensor | None = None,
-        stream_labels: torch.Tensor | None = None,
+        *,
+        stream_labels: torch.Tensor,
     ) -> None:
         """Update running moments without materializing a full normalized copy.
 
@@ -406,65 +408,52 @@ class FCAMP(FlowCPSBase):
         flat_valid = None if valid is None else valid.reshape(-1).bool()
         if flat_valid is not None and flat_valid.shape[0] != flat.shape[0]:
             raise ValueError("normalizer samples and validity mask are misaligned")
-        selected_indices: torch.Tensor | None = None
-        if stream_labels is not None:
-            flat_streams = stream_labels.reshape(-1).to(
-                device=flat.device,
-                dtype=torch.int8,
-            )
-            if flat_streams.shape[0] != flat.shape[0]:
-                raise ValueError(
-                    "normalizer samples and stream labels are misaligned"
-                )
-            eligible_indices = (
-                torch.arange(flat.shape[0], device=flat.device)
-                if flat_valid is None
-                else flat_valid.nonzero(as_tuple=False).squeeze(-1)
-            )
-            eligible_streams = flat_streams.index_select(
-                0,
-                eligible_indices,
-            )
-            specs = self._stream_specs(eligible_streams)
-            balanced_total = int(
-                min(
-                    indices.numel() / objective_weight
-                    for _, _, objective_weight, indices in specs
-                )
-            )
-            selections: list[torch.Tensor] = []
-            for _, _, objective_weight, local_indices in specs:
-                quota = min(
-                    int(local_indices.numel()),
-                    int(round(balanced_total * objective_weight)),
-                )
-                order = torch.randperm(
-                    local_indices.numel(),
-                    device=flat.device,
-                )[:quota]
-                selected_local = local_indices.index_select(0, order)
-                selections.append(
-                    eligible_indices.index_select(0, selected_local)
-                )
-            selected_indices = torch.cat(selections, dim=0)
-        batch_size = min(max(1, int(self.cfg.micro_batch_size)), 1024)
-        sample_count = (
-            int(selected_indices.numel())
-            if selected_indices is not None
-            else int(flat.shape[0])
+        flat_streams = stream_labels.reshape(-1).to(
+            device=flat.device,
+            dtype=torch.int8,
         )
+        if flat_streams.shape[0] != flat.shape[0]:
+            raise ValueError(
+                "normalizer samples and stream labels are misaligned"
+            )
+        eligible_indices = (
+            torch.arange(flat.shape[0], device=flat.device)
+            if flat_valid is None
+            else flat_valid.nonzero(as_tuple=False).squeeze(-1)
+        )
+        eligible_streams = flat_streams.index_select(
+            0,
+            eligible_indices,
+        )
+        specs = self._stream_specs(eligible_streams)
+        balanced_total = int(
+            min(
+                indices.numel() / objective_weight
+                for _, _, objective_weight, indices in specs
+            )
+        )
+        selections: list[torch.Tensor] = []
+        for _, _, objective_weight, local_indices in specs:
+            quota = min(
+                int(local_indices.numel()),
+                int(round(balanced_total * objective_weight)),
+            )
+            order = torch.randperm(
+                local_indices.numel(),
+                device=flat.device,
+            )[:quota]
+            selected_local = local_indices.index_select(0, order)
+            selections.append(
+                eligible_indices.index_select(0, selected_local)
+            )
+        selected_indices = torch.cat(selections, dim=0)
+        batch_size = min(max(1, int(self.cfg.micro_batch_size)), 1024)
+        sample_count = int(selected_indices.numel())
         for start in range(0, sample_count, batch_size):
-            if selected_indices is None:
-                batch = flat[start : start + batch_size]
-                if flat_valid is not None:
-                    batch = batch[
-                        flat_valid[start : start + batch_size]
-                    ]
-            else:
-                batch = flat.index_select(
-                    0,
-                    selected_indices[start : start + batch_size],
-                )
+            batch = flat.index_select(
+                0,
+                selected_indices[start : start + batch_size],
+            )
             if batch.shape[0] > 0:
                 normalizer._update(batch)
 
@@ -477,7 +466,7 @@ class FCAMP(FlowCPSBase):
 
         if flat_windows.ndim != 2 or flat_windows.shape[-1] != self.imitation_window_dim:
             raise ValueError("FCAMP discriminator windows have an incompatible shape")
-        batch_size = max(1, int(self.cfg.amp.reward_eval_batch_size))
+        batch_size = max(1, int(self.cfg.style_prior.reward_eval_batch_size))
         logits: list[torch.Tensor] = []
         self.discriminator.eval()
         for start in range(0, flat_windows.shape[0], batch_size):
@@ -490,18 +479,16 @@ class FCAMP(FlowCPSBase):
         all_logits = torch.cat(logits, dim=0)
         rewards = discriminator_style_reward(
             all_logits,
-            scale=float(self.cfg.amp.reward_scale),
-            minimum_one_minus_prob=float(self.cfg.amp.reward_epsilon),
+            scale=float(self.cfg.style_prior.reward_scale),
+            minimum_one_minus_prob=float(self.cfg.style_prior.reward_epsilon),
         )
         return all_logits, rewards
 
     def _reset_imitation_history(
         self,
-        phase_indices: torch.Tensor | None = None,
+        phase_indices: torch.Tensor,
         env_ids: torch.Tensor | None = None,
     ) -> None:
-        if phase_indices is None:
-            raise ValueError("FCAMP reset history requires explicit reference phases")
         phases = phase_indices.to(device=self.env.device)
         seed = self.env.motion.get_fcamp_demo_history(
             phases,
@@ -579,11 +566,11 @@ class FCAMP(FlowCPSBase):
         accounting are restored so the discarded rollout cannot steer update 1.
         """
 
-        warmup_rollouts = int(self.cfg.amp.discriminator_warmup_rollouts)
+        warmup_rollouts = int(
+            self.cfg.style_prior.discriminator_warmup_rollouts
+        )
         if warmup_rollouts == 0:
             return current_observation, {}, 0
-        if warmup_rollouts != 1:
-            raise ValueError("FCAMP supports exactly one discriminator warm-up rollout")
 
         sampler_state = {
             key: value.clone() if torch.is_tensor(value) else value
@@ -597,9 +584,9 @@ class FCAMP(FlowCPSBase):
             rollout=rollout,
             commit_normalizer_before_training=True,
         )
-        if disc_metrics.get("disc/update_steps", 0.0) <= 0.0:
+        if disc_metrics["disc/update_steps"] <= 0.0:
             raise RuntimeError("FCAMP discriminator warm-up produced no optimizer step")
-        if disc_metrics.get("disc_norm/committed_before_training", 0.0) != 1.0:
+        if disc_metrics["disc_norm/committed_before_training"] != 1.0:
             raise RuntimeError(
                 "FCAMP discriminator warm-up did not commit matched normalization first"
             )
@@ -624,9 +611,9 @@ class FCAMP(FlowCPSBase):
             "env_transitions": float(transitions),
             "amp_valid_window_count": float(rollout["amp_valid"].sum().item()),
             "replay_dirty_insert_count": float(
-                self.disc_window_replay.statistics(current_update=0).get(
-                    "replay/dirty_insert_count", -1.0
-                )
+                self.disc_window_replay.statistics(
+                    current_update=0
+                )["replay/dirty_insert_count"]
             ),
         }
         del rollout
@@ -655,13 +642,10 @@ class FCAMP(FlowCPSBase):
     def evaluation_step_payload(
         self,
         frame_payload: torch.Tensor,
-        reference_dt: torch.Tensor | None,
         active_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         return self.env.step_raw_target_rate(
             frame_payload,
-            auto_reset=False,
-            reference_dt=reference_dt,
             active_mask=active_mask,
         )
 
@@ -699,7 +683,6 @@ class FCAMP(FlowCPSBase):
 
         actor_obs_buf = torch.zeros(chunks, n_envs, self.actor_obs_dim, device=device)
         actor_obs_raw_buf = torch.zeros_like(actor_obs_buf)
-        actions_buf = torch.zeros(chunks, n_envs, h, self.num_act, device=device)
         raw_z_buf = torch.zeros(chunks, n_envs, self.chunk_dim, device=device)
         old_mean_z_buf = torch.zeros_like(raw_z_buf)
         old_log_probs_buf = torch.zeros(chunks, n_envs, h, device=device)
@@ -743,10 +726,9 @@ class FCAMP(FlowCPSBase):
         obs = current_obs
         critic_obs = self._critic_obs
         collection_start_phases = env.phase_steps.detach().clone()
-        rollout_info_items: list[tuple[dict, torch.Tensor]] = []
         task_weight = float(self.cfg.credit.task_weight)
         amp_weight = float(self.cfg.credit.amp_weight)
-        amp_dt_scale = float(env.dt) if self.cfg.credit.integrate_amp_reward_dt else 1.0
+        amp_dt_scale = float(env.dt)
         action_abs_max = 0.0
         action_bound_violation_max = 0.0
         raw_z_abs_max = 0.0
@@ -762,7 +744,7 @@ class FCAMP(FlowCPSBase):
         window_latest_root_xy_abs_max = torch.zeros((), device=device)
         window_root_xy_abs_sum = torch.zeros((), device=device)
         window_root_xy_count = 0
-        replay_update_idx = int(getattr(self, "_fcamp_update_idx", 0))
+        replay_update_idx = int(self._fcamp_update_idx)
         self.disc_window_replay.begin_update(
             replay_update_idx,
             replacement_quotas=self.replay_replacement_quotas,
@@ -824,12 +806,11 @@ class FCAMP(FlowCPSBase):
                     raw_z_t = raw_z_chunk[:, frame_idx]
                     next_obs, task_reward, done, info = env.step_raw_target_rate(
                         raw_z_t,
-                        auto_reset=False,
                         active_mask=alive_before,
                     )
                     next_critic_obs = env.get_critic_observation()
-                    applied_action = info.get("applied_action")
-                    command_rate = info.get("command_rate")
+                    applied_action = info["applied_action"]
+                    command_rate = info["command_rate"]
                     if not torch.is_tensor(applied_action) or not torch.is_tensor(
                         command_rate
                     ):
@@ -837,7 +818,6 @@ class FCAMP(FlowCPSBase):
                             "FCAMP target-rate decoder did not report its applied "
                             "action and carried command rate"
                         )
-                    actions_buf[chunk_idx, :, frame_idx] = applied_action
                     action_abs_max = max(
                         action_abs_max,
                         float(applied_action.abs().max().item()),
@@ -871,11 +851,9 @@ class FCAMP(FlowCPSBase):
                     # Reset installs a complete phase-matched demo predecessor
                     # history.  This first post-action frame immediately forms
                     # the same fixed-W endpoint window used everywhere else.
-                    imitation_frame = info.get("imitation_frame")
-                    if imitation_frame is None:
-                        imitation_frame = env.get_imitation_policy_frame()
+                    imitation_frame = info["imitation_frame"]
                     alive_ids = alive_before.nonzero(as_tuple=False).squeeze(-1)
-                    intervention_edges = info.get("intervention_edge_mask")
+                    intervention_edges = info["intervention_edge_mask"]
                     if not torch.is_tensor(intervention_edges):
                         raise RuntimeError(
                             "FCAMP environment did not report intervention_edge_mask"
@@ -1009,12 +987,7 @@ class FCAMP(FlowCPSBase):
                     valid_buf[chunk_idx, :, frame_idx] = alive_before
 
                     timeouts = info["done_terms"]["time_out"].bool()
-                    motion_complete = info["done_terms"].get("motion_complete")
-                    motion_complete = (
-                        motion_complete.bool()
-                        if torch.is_tensor(motion_complete)
-                        else torch.zeros_like(timeouts)
-                    )
+                    motion_complete = info["done_terms"]["motion_complete"].bool()
                     failures = (
                         info["done_terms"]["anchor_pos_bad"].bool()
                         | info["done_terms"]["anchor_ori_bad"].bool()
@@ -1043,8 +1016,8 @@ class FCAMP(FlowCPSBase):
                         new_timeout,
                         new_motion_complete,
                     )
-                    termination_phases = info.get("termination_phase_steps")
-                    if torch.is_tensor(termination_phases) and bool(new_done.any()):
+                    termination_phases = info["termination_phase_steps"]
+                    if bool(new_done.any()):
                         terminal_phase_buf[chunk_idx, new_done, frame_idx] = (
                             termination_phases[new_done].to(dtype=torch.float32)
                         )
@@ -1100,7 +1073,6 @@ class FCAMP(FlowCPSBase):
                         new_done,
                         step_counts=active_float,
                     )
-                    rollout_info_items.append((info, alive_before.detach()))
                     alive = alive_before & ~done.bool()
                     obs = next_obs
                     critic_obs = next_critic_obs
@@ -1134,18 +1106,6 @@ class FCAMP(FlowCPSBase):
             values = self._evaluate_prefix_values(context_buf)
             next_values = self._evaluate_prefix_values(next_context_buf)
 
-            # [chunk,env,frame] -> chronological [time,env].
-            def chronological(value: torch.Tensor) -> torch.Tensor:
-                dims = list(range(value.ndim))
-                order = [0, 2, 1] + dims[3:]
-                return value.permute(*order).reshape(chunks * h, n_envs, *value.shape[3:])
-
-            def chunk_layout(value: torch.Tensor) -> torch.Tensor:
-                tail = value.shape[2:]
-                return value.reshape(chunks, h, n_envs, *tail).permute(
-                    0, 2, 1, *range(3, 3 + len(tail))
-                )
-
         if not geometry_checked:
             self.disc_window_replay.abort_update()
             current_window_buffer.abort_update()
@@ -1160,8 +1120,8 @@ class FCAMP(FlowCPSBase):
             raise RuntimeError(
                 "FCAMP actor emitted an action outside its configured policy command domain"
             )
-        replay_commit_report = self.disc_window_replay.commit_update()
-        current_commit_report = current_window_buffer.commit_update()
+        self.disc_window_replay.commit_update()
+        current_window_buffer.commit_update()
         current_disc_windows: list[torch.Tensor] = []
         current_disc_end_times: list[torch.Tensor] = []
         current_disc_stream_ids: list[torch.Tensor] = []
@@ -1186,7 +1146,6 @@ class FCAMP(FlowCPSBase):
         rollout = {
             "actor_obs": actor_obs_buf,
             "actor_obs_raw": actor_obs_raw_buf,
-            "actions": actions_buf,
             "raw_z": raw_z_buf,
             "old_mean_z": old_mean_z_buf,
             "old_cps_cholesky": old_cps_cholesky,
@@ -1225,7 +1184,6 @@ class FCAMP(FlowCPSBase):
             "amp_logits": amp_logit_buf,
             "disc_version_used": rollout_disc_version,
             "disc_normalizer_count_used": rollout_disc_normalizer_count,
-            "rollout_info_items": rollout_info_items,
             "stream_ids": self.training_streams.stream_ids,
             "collection_start_phases": collection_start_phases,
             "action_abs_max": action_abs_max,
@@ -1241,8 +1199,6 @@ class FCAMP(FlowCPSBase):
                 fk_alignment_abs_sum / max(fk_alignment_count, 1)
             ),
             "dirty_window_excluded_count": float(dirty_window_excluded_count),
-            "replay_commit_report": replay_commit_report,
-            "current_commit_report": current_commit_report,
             "window_latest_root_xy_abs_max": float(
                 window_latest_root_xy_abs_max.item()
             ),
@@ -1273,11 +1229,6 @@ class FCAMP(FlowCPSBase):
                 0, 2, 1, *range(3, 3 + len(tail))
             )
 
-        if str(self.cfg.credit.advantage_normalization) != "global":
-            raise ValueError(
-                "FCAMP requires one global normalization of the weighted "
-                "actor advantage"
-            )
         task_weight = float(self.cfg.credit.task_weight)
         amp_weight = float(self.cfg.credit.amp_weight)
         rewards_time = torch.stack(
@@ -1292,23 +1243,21 @@ class FCAMP(FlowCPSBase):
         bootstrap_time = chronological(rollout["bootstrap_mask"])
         trace_time = chronological(rollout["trace_mask"])
         valid_time = chronological(rollout["valid"])
-        amp_valid_time = chronological(rollout.get("amp_valid", rollout["valid"]))
+        amp_valid_time = chronological(rollout["amp_valid"])
         channel_valid_time = torch.stack(
             (valid_time, amp_valid_time), dim=-1
         )
         channel_bootstrap_time = torch.stack(
             (
                 bootstrap_time,
-                chronological(
-                    rollout.get("amp_bootstrap_mask", rollout["bootstrap_mask"])
-                ),
+                chronological(rollout["amp_bootstrap_mask"]),
             ),
             dim=-1,
         )
         channel_trace_time = torch.stack(
             (
                 trace_time,
-                chronological(rollout.get("amp_trace_mask", rollout["trace_mask"])),
+                chronological(rollout["amp_trace_mask"]),
             ),
             dim=-1,
         )
@@ -1330,15 +1279,6 @@ class FCAMP(FlowCPSBase):
             channel_bootstrap_mask=channel_bootstrap_time,
             channel_trace_mask=channel_trace_time,
         )
-        if self.cfg.credit.mode == "chunk_shared":
-            credit = with_chunk_shared_actor_credit(
-                credit,
-                valid_time,
-                chunk_horizon=h,
-                normalization="none",
-                actor_weights=(task_weight, amp_weight),
-            )
-
         # Match the exact actor objective q_s * mean_s(loss): every valid sample
         # in stream s carries q_s / N_s normalization mass.  This is one global
         # scalar transform, not one transform per channel or per stream.
@@ -1371,9 +1311,6 @@ class FCAMP(FlowCPSBase):
         )
         rollout["mixed_advantage"] = chunk_layout(credit.mixed_advantage)
         rollout["value_targets"] = chunk_layout(credit.value_targets)
-        rollout["td_errors"] = chunk_layout(credit.td_errors)
-        if credit.channel_valid_mask is None:
-            raise RuntimeError("FCAMP dual credit did not return channel validity")
         rollout["channel_valid"] = chunk_layout(credit.channel_valid_mask)
 
     # ------------------------------------------------------------------ #
@@ -1383,30 +1320,23 @@ class FCAMP(FlowCPSBase):
         self,
         labels: torch.Tensor,
     ) -> list[tuple[str, int, float, torch.Tensor]]:
-        configured_phase0 = float(
-            getattr(
-                getattr(self.cfg, "streams", None),
-                "phase0_fraction",
-                1.0,
-            )
-        )
-        configured = (
-            ("phase0", PHASE0_STREAM, configured_phase0),
-            ("curriculum", CURRICULUM_STREAM, 1.0 - configured_phase0),
-        )
-        active: list[tuple[str, int, float, torch.Tensor]] = []
-        for name, stream_id, weight in configured:
-            indices = (labels == stream_id).nonzero(
-                as_tuple=False
-            ).squeeze(-1)
-            if indices.numel() > 0 and weight > 0.0:
-                active.append((name, stream_id, weight, indices))
-        weight_sum = sum(item[2] for item in active)
-        if not active or weight_sum <= 0.0:
-            raise RuntimeError("FCAMP has no active training stream")
+        phase0 = (labels == PHASE0_STREAM).nonzero(
+            as_tuple=False
+        ).squeeze(-1)
+        curriculum = (labels == CURRICULUM_STREAM).nonzero(
+            as_tuple=False
+        ).squeeze(-1)
+        if phase0.numel() == 0 or curriculum.numel() == 0:
+            raise RuntimeError("FCAMP requires both training streams")
+        phase0_weight = float(self.cfg.streams.phase0_fraction)
         return [
-            (name, stream_id, weight / weight_sum, indices)
-            for name, stream_id, weight, indices in active
+            ("phase0", PHASE0_STREAM, phase0_weight, phase0),
+            (
+                "curriculum",
+                CURRICULUM_STREAM,
+                1.0 - phase0_weight,
+                curriculum,
+            ),
         ]
 
     def _set_actor_learning_rate(self, learning_rate: float) -> None:
@@ -1491,11 +1421,8 @@ class FCAMP(FlowCPSBase):
             )
             finite = bool(torch.isfinite(last_frame_kl).all())
             within_limit = (
-                limit <= 0.0
-                or (
-                    finite
-                    and float(last_frame_kl.max().item()) <= limit
-                )
+                finite
+                and float(last_frame_kl.max().item()) <= limit
             )
             if within_limit:
                 return True, last_frame_kl, rejected_attempts
@@ -1519,7 +1446,7 @@ class FCAMP(FlowCPSBase):
 
     def _actor_update(self, rollout: dict) -> dict[str, float]:
         device = self.env.device
-        chunks, n_envs = rollout["actions"].shape[:2]
+        chunks, n_envs = rollout["raw_z"].shape[:2]
         batch_size = chunks * n_envs
         h = self.horizon_h
         actor_obs = rollout["actor_obs"].reshape(batch_size, self.actor_obs_dim)
@@ -1532,14 +1459,7 @@ class FCAMP(FlowCPSBase):
         old_log_probs = rollout["old_log_probs"].reshape(batch_size, h)
         advantages = rollout["advantages"].reshape(batch_size, h)
         valid = rollout["valid"].reshape(batch_size, h)
-        env_stream_ids = rollout.get("stream_ids")
-        if env_stream_ids is None:
-            env_stream_ids = torch.full(
-                (n_envs,),
-                PHASE0_STREAM,
-                dtype=torch.int8,
-                device=device,
-            )
+        env_stream_ids = rollout["stream_ids"]
         stream_labels = env_stream_ids.reshape(1, n_envs).expand(
             chunks, n_envs
         ).reshape(-1)
@@ -1550,11 +1470,6 @@ class FCAMP(FlowCPSBase):
         )
         clip_low = 1.0 - float(self.cfg.clip_range)
         clip_high = 1.0 + float(self.cfg.clip_range)
-        if self.cfg.credit.ratio_mode != "conditional_frame":
-            raise ValueError(
-                "FCAMP only supports credit.ratio_mode=conditional_frame"
-            )
-
         totals = {
             "policy_loss": 0.0,
             "exact_kl": 0.0,
@@ -1900,14 +1815,7 @@ class FCAMP(FlowCPSBase):
         if not torch.equal(channel_valid[:, 0], valid.bool()):
             raise RuntimeError("FCAMP task critic validity diverged from rollout validity")
         amp_valid = channel_valid[:, 1]
-        env_stream_ids = rollout.get("stream_ids")
-        if env_stream_ids is None:
-            env_stream_ids = torch.full(
-                (n_envs,),
-                PHASE0_STREAM,
-                dtype=torch.int8,
-                device=valid.device,
-            )
+        env_stream_ids = rollout["stream_ids"]
         stream_labels = env_stream_ids.reshape(1, n_envs, 1).expand(
             chunks,
             n_envs,
@@ -2091,26 +1999,22 @@ class FCAMP(FlowCPSBase):
         end_times_cpu: torch.Tensor,
         batch_size: int,
         *,
-        stream_ids_cpu: torch.Tensor | None = None,
-        stream_id: int | None = None,
+        stream_ids_cpu: torch.Tensor,
+        stream_id: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if windows_cpu.ndim != 2 or windows_cpu.shape[1] != self.imitation_window_dim:
             raise ValueError("current discriminator windows are malformed")
         if windows_cpu.shape[0] != end_times_cpu.shape[0]:
             raise RuntimeError("current discriminator windows/end-times are misaligned")
+        if stream_ids_cpu.shape != end_times_cpu.shape:
+            raise RuntimeError(
+                "current discriminator stream labels are misaligned"
+            )
         candidates = torch.arange(windows_cpu.shape[0], device="cpu")
-        if stream_id is not None:
-            if (
-                stream_ids_cpu is None
-                or stream_ids_cpu.shape != end_times_cpu.shape
-            ):
-                raise RuntimeError(
-                    "current discriminator stream labels are misaligned"
-                )
-            candidates = candidates[
-                stream_ids_cpu.to(device="cpu", dtype=torch.int8)
-                == int(stream_id)
-            ]
+        candidates = candidates[
+            stream_ids_cpu.to(device="cpu", dtype=torch.int8)
+            == int(stream_id)
+        ]
         if candidates.numel() == 0:
             raise RuntimeError("cannot sample empty current discriminator windows")
         draw = torch.randint(
@@ -2204,7 +2108,7 @@ class FCAMP(FlowCPSBase):
         if current_windows_cpu.shape[0] == 0 or sample_count <= 0:
             return 0
         self.disc_normalizer.clear_pending()
-        batch_size = max(1, int(self.cfg.amp.batch_size))
+        batch_size = max(1, int(self.cfg.style_prior.batch_size))
         recorded = 0
         while recorded < int(sample_count):
             count = min(batch_size, int(sample_count) - recorded)
@@ -2248,70 +2152,22 @@ class FCAMP(FlowCPSBase):
             (current_stream_ids_cpu == CURRICULUM_STREAM).sum().item()
         )
         if current_count == 0:
-            self.disc_normalizer.freeze()
-            return {
-                "disc/update_steps": 0.0,
-                "disc/version": float(self.disc_version),
-                "disc/input_version": float(input_version),
-                "disc/skipped_no_current": 1.0,
-                "disc/current_count": 0.0,
-                "disc_norm/committed_this_update": 0.0,
-                "disc_norm/policy_samples_update": 0.0,
-                "disc_norm/expert_samples_update": 0.0,
-                "disc/stream_quota_available": 0.0,
-            }
-        batch_size = int(self.cfg.amp.batch_size)
+            raise RuntimeError("FCAMP current discriminator window set is empty")
+        batch_size = int(self.cfg.style_prior.batch_size)
         if current_phase0_count == 0 or current_curriculum_count == 0:
-            self.disc_normalizer.freeze()
-            return {
-                "disc/update_steps": 0.0,
-                "disc/version": float(self.disc_version),
-                "disc/input_version": float(input_version),
-                "disc/skipped_missing_stream_quota": 1.0,
-                "disc/stream_quota_available": 0.0,
-                "disc/current_count": float(current_count),
-                "disc/current_phase0_count": float(current_phase0_count),
-                "disc/current_curriculum_count": float(
-                    current_curriculum_count
-                ),
-                "disc_norm/committed_this_update": 0.0,
-                "disc_norm/policy_samples_update": 0.0,
-                "disc_norm/expert_samples_update": 0.0,
-            }
-        try:
-            first_replay_window_frames, first_replay_ends = (
-                self._sample_balanced_replay_windows(batch_size)
+            raise RuntimeError(
+                "FCAMP current discriminator windows require both streams"
             )
-        except RuntimeError:
-            self.disc_normalizer.freeze()
-            metrics = {
-                "disc/update_steps": 0.0,
-                "disc/version": float(self.disc_version),
-                "disc/input_version": float(input_version),
-                "disc/skipped_missing_stream_quota": 1.0,
-                "disc/stream_quota_available": 0.0,
-                "disc/current_count": float(current_count),
-                "disc/current_phase0_count": float(current_phase0_count),
-                "disc/current_curriculum_count": float(
-                    current_curriculum_count
-                ),
-                "disc_norm/committed_this_update": 0.0,
-                "disc_norm/policy_samples_update": 0.0,
-                "disc_norm/expert_samples_update": 0.0,
-            }
-            metrics.update(
-                {
-                    key.replace("replay/", "disc_replay/"): value
-                    for key, value in self.disc_window_replay.statistics(
-                        current_update=update_idx
-                    ).items()
-                }
-            )
-            return metrics
-        possible_steps = math.ceil(current_count / batch_size) * int(
-            self.cfg.amp.epochs
+        first_replay_window_frames, first_replay_ends = (
+            self._sample_balanced_replay_windows(batch_size)
         )
-        update_steps = min(possible_steps, int(self.cfg.amp.max_updates_per_iteration))
+        possible_steps = math.ceil(current_count / batch_size) * int(
+            self.cfg.style_prior.epochs
+        )
+        update_steps = min(
+            possible_steps,
+            int(self.cfg.style_prior.max_updates_per_iteration),
+        )
         # Record pending statistics now, but train D on the same committed
         # normalization snapshot that produced this rollout's rewards/history.
         # Commit only after D_old has been consumed, matching method/amp.py.
@@ -2384,8 +2240,12 @@ class FCAMP(FlowCPSBase):
                 expert_observations=expert,
                 policy_observations=current,
                 replay_observations=replay,
-                gradient_penalty_weight=float(self.cfg.amp.grad_penalty),
-                logit_regularization_weight=float(self.cfg.amp.logit_reg),
+                gradient_penalty_weight=float(
+                    self.cfg.style_prior.grad_penalty
+                ),
+                logit_regularization_weight=float(
+                    self.cfg.style_prior.logit_reg
+                ),
             )
             self.disc_optimizer.zero_grad(set_to_none=True)
             output.loss.backward()
@@ -2410,7 +2270,7 @@ class FCAMP(FlowCPSBase):
         metrics.update(
             {
                 "disc/grad_norm": grad_total / denom,
-                "disc/lr": float(self.cfg.amp.learning_rate),
+                "disc/lr": float(self.cfg.style_prior.learning_rate),
                 "disc/update_steps": float(update_steps),
                 "disc/version": float(self.disc_version),
                 "disc/input_version": float(input_version),
@@ -2495,34 +2355,33 @@ class FCAMP(FlowCPSBase):
 
         # Commit actor/prefix normalizers only after both optimizers have used
         # the rollout snapshot. Stream the exact moment update at 8192 envs.
-        if self.empirical_normalization:
-            with torch.no_grad():
-                chunks, n_envs, horizon = rollout["valid"].shape
-                chunk_streams = rollout["stream_ids"].reshape(
-                    1, n_envs
-                ).expand(chunks, n_envs)
-                frame_streams = chunk_streams.unsqueeze(-1).expand(
-                    chunks,
-                    n_envs,
-                    horizon,
-                )
-                self._update_empirical_normalizer_chunked(
-                    self.actor_obs_normalizer,
-                    rollout["actor_obs_raw"],
-                    stream_labels=chunk_streams,
-                )
-                self._update_empirical_normalizer_chunked(
-                    self.prefix_context_normalizer,
-                    rollout["contexts_raw"],
-                    rollout["valid"],
-                    stream_labels=frame_streams,
-                )
-                self._update_empirical_normalizer_chunked(
-                    self.prefix_context_normalizer,
-                    rollout["next_contexts_raw"],
-                    rollout["valid"],
-                    stream_labels=frame_streams,
-                )
+        with torch.no_grad():
+            chunks, n_envs, horizon = rollout["valid"].shape
+            chunk_streams = rollout["stream_ids"].reshape(
+                1, n_envs
+            ).expand(chunks, n_envs)
+            frame_streams = chunk_streams.unsqueeze(-1).expand(
+                chunks,
+                n_envs,
+                horizon,
+            )
+            self._update_empirical_normalizer_chunked(
+                self.actor_obs_normalizer,
+                rollout["actor_obs_raw"],
+                stream_labels=chunk_streams,
+            )
+            self._update_empirical_normalizer_chunked(
+                self.prefix_context_normalizer,
+                rollout["contexts_raw"],
+                rollout["valid"],
+                stream_labels=frame_streams,
+            )
+            self._update_empirical_normalizer_chunked(
+                self.prefix_context_normalizer,
+                rollout["next_contexts_raw"],
+                rollout["valid"],
+                stream_labels=frame_streams,
+            )
 
         disc_start = time.perf_counter()
         disc_metrics = self._discriminator_update(update_idx, rollout=rollout)
@@ -2539,151 +2398,10 @@ class FCAMP(FlowCPSBase):
             disc_time,
         )
 
-    @torch.no_grad()
-    def _stream_rollout_metrics(self, rollout: dict) -> dict[str, float]:
-        stream_ids = rollout["stream_ids"]
-        valid = rollout["valid"]
-        amp_valid = rollout["amp_valid"]
-        channel_valid = rollout["channel_valid"]
-        done = rollout["done"]
-        failure = rollout["failure"]
-        timeout = rollout["timeout"]
-        complete = rollout["motion_complete"]
-        total_valid = max(int(valid.sum().item()), 1)
-        total_amp_valid = max(int(amp_valid.sum().item()), 1)
-        metrics: dict[str, float] = {}
-        configured_weights = {
-            "phase0": float(self.cfg.streams.phase0_fraction),
-            "curriculum": 1.0
-            - float(self.cfg.streams.phase0_fraction),
-        }
-        for name, stream_id in (
-            ("phase0", PHASE0_STREAM),
-            ("curriculum", CURRICULUM_STREAM),
-        ):
-            env_mask = stream_ids == stream_id
-            env_count = int(env_mask.sum().item())
-            transition_mask = env_mask.reshape(1, -1, 1).expand_as(valid)
-            stream_valid = valid & transition_mask
-            stream_amp_valid = amp_valid & transition_mask
-            stream_done = done & transition_mask
-            stream_failure = failure & transition_mask
-            stream_timeout = timeout & transition_mask
-            stream_complete = complete & transition_mask
-            valid_count = int(stream_valid.sum().item())
-            amp_count = int(stream_amp_valid.sum().item())
-            terminal_count = int(stream_done.sum().item())
-            failure_count = int(stream_failure.sum().item())
-            timeout_count = int(stream_timeout.sum().item())
-            complete_count = int(stream_complete.sum().item())
-            possible = max(
-                env_count * valid.shape[0] * valid.shape[2],
-                1,
-            )
-            prefix = f"stream/{name}"
-            metrics.update(
-                {
-                    f"{prefix}/env_count": float(env_count),
-                    f"{prefix}/env_fraction": float(
-                        env_count / max(stream_ids.numel(), 1)
-                    ),
-                    f"{prefix}/configured_objective_weight": (
-                        configured_weights[name]
-                    ),
-                    f"{prefix}/valid_transition_count": float(
-                        valid_count
-                    ),
-                    f"{prefix}/valid_transition_fraction": float(
-                        valid_count / possible
-                    ),
-                    f"{prefix}/valid_transition_share": float(
-                        valid_count / total_valid
-                    ),
-                    f"{prefix}/amp_valid_window_count": float(amp_count),
-                    f"{prefix}/amp_valid_window_share": float(
-                        amp_count / total_amp_valid
-                    ),
-                    f"{prefix}/terminal_count": float(terminal_count),
-                    f"{prefix}/failure_count": float(failure_count),
-                    f"{prefix}/timeout_count": float(timeout_count),
-                    f"{prefix}/motion_complete_count": float(
-                        complete_count
-                    ),
-                    f"{prefix}/failure_rate": float(
-                        failure_count / max(terminal_count, 1)
-                    ),
-                    f"{prefix}/completion_rate": float(
-                        complete_count / max(terminal_count, 1)
-                    ),
-                    f"{prefix}/sampler_failure_eligible": float(
-                        stream_id == CURRICULUM_STREAM
-                    ),
-                }
-            )
-            start_phases = rollout["collection_start_phases"][env_mask]
-            if start_phases.numel() > 0:
-                metrics.update(
-                    {
-                        f"{prefix}/collection_start_mean": float(
-                            start_phases.float().mean().item()
-                        ),
-                        f"{prefix}/collection_start_min": float(
-                            start_phases.min().item()
-                        ),
-                        f"{prefix}/collection_start_max": float(
-                            start_phases.max().item()
-                        ),
-                    }
-                )
-            failure_phases = rollout["terminal_phase"][
-                stream_failure
-            ].float()
-            if failure_phases.numel() > 0:
-                quantiles = torch.quantile(
-                    failure_phases,
-                    torch.tensor(
-                        [0.5, 0.95],
-                        device=failure_phases.device,
-                    ),
-                )
-                metrics.update(
-                    {
-                        f"{prefix}/failure_phase_mean": float(
-                            failure_phases.mean().item()
-                        ),
-                        f"{prefix}/failure_phase_p50": float(
-                            quantiles[0].item()
-                        ),
-                        f"{prefix}/failure_phase_p95": float(
-                            quantiles[1].item()
-                        ),
-                    }
-                )
-            else:
-                for suffix in (
-                    "failure_phase_mean",
-                    "failure_phase_p50",
-                    "failure_phase_p95",
-                ):
-                    metrics[f"{prefix}/{suffix}"] = -1.0
-            if amp_count > 0:
-                metrics[f"{prefix}/amp_logit_mean"] = float(
-                    rollout["amp_logits"][stream_amp_valid].mean().item()
-                )
-                metrics[f"{prefix}/amp_reward_mean"] = float(
-                    rollout["amp_reward_raw"][
-                        stream_amp_valid
-                    ].mean().item()
-                )
-            else:
-                metrics[f"{prefix}/amp_logit_mean"] = -1.0
-                metrics[f"{prefix}/amp_reward_mean"] = -1.0
-        return metrics
-
     def update(self, rollout: dict, collect_time: float) -> dict:
         update_start = time.perf_counter()
         # Global primitive steps are used as the replay age clock.
-        update_idx = int(getattr(self, "_fcamp_update_idx", 1))
+        update_idx = int(self._fcamp_update_idx)
         (
             actor_metrics,
             critic_metrics,
@@ -2693,390 +2411,23 @@ class FCAMP(FlowCPSBase):
             critic_time,
             disc_time,
         ) = self._optimize_rollout_snapshot(rollout, update_idx)
-
-        valid = rollout["valid"]
-        amp_valid = rollout["amp_valid"]
-        channel_valid = rollout["channel_valid"]
-        metrics: dict[str, float] = {}
-        metrics.update(actor_metrics)
-        metrics.update(self._final_cps_statistics())
-        metrics.update(critic_metrics)
-        metrics.update(disc_metrics)
-        metrics.update(reward_metrics)
-        metrics.update(self._stream_rollout_metrics(rollout))
-        metrics.update(self.phase0_attempts.metrics())
-        metrics.update(_masked_stats("reward/task", rollout["task_reward"], valid))
-        metrics.update(_masked_stats("reward/amp_raw", rollout["amp_reward_raw"], amp_valid))
-        metrics.update(_masked_stats("reward/amp_credit", rollout["amp_reward_credit"], amp_valid))
-        metrics.update(_masked_stats("reward/mixed", rollout["mixed_reward"], valid))
-        metrics.update(_masked_stats("credit/task_adv", rollout["channel_advantages"][..., 0], valid))
-        metrics.update(
-            _masked_stats(
-                "credit/amp_adv",
-                rollout["channel_advantages"][..., 1],
-                channel_valid[..., 1],
-            )
+        return collect_update_metrics(
+            self,
+            rollout,
+            actor_metrics=actor_metrics,
+            critic_metrics=critic_metrics,
+            disc_metrics=disc_metrics,
+            reward_metrics=reward_metrics,
+            collect_time=collect_time,
+            actor_time=actor_time,
+            critic_time=critic_time,
+            disc_time=disc_time,
+            update_idx=update_idx,
+            update_start=update_start,
         )
-        weighted_channel_advantage = (
-            float(self.cfg.credit.task_weight)
-            * rollout["channel_advantages"][..., 0]
-            + float(self.cfg.credit.amp_weight)
-            * rollout["channel_advantages"][..., 1]
-        )
-        mixed_identity_error = (
-            weighted_channel_advantage - rollout["mixed_advantage"]
-        ).abs()
-        metrics["credit/mixed_identity_abs_max"] = float(
-            mixed_identity_error[valid].max().item()
-            if bool(valid.any())
-            else 0.0
-        )
-        metrics.update(
-            _masked_stats(
-                "credit/mixed_adv",
-                rollout["mixed_advantage"],
-                valid,
-            )
-        )
-        metrics.update(
-            _masked_stats(
-                "credit/task_actor_component",
-                rollout["actor_advantage_components"][..., 0],
-                valid,
-            )
-        )
-        metrics.update(
-            _masked_stats(
-                "credit/amp_actor_component",
-                rollout["actor_advantage_components"][..., 1],
-                channel_valid[..., 1],
-            )
-        )
-        metrics.update(_masked_stats("credit/actor_adv", rollout["advantages"], valid))
-        metrics.update(_masked_stats("critic/task_value", rollout["values"][..., 0], valid))
-        metrics.update(
-            _masked_stats(
-                "critic/amp_value",
-                rollout["values"][..., 1],
-                channel_valid[..., 1],
-            )
-        )
-        metrics.update(_masked_stats("critic/task_target", rollout["value_targets"][..., 0], valid))
-        metrics.update(
-            _masked_stats(
-                "critic/amp_target",
-                rollout["value_targets"][..., 1],
-                channel_valid[..., 1],
-            )
-        )
-        metrics.update(
-            style_reward_statistics(
-                rollout["amp_logits"][amp_valid],
-                rollout["amp_reward_raw"][amp_valid],
-                scale=float(self.cfg.amp.reward_scale),
-                minimum_one_minus_prob=float(self.cfg.amp.reward_epsilon),
-                prefix="amp_reward",
-            )
-        )
-        for frame_idx in range(self.horizon_h):
-            frame_valid = valid[..., frame_idx]
-            frame_amp_valid = channel_valid[..., frame_idx, 1]
-            metrics.update(
-                _masked_stats(
-                    f"credit/frame_{frame_idx}_task_adv",
-                    rollout["channel_advantages"][..., frame_idx, 0],
-                    frame_valid,
-                )
-            )
-            metrics.update(
-                _masked_stats(
-                    f"credit/frame_{frame_idx}_amp_adv",
-                    rollout["channel_advantages"][..., frame_idx, 1],
-                    frame_amp_valid,
-                )
-            )
-            metrics.update(
-                _masked_stats(
-                    f"credit/frame_{frame_idx}_task_actor_component",
-                    rollout["actor_advantage_components"][..., frame_idx, 0],
-                    frame_valid,
-                )
-            )
-            metrics.update(
-                _masked_stats(
-                    f"credit/frame_{frame_idx}_amp_actor_component",
-                    rollout["actor_advantage_components"][..., frame_idx, 1],
-                    frame_amp_valid,
-                )
-            )
-        metrics.update(self.disc_normalizer.statistics())
-        metrics.update(self.imitation_history.statistics())
-        metrics.update(
-            {
-                "rollout/valid_fraction": float(valid.float().mean().item()),
-                "rollout/done_fraction": float(rollout["done"].float().mean().item()),
-                "rollout/failure_fraction": float(rollout["failure"].float().mean().item()),
-                "rollout/timeout_fraction": float(rollout["timeout"].float().mean().item()),
-                "rollout/motion_complete_fraction": float(
-                    rollout["motion_complete"].float().mean().item()
-                ),
-                "rollout/bootstrap_fraction": float(
-                    rollout["bootstrap_mask"].float().mean().item()
-                ),
-                "rollout/trace_fraction": float(rollout["trace_mask"].float().mean().item()),
-                "phase/start_mean": float(
-                    rollout["collection_start_phases"].float().mean().item()
-                ),
-                "phase/start_min": float(rollout["collection_start_phases"].min().item()),
-                "phase/start_max": float(rollout["collection_start_phases"].max().item()),
-                "act/abs_max": float(rollout["action_abs_max"]),
-                "act/policy_bound_violation_max": float(
-                    rollout["action_bound_violation_max"]
-                ),
-                "control/raw_z_abs_max": float(
-                    rollout["raw_z_abs_max"]
-                ),
-                "control/raw_z_tanh_saturation_fraction": float(
-                    rollout["raw_z_tanh_saturation_fraction"]
-                ),
-                "control/command_rate_abs_max": float(
-                    rollout["command_rate_abs_max"]
-                ),
-                "control/command_rate_support_max": float(
-                    rollout["command_rate_support_max"]
-                ),
-                "disc_contract/fk_alignment_abs_max": float(
-                    rollout["fk_alignment_abs_max"]
-                ),
-                "disc_contract/fk_alignment_abs_mean": float(
-                    rollout["fk_alignment_abs_mean"]
-                ),
-                "disc_contract/dirty_window_excluded_count": float(
-                    rollout["dirty_window_excluded_count"]
-                ),
-                "disc_contract/replay_dirty_insert_count": float(
-                    metrics.get("disc_replay/dirty_insert_count", -1.0)
-                ),
-                "intervention/edge_count": float(
-                    rollout["intervention_edge"].sum().item()
-                ),
-                "intervention/amp_bootstrap_cut_count": float(
-                    (
-                        rollout["bootstrap_mask"]
-                        & ~rollout["amp_bootstrap_mask"]
-                    ).sum().item()
-                ),
-                "intervention/amp_trace_cut_count": float(
-                    (
-                        rollout["trace_mask"] & ~rollout["amp_trace_mask"]
-                    ).sum().item()
-                ),
-                "disc_window/policy_latest_root_xy_abs_max": float(
-                    rollout["window_latest_root_xy_abs_max"]
-                ),
-                "disc_window/policy_root_xy_abs_mean": float(
-                    rollout["window_root_xy_abs_mean"]
-                ),
-                "train/mean_reward": float(
-                    sum(self._train_reward_buffer) / len(self._train_reward_buffer)
-                    if self._train_reward_buffer
-                    else float("nan")
-                ),
-                "train/mean_episode_length": float(
-                    sum(self._train_length_buffer) / len(self._train_length_buffer)
-                    if self._train_length_buffer
-                    else float("nan")
-                ),
-                "timing/collect_s": float(collect_time),
-                "timing/actor_update_s": float(actor_time),
-                "timing/critic_update_s": float(critic_time),
-                "timing/disc_update_s": float(disc_time),
-                "timing/update_s": float(time.perf_counter() - update_start),
-                "system/primitive_steps": float(
-                    self.warmup_env_transitions
-                    + update_idx
-                    * int(self.cfg.rollout_env_steps)
-                    * self.env.num_envs
-                ),
-                "system/cuda_peak_allocated_gib": float(
-                    torch.cuda.max_memory_allocated(self.env.device) / (1024**3)
-                    if torch.cuda.is_available()
-                    else 0.0
-                ),
-            }
-        )
-        self._add_sampler_metrics(metrics)
-        finite_parameters = all(
-            bool(torch.isfinite(parameter).all())
-            for module in (self._policy, self.critic, self.discriminator)
-            for parameter in module.parameters()
-        )
-        metrics["system/parameters_finite"] = float(finite_parameters)
-        if not finite_parameters:
-            raise FloatingPointError("FCAMP detected non-finite trainable parameters")
-        return metrics
 
     def log(self, update_idx: int, max_updates: int, metrics: dict) -> None:
-        print(
-            f"[UPDATE] {update_idx}/{max_updates} "
-            f"task={metrics.get('reward/task/mean', float('nan')):.5f} "
-            f"amp={metrics.get('reward/amp_raw/mean', float('nan')):.5f} "
-            f"mixed={metrics.get('reward/mixed/mean', float('nan')):.5f} "
-            f"done={metrics.get('rollout/done_fraction', float('nan')):.5f} "
-            f"ep_len={metrics.get('train/mean_episode_length', float('nan')):.2f}",
-            flush=True,
-        )
-        print(
-            f"[FCAMP] policy={metrics.get('fcamp/policy_loss', float('nan')):.5f} "
-            f"kl={metrics.get('fcamp/kl', float('nan')):.6f} "
-            f"max_kl={metrics.get('fcamp/exact_frame_kl_max', float('nan')):.6f}/"
-            f"{metrics.get('fcamp/kl_acceptance_limit', float('nan')):.6f} "
-            f"ratio={metrics.get('fcamp/ratio', float('nan')):.4f} "
-            f"clip={metrics.get('fcamp/clip_fraction', float('nan')):.4f} "
-            f"grad={metrics.get('fcamp/actor_grad_norm', float('nan')):.4f} "
-            f"lr={metrics.get('fcamp/actor_lr', float('nan')):.6f} "
-            f"accept={metrics.get('fcamp/actor_optimizer_steps', 0.0):.0f} "
-            f"reject={metrics.get('fcamp/actor_rejected_attempts', 0.0):.0f} "
-            f"skip={metrics.get('fcamp/actor_skipped_steps', 0.0):.0f}",
-            flush=True,
-        )
-        print(
-            "[FCAMP_CONTROL] "
-            f"physical_rms={metrics.get('policy/cps_physical_rms_achieved', float('nan')):.5f}/"
-            f"{metrics.get('policy/cps_physical_rms_target', float('nan')):.5f} "
-            f"cps_scale={metrics.get('policy/cps_physical_scale', float('nan')):.6f} "
-            f"mean_scale={metrics.get('policy/flow_mean_raw_scale', float('nan')):.6f} "
-            f"shape={metrics.get('policy/cps_shape_norm', float('nan')):.4f}/"
-            f"{metrics.get('policy/cps_shape_radius', float('nan')):.4f} "
-            f"raw_z_max={metrics.get('control/raw_z_abs_max', float('nan')):.4f} "
-            f"tanh_sat={metrics.get('control/raw_z_tanh_saturation_fraction', float('nan')):.6f} "
-            f"rate_support={metrics.get('control/command_rate_support_max', float('nan')):.4f} "
-            f"bound_violation={metrics.get('act/policy_bound_violation_max', float('nan')):.2e}",
-            flush=True,
-        )
-        print(
-            f"[SAMPLER_PHASE] "
-            f"start_mean={metrics.get('phase/start_mean', float('nan')):.2f} "
-            f"start_min={metrics.get('phase/start_min', float('nan')):.0f} "
-            f"start_max={metrics.get('phase/start_max', float('nan')):.0f} "
-            f"top_bin={metrics.get('sampler/top_bin', float('nan')):.0f} "
-            f"top_prob={metrics.get('sampler/top_prob', float('nan')):.5f} "
-            f"entropy={metrics.get('sampler/entropy', float('nan')):.5f} "
-            f"failed_sum={metrics.get('sampler/failed_sum', float('nan')):.3f}",
-            flush=True,
-        )
-        print(
-            "[FCAMP_STREAM] "
-            f"phase0_env={metrics.get('stream/phase0/env_fraction', float('nan')):.3f} "
-            f"phase0_valid_share={metrics.get('stream/phase0/valid_transition_share', float('nan')):.3f} "
-            f"phase0_actor_w={metrics.get('stream/phase0/actor_objective_weight', float('nan')):.3f} "
-            f"phase0_critic_w={metrics.get('stream/phase0/critic_objective_weight', float('nan')):.3f} "
-            f"phase0_fail_p50={metrics.get('stream/phase0/failure_phase_p50', -1.0):.1f} "
-            f"curr_fail_p50={metrics.get('stream/curriculum/failure_phase_p50', -1.0):.1f} "
-            f"phase0_inflight_p50={metrics.get('stream/phase0_attempt/inflight_age_p50', -1.0):.1f} "
-            f"phase0_success_cum={metrics.get('stream/phase0_attempt/cumulative_success_rate', 0.0):.5f} "
-            f"disc_buffer_phase0={metrics.get('disc/current_phase0_fraction', float('nan')):.3f} "
-            f"disc_train_phase0={metrics.get('disc/training_phase0_fraction', float('nan')):.3f} "
-            f"phase0_complete={metrics.get('stream/phase0/completion_rate', 0.0):.5f} "
-            f"disc_quota={metrics.get('disc/stream_quota_available', 0.0):.0f}",
-            flush=True,
-        )
-        print(
-            f"[FCAMP_CREDIT] "
-            f"task_raw_std={metrics.get('credit/task_adv/std', float('nan')):.5f} "
-            f"amp_raw_std={metrics.get('credit/amp_adv/std', float('nan')):.5f} "
-            f"task_actor_std={metrics.get('credit/task_actor_component/std', float('nan')):.5f} "
-            f"amp_actor_std={metrics.get('credit/amp_actor_component/std', float('nan')):.5f} "
-            f"mixed_identity_err={metrics.get('credit/mixed_identity_abs_max', float('nan')):.3e}",
-            flush=True,
-        )
-        print(
-            f"[DUAL_CRITIC] task_loss={metrics.get('critic/task_flow_loss', float('nan')):.5f} "
-            f"amp_loss={metrics.get('critic/amp_flow_loss', float('nan')):.5f} "
-            f"task_V={metrics.get('critic/task_value/mean', float('nan')):.4f} "
-            f"amp_V={metrics.get('critic/amp_value/mean', float('nan')):.4f} "
-            f"grad={metrics.get('critic/grad_norm', float('nan')):.4f}",
-            flush=True,
-        )
-        print(
-            f"[DISC] loss={metrics.get('disc/loss', float('nan')):.5f} "
-            f"bce={metrics.get('disc/bce', float('nan')):.5f} "
-            f"gp={metrics.get('disc/gradient_penalty', float('nan')):.5f} "
-            f"accE={metrics.get('disc/expert_accuracy', float('nan')):.3f} "
-            f"accP={metrics.get('disc/current_accuracy', float('nan')):.3f} "
-            f"reward_clamp={metrics.get('amp_reward/clamp_fraction', float('nan')):.5f} "
-            f"replay={metrics.get('disc_replay/size', float('nan')):.0f}",
-            flush=True,
-        )
-        print(
-            "[FCAMP_CONTRACT] "
-            f"fk_max={metrics.get('disc_contract/fk_alignment_abs_max', float('nan')):.3e} "
-            f"policy_action_violation={metrics.get('act/policy_bound_violation_max', float('nan')):.3e} "
-            f"dirty_excluded={metrics.get('disc_contract/dirty_window_excluded_count', 0.0):.0f} "
-            f"replay_dirty={metrics.get('disc_contract/replay_dirty_insert_count', -1.0):.0f} "
-            f"push_edges={metrics.get('intervention/edge_count', 0.0):.0f} "
-            f"amp_trace_cuts={metrics.get('intervention/amp_trace_cut_count', 0.0):.0f} "
-            f"replay_phase0={metrics.get('disc_replay/stream_0_size', 0.0):.0f}/"
-            f"{metrics.get('disc_replay/stream_0_capacity', 0.0):.0f} "
-            f"replay_curr={metrics.get('disc_replay/stream_1_size', 0.0):.0f}/"
-            f"{metrics.get('disc_replay/stream_1_capacity', 0.0):.0f}",
-            flush=True,
-        )
-        print(
-            f"[TIME] collect={metrics['timing/collect_s']:.3f}s "
-            f"actor={metrics['timing/actor_update_s']:.3f}s "
-            f"critic={metrics['timing/critic_update_s']:.3f}s "
-            f"disc={metrics['timing/disc_update_s']:.3f}s "
-            f"gpu_peak={metrics['system/cuda_peak_allocated_gib']:.2f}GiB",
-            flush=True,
-        )
+        log_update(self, update_idx, max_updates, metrics)
 
     def log_banner(self) -> None:
-        print(
-            "[METHOD] name=fcamp actor=causal_flow_cps prior=temporal_discriminator "
-            "credit=causal_frame critic=shared_dual_flow",
-            flush=True,
-        )
-        print(
-            f"[ARCH] task={self.env.task.name} actor_obs={self.actor_obs_dim} "
-            f"env_actor_obs={self.base_actor_obs_dim} discriminator_in_actor=False "
-            f"prefix_context={self.prefix_context_dim} action_dim={self.num_act} "
-            f"H={self.horizon_h} W_D={self.imitation_history_steps} "
-            f"imitation_frame={self.imitation_frame_dim} imitation_window={self.imitation_window_dim}",
-            flush=True,
-        )
-        print(
-            f"[CREDIT] critic_sharing=encoder heads=task,amp "
-            f"credit={self.cfg.credit.mode} advantage_norm={self.cfg.credit.advantage_normalization} "
-            f"ratio_mode={self.cfg.credit.ratio_mode} "
-            f"task_weight={self.cfg.credit.task_weight} amp_weight={self.cfg.credit.amp_weight} "
-            f"amp_dt={self.cfg.credit.integrate_amp_reward_dt}",
-            flush=True,
-        )
-        print(
-            "[CONTROL] variable=raw_target_rate "
-            "decoder_owner=environment mean=initial_cps_standardized_flow "
-            "covariance=bounded_single_final_dense_cholesky "
-            "metric=finite_h_carried_rate_response "
-            f"dt={self.env.dt:.5f} rho={self.env.command_rate_decay:.8f} "
-            f"half_life={self.env.rate_half_life_seconds:.5f}s "
-            f"rate_limit=[{float(self.env.command_rate_limit.min().item()):.3f},"
-            f"{float(self.env.command_rate_limit.max().item()):.3f}]/s "
-            f"physical_rms={self.cps_physical_rms:.5f}",
-            flush=True,
-        )
-        print(
-            f"[STYLE_PRIOR] discriminator=standard_mlp hidden={list(self.cfg.amp.hidden_dims)} "
-            f"BCE=True GP={self.cfg.amp.grad_penalty} replay={self.cfg.amp.replay_size} "
-            f"EMA=False policy_conditioning=False motion_end_terminal=True "
-            f"replay_mode=complete_window_stratified "
-            f"fcamp_schema={FCAMP_CHECKPOINT_CONTRACT['fcamp_schema_version']} "
-            f"action_contract={FCAMP_CHECKPOINT_CONTRACT['action_contract']} "
-            f"reset_contract={FCAMP_CHECKPOINT_CONTRACT['reset_contract']} "
-            f"validation_contract={FCAMP_CHECKPOINT_CONTRACT['validation_contract']} "
-            f"actor_mean_contract={FCAMP_CHECKPOINT_CONTRACT['actor_mean_contract']} "
-            f"cps_metric_contract={FCAMP_CHECKPOINT_CONTRACT['cps_metric_contract']} "
-            f"ppo_contract={FCAMP_CHECKPOINT_CONTRACT['ppo_contract']} "
-            f"phase0_trajectory_attempt_stream={self.cfg.streams.phase0_fraction:.2f}",
-            flush=True,
-        )
+        log_banner(self)

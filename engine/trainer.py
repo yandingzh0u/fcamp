@@ -11,6 +11,7 @@ from .validation_logging import log_validation_metrics
 from .validation import run_validation_rollout, validation_max_steps
 from .metrics_logger import MetricsLogger
 from envs.g1_mimic import G1MimicEnv
+from method.fcamp import FCAMP
 
 
 # Protocol 6 evaluates the cached raw policy coordinates through the same
@@ -20,7 +21,12 @@ VALIDATION_PROTOCOL_VERSION = 6.0
 
 
 class CoreTrainer:
-    def __init__(self, simulation_app, cfg: ExperimentConfig, algo_factory, checkpoint_dir: Path):
+    def __init__(
+        self,
+        simulation_app,
+        cfg: ExperimentConfig,
+        checkpoint_dir: Path,
+    ):
         self.simulation_app = simulation_app
         self.cfg = cfg
         self.env_cfg = cfg.environment
@@ -40,7 +46,7 @@ class CoreTrainer:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_logger = MetricsLogger(self.checkpoint_dir.parent / "logs")
 
-        self.algo = algo_factory(self.algo_cfg, self.env, simulation_app)
+        self.algo = FCAMP(self.algo_cfg, self.env, simulation_app)
         self.algo.build()
         self.checkpointer = Checkpointer(self)
 
@@ -90,7 +96,9 @@ class CoreTrainer:
                     "perf/iteration_s": float(iteration_s),
                     "perf/train_wall_s_total": float(self.train_wall_seconds_total),
                     "perf/env_transitions_per_s": float(transitions_update / max(iteration_s, 1.0e-9)),
-                    "health/parameters_finite": float(metrics.get("system/parameters_finite", 1.0)),
+                    "health/parameters_finite": float(
+                        metrics["system/parameters_finite"]
+                    ),
                 }
             )
             # Warm-up belongs only to the first fresh-run accounting interval.
@@ -184,17 +192,14 @@ class CoreTrainer:
     def _run_pre_training_warmup(self) -> tuple[dict[str, float], int, float]:
         """Run the optional warm-up once on a fresh run and account its cost."""
         if (
-            bool(getattr(self, "_pre_training_warmup_ran", False))
+            self._pre_training_warmup_ran
             or self.start_update != 1
             or bool(self.train_cfg.resume)
         ):
             return {}, 0, 0.0
-        hook = getattr(self.algo, "pre_training_warmup", None)
-        if not callable(hook):
-            return {}, 0, 0.0
 
         started = time.perf_counter()
-        result = hook(self.current_observation)
+        result = self.algo.pre_training_warmup(self.current_observation)
         elapsed = time.perf_counter() - started
         if not isinstance(result, tuple) or len(result) != 3:
             raise TypeError(
