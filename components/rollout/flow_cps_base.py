@@ -1,12 +1,4 @@
-"""Flow-CPS with a deterministic Flow mean and one final control distribution.
-
-Flow integration is deterministic.  Its final frame-major HxA output is the
-mean of the raw target-rate variable executed by the environment's stateful
-rate decoder.  CPS owns exactly one state-independent dense Cholesky factor in
-that same variable.  A fixed decoder-response metric applies one aggregate
-physical scaling to the factor; sampling and likelihood evaluation use that
-identical effective Cholesky.
-"""
+"""Flow-CPS over an H-frame sequence of bounded action innovations."""
 
 from __future__ import annotations
 
@@ -22,24 +14,6 @@ from models.flow_cps_policy import FlowMatchingPolicy
 
 
 class FlowCPSBase(Algorithm):
-    _REFERENCE_RNG_BURN_DIMS = (512, 256, 128)
-
-    def _burn_reference_critic_rng(self) -> None:
-        """Preserve the seeded a833 initialization stream.
-
-        The a833 builder initialized an immediately overwritten scalar critic
-        before FCAMP's real dual critic. Constructing the same Linear layers is
-        the minimal compatibility action needed for bit-exact fresh runs.
-        """
-
-        dims = (
-            self.critic_obs_dim + 2,
-            *self._REFERENCE_RNG_BURN_DIMS,
-            1,
-        )
-        for input_dim, output_dim in zip(dims, dims[1:]):
-            nn.Linear(input_dim, output_dim)
-
     def build(self) -> None:
         cfg = self.cfg
         env = self.env
@@ -67,34 +41,58 @@ class FlowCPSBase(Algorithm):
             hidden_dims=tuple(cfg.actor_hidden_dims),
             activation=cfg.activation,
         ).to(env.device)
-        self.cps_physical_rms = float(cfg.cps_physical_rms)
-        if not math.isfinite(self.cps_physical_rms) or self.cps_physical_rms <= 0.0:
+        self.cps_raw_rms = float(cfg.cps_raw_rms)
+        if not math.isfinite(self.cps_raw_rms) or self.cps_raw_rms <= 0.0:
             raise ValueError(
-                f"cps_physical_rms must be finite and > 0, got {self.cps_physical_rms}"
+                f"cps_raw_rms must be finite and > 0, got {self.cps_raw_rms}"
             )
+        self.innovation_step_bound = float(cfg.innovation_step_bound)
+        if (
+            not math.isfinite(self.innovation_step_bound)
+            or self.innovation_step_bound <= 0.0
+        ):
+            raise ValueError(
+                "innovation_step_bound must be finite and > 0, got "
+                f"{self.innovation_step_bound}"
+            )
+
+        action_low = env.action_low.to(device=env.device, dtype=torch.float32)
+        action_high = env.action_high.to(device=env.device, dtype=torch.float32)
+        if action_low.shape != (self.num_act,) or action_high.shape != (self.num_act,):
+            raise ValueError(
+                f"Action bounds must have shape ({self.num_act},), got "
+                f"{tuple(action_low.shape)} and {tuple(action_high.shape)}"
+            )
+        if not bool(torch.isfinite(action_low).all()) or not bool(
+            torch.isfinite(action_high).all()
+        ):
+            raise ValueError("Action bounds must be finite")
+        if not torch.allclose(action_low, -action_high, atol=1.0e-7, rtol=0.0):
+            raise ValueError("Innovation decoder requires symmetric action bounds")
+        if not torch.allclose(
+            action_high,
+            action_high[:1].expand_as(action_high),
+            atol=1.0e-7,
+            rtol=0.0,
+        ):
+            raise ValueError("Innovation decoder requires one shared action bound")
+        self.policy_action_bound = float(action_high[0].item())
+        if self.innovation_step_bound >= 2.0 * self.policy_action_bound:
+            raise ValueError(
+                "innovation_step_bound must be below the full action range "
+                f"{2.0 * self.policy_action_bound}"
+            )
+
         self._cps_flat_dim = self.horizon_h * self.num_act
-        physical_response, physical_rms, decoder_contract = self._build_cps_physical_response()
-        self._policy.register_buffer("cps_physical_response", physical_response, persistent=False)
         self._policy.register_buffer(
-            "cps_physical_rms",
-            torch.as_tensor(physical_rms, device=env.device, dtype=torch.float32),
-            persistent=False,
-        )
-        identity_energy = physical_response.square().sum() / float(
-            3 * self.num_act
-        )
-        self._policy.register_buffer(
-            "flow_mean_raw_scale",
+            "cps_raw_rms",
             torch.as_tensor(
-                physical_rms,
+                self.cps_raw_rms,
                 device=env.device,
                 dtype=torch.float32,
-            )
-            / torch.sqrt(identity_energy.clamp(min=1.0e-12)),
+            ),
             persistent=False,
         )
-        self.cps_decoder_dt, self.cps_decoder_rho, self.cps_decoder_rate_limit = decoder_contract
-        self._burn_reference_critic_rng()
         self.chunk_dim = self._policy.chunk_dim
 
         self.actor_obs_normalizer = EmpiricalNormalization(
@@ -133,14 +131,6 @@ class FlowCPSBase(Algorithm):
     def horizon(self) -> int:
         return int(self.cfg.horizon)
 
-    @property
-    def kl_units(self) -> int:
-        # Actor loss uses per-frame / per-prefix ratios (not a joint chunk
-        # ratio), and the adaptive-LR KL is the masked MEAN per-frame KL.
-        # So desired_kl is compared directly against a per-frame KL budget:
-        # kl_units = 1 (no horizon scaling).
-        return 1
-
     def extra_checkpoint_state(self) -> dict:
         return {
             "learning_rate": float(self.learning_rate),
@@ -169,85 +159,8 @@ class FlowCPSBase(Algorithm):
     def _chunks_per_update(self) -> int:
         return max(1, int(self.cfg.rollout_env_steps) // max(1, self.horizon_h))
 
-
-    def _build_cps_physical_response(
-        self,
-    ) -> tuple[torch.Tensor, float, tuple[float, float, torch.Tensor]]:
-        """Build the fixed zero-point response used to scale final CPS noise.
-
-        All rows have normalized-action units.  They contain the mean per-frame
-        action delta, mean per-frame second difference, and the next H physical
-        action deltas caused by the carried terminal rate while the future
-        target perturbation is zero.  The last group prices exactly the state
-        injected across one chunk boundary.  It intentionally does not collapse
-        an infinite tail into one cumulative displacement: the actor emits a
-        fresh target on every future frame.
-        """
-        env = self.env
-        device = env.device
-        dtype = torch.float32
-        dt = float(env.dt)
-        if not math.isfinite(dt) or dt <= 0.0:
-            raise ValueError(f"decoder dt must be finite and > 0, got {dt}")
-
-        rho_value = env.command_rate_decay
-        if torch.is_tensor(rho_value):
-            if rho_value.numel() != 1:
-                raise ValueError("command_rate_decay must be a scalar")
-            rho = float(rho_value.detach().item())
-        else:
-            rho = float(rho_value)
-        if not math.isfinite(rho) or not (0.0 < rho < 1.0):
-            raise ValueError(f"command_rate_decay must be in (0, 1), got {rho}")
-
-        rate_limit = torch.as_tensor(
-            env.command_rate_limit,
-            device=device,
-            dtype=dtype,
-        ).flatten()
-        if rate_limit.numel() == 1:
-            rate_limit = rate_limit.expand(self.num_act).clone()
-        if rate_limit.shape != (self.num_act,):
-            raise ValueError(
-                f"command_rate_limit must be scalar or [{self.num_act}], got {tuple(rate_limit.shape)}"
-            )
-        if not bool(torch.isfinite(rate_limit).all()) or not bool((rate_limit > 0.0).all()):
-            raise ValueError("command_rate_limit must contain only finite positive values")
-
-        h = self.horizon_h
-        temporal = torch.zeros(h, h, device=device, dtype=dtype)
-        for row in range(h):
-            for col in range(row + 1):
-                temporal[row, col] = (1.0 - rho) * (rho ** (row - col))
-        rate_response = torch.kron(temporal, torch.diag(rate_limit))
-        delta_response = dt * rate_response
-
-        difference = torch.eye(h, device=device, dtype=dtype)
-        if h > 1:
-            difference[1:, :-1] -= torch.eye(h - 1, device=device, dtype=dtype)
-        d2_response = torch.kron(
-            difference,
-            torch.eye(self.num_act, device=device, dtype=dtype),
-        ) @ delta_response
-
-        terminal_rate_response = rate_response[-self.num_act :, :]
-        tail_frames = [
-            dt * (rho ** (frame + 1)) * terminal_rate_response
-            for frame in range(h)
-        ]
-        tail_response = torch.cat(tail_frames, dim=0)
-        response = torch.cat(
-            [
-                delta_response / math.sqrt(float(h)),
-                d2_response / math.sqrt(float(h)),
-                tail_response / math.sqrt(float(h)),
-            ],
-            dim=0,
-        )
-        return response, self.cps_physical_rms, (dt, rho, rate_limit.detach().clone())
-
-    def _norm_actor(self, obs: torch.Tensor, update: bool = True) -> torch.Tensor:
-        return self.actor_obs_normalizer(obs, update=update)
+    def _norm_actor(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.actor_obs_normalizer(obs, update=False)
 
 
     def _init_train_episode_stats(self) -> None:
@@ -275,113 +188,143 @@ class FlowCPSBase(Algorithm):
 
 
 
-    def _flow_mean_raw(self, actor_obs: torch.Tensor) -> torch.Tensor:
-        """Differentiable deterministic Flow ODE output in final raw-z space."""
+    def _flow_mean_innovation(self, actor_obs: torch.Tensor) -> torch.Tensor:
+        """Integrate the deterministic mean of all H raw innovations."""
+        if actor_obs.ndim != 2 or actor_obs.shape[-1] != self.actor_obs_dim:
+            raise ValueError(
+                f"actor_obs must have shape [B,{self.actor_obs_dim}], "
+                f"got {tuple(actor_obs.shape)}"
+            )
         batch = actor_obs.shape[0]
         latent = torch.zeros(batch, self.chunk_dim, device=actor_obs.device, dtype=actor_obs.dtype)
-        self._policy._validate_inputs(actor_obs, latent, int(self.cfg.flow_steps))
-        obs_prep = self._policy._prepare_observation(actor_obs)
         steps = int(self.cfg.flow_steps)
-        sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=actor_obs.device, dtype=actor_obs.dtype)
         for step_index in range(steps):
-            sigma = sigma_schedule[step_index]
             timestep = torch.full(
                 (batch,),
-                float(sigma.item()),
+                float(step_index) / float(steps),
                 device=latent.device,
                 dtype=latent.dtype,
             )
-            velocity = self._policy.velocity_field(obs_prep, latent, timestep)
-            sigma = sigma_schedule[step_index].to(
-                device=velocity.device,
-                dtype=velocity.dtype,
-            )
-            sigma_next = sigma_schedule[step_index + 1].to(
-                device=velocity.device,
-                dtype=velocity.dtype,
-            )
-            dt = sigma_next - sigma
-            latent = latent + velocity * dt
-        # The Flow network evolves in a fixed likelihood-standardized
-        # coordinate.  Mapping its output through the initial effective CPS
-        # standard deviation keeps one network unit commensurate with one
-        # exploration standard deviation.  The mapping is immutable; trainable
-        # covariance shape changes cannot silently rescale the actor mean.
-        return latent * self._policy.flow_mean_raw_scale.to(
-            device=latent.device,
-            dtype=latent.dtype,
-        )
+            velocity = self._policy.velocity_field(actor_obs, latent, timestep)
+            latent = latent + velocity / float(steps)
+        return latent
 
-    def _raw_cps_cholesky(
+    def _action_chunk_from_innovations(
+        self,
+        raw_innovations: torch.Tensor,
+        initial_action: torch.Tensor,
+    ) -> torch.Tensor:
+        """Map [B,H*A] innovations and [B,A] state to bounded [B,H,A] actions."""
+
+        batch = initial_action.shape[0]
+        expected_action_shape = (batch, self.num_act)
+        expected_innovation_shape = (batch, self.chunk_dim)
+        if initial_action.shape != expected_action_shape:
+            raise ValueError(
+                f"initial_action must have shape {expected_action_shape}, "
+                f"got {tuple(initial_action.shape)}"
+            )
+        if raw_innovations.shape != expected_innovation_shape:
+            raise ValueError(
+                f"raw_innovations must have shape {expected_innovation_shape}, "
+                f"got {tuple(raw_innovations.shape)}"
+            )
+        if not bool(torch.isfinite(initial_action).all()):
+            raise FloatingPointError("initial_action contains non-finite values")
+        if not bool(torch.isfinite(raw_innovations).all()):
+            raise FloatingPointError("raw_innovations contain non-finite values")
+
+        bound = torch.as_tensor(
+            self.policy_action_bound,
+            device=initial_action.device,
+            dtype=initial_action.dtype,
+        )
+        normalized_initial = initial_action / bound
+        violation = (normalized_initial.abs() - 1.0).clamp_min(0.0).max()
+        if float(violation.item()) > 1.0e-6:
+            raise ValueError(
+                "initial_action exceeds the policy action bound by "
+                f"{float(violation.item()) * self.policy_action_bound:.3e}"
+            )
+        innovations = raw_innovations.to(dtype=initial_action.dtype).view(
+            batch,
+            self.horizon_h,
+            self.num_act,
+        )
+        normalized_step_bound = 2.0 * math.atanh(
+            float(self.innovation_step_bound)
+            / (2.0 * float(self.policy_action_bound))
+        )
+        action = initial_action
+        actions = []
+        for innovation in innovations.unbind(dim=1):
+            # tanh(x + eta) addition identity.  Re-anchoring after every frame
+            # makes H=8, H=4+4 and H=1x8 bitwise identical in finite precision.
+            step = torch.tanh(
+                normalized_step_bound * torch.tanh(innovation)
+            )
+            normalized_action = action / bound
+            action = bound * (
+                (normalized_action + step)
+                / (1.0 + normalized_action * step)
+            )
+            actions.append(action)
+        return torch.stack(actions, dim=1)
+
+    def _effective_joint_cholesky(
         self,
         *,
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        return self._policy.raw_cps_cholesky(device=device, dtype=dtype)
+        """Return shared joint Cholesky with exact target raw RMS per frame."""
 
-    def _effective_cps_cholesky(
-        self,
-        *,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the one Cholesky used by both sampling and likelihood.
-
-        The response already averages delta and d2 over H.  Dividing by three
-        action-sized feature groups makes ``physical_energy`` their aggregate
-        mean square.  Exactly one scalar then maps it to cps_physical_rms.
-        """
-        chol = self._raw_cps_cholesky(device=device, dtype=dtype)
-        response = self._policy.cps_physical_response.to(device=device, dtype=dtype)
-        response_chol = response @ chol
-        physical_energy = response_chol.square().sum() / float(3 * self.num_act)
-        physical_scale = self._policy.cps_physical_rms.to(device=device, dtype=dtype) / torch.sqrt(
-            physical_energy.clamp(min=1.0e-12)
+        chol = self._policy.joint_cholesky_shape(
+            device=device,
+            dtype=dtype,
         )
-        return chol * physical_scale, physical_energy
+        shape_energy = chol.square().sum() / float(self.num_act)
+        scale = self._policy.cps_raw_rms.to(
+            device=device,
+            dtype=dtype,
+        ) / torch.sqrt(shape_energy)
+        return chol * scale
 
     @torch.no_grad()
-    def _final_cps_statistics(self) -> dict[str, float]:
-        """Describe the exact final covariance used by sampling and PPO."""
+    def _cps_statistics(self) -> dict[str, float]:
+        """Describe the shared iid innovation covariance used by PPO."""
 
         device = self.env.device
-        effective_chol, raw_physical_energy = self._effective_cps_cholesky(
+        effective_chol = self._effective_joint_cholesky(
             device=device,
             dtype=torch.float32,
         )
         covariance = effective_chol @ effective_chol.transpose(0, 1)
         covariance_diag = torch.diagonal(covariance)
         covariance_offdiag = covariance - torch.diag_embed(covariance_diag)
-        response = self._policy.cps_physical_response.to(
-            device=device,
-            dtype=torch.float32,
-        )
-        achieved_physical_rms = torch.sqrt(
-            (response @ effective_chol).square().sum()
-            / float(3 * self.num_act)
-        )
-        aggregate_scale = self._policy.cps_physical_rms / torch.sqrt(
-            raw_physical_energy.clamp(min=1.0e-12)
+        achieved_raw_rms = torch.sqrt(
+            effective_chol.square().sum() / float(self.num_act)
         )
         covariance_logdet = 2.0 * torch.log(
             torch.diagonal(effective_chol).clamp(min=1.0e-12)
         ).sum()
         raw_shape_norm = torch.linalg.vector_norm(
-            self._policy.cps_cholesky_raw.detach()
+            self._policy.joint_cholesky_raw.detach()
+        )
+        actor_obs_scale = (
+            self.actor_obs_normalizer._std
+            + float(self.actor_obs_normalizer.eps)
         )
         shape_radius = float(
-            self._policy.CPS_CHOLESKY_SHAPE_RADIUS
+            self._policy.JOINT_CHOLESKY_SHAPE_RADIUS
         )
         return {
-            "policy/cps_physical_rms_target": float(
-                self._policy.cps_physical_rms.item()
+            "policy/cps_raw_rms_target": float(
+                self._policy.cps_raw_rms.item()
             ),
-            "policy/cps_physical_rms_achieved": float(
-                achieved_physical_rms.item()
+            "policy/cps_raw_rms_achieved": float(
+                achieved_raw_rms.item()
             ),
-            "policy/cps_physical_scale": float(aggregate_scale.item()),
-            "policy/cps_cov_trace_mean": float(covariance_diag.mean().item()),
             "policy/cps_cov_trace_min": float(covariance_diag.min().item()),
             "policy/cps_cov_trace_max": float(covariance_diag.max().item()),
             "policy/cps_cov_logdet": float(covariance_logdet.item()),
@@ -395,53 +338,70 @@ class FlowCPSBase(Algorithm):
                 raw_shape_norm.item()
             ),
             "policy/cps_shape_radius": shape_radius,
-            "policy/flow_mean_raw_scale": float(
-                self._policy.flow_mean_raw_scale.item()
+            "policy/actor_obs_normalizer_count": float(
+                self.actor_obs_normalizer.count.item()
             ),
-            "policy/cps_params": float(
-                self._policy.cps_cholesky_raw.numel()
+            "policy/actor_obs_normalizer_mean_abs": float(
+                self.actor_obs_normalizer._mean.abs().mean().item()
             ),
+            "policy/actor_obs_normalizer_scale_min": float(
+                actor_obs_scale.min().item()
+            ),
+            "policy/actor_obs_normalizer_scale_mean": float(
+                actor_obs_scale.mean().item()
+            ),
+            "policy/actor_obs_normalizer_scale_max": float(
+                actor_obs_scale.max().item()
+            ),
+            "policy/actor_obs_normalizer_frozen": 1.0,
         }
 
-    def _final_cps_conditional_log_prob(
+    def _innovation_frame_log_prob(
         self,
-        raw_z: torch.Tensor,
-        mean_z: torch.Tensor,
+        raw_innovation: torch.Tensor,
+        mean_innovation: torch.Tensor,
     ) -> torch.Tensor:
-        """Exact frame-conditional decomposition of the final joint Gaussian."""
-        if raw_z.shape != mean_z.shape or raw_z.shape[-1] != self._cps_flat_dim:
+        """Ordinary 29-D Gaussian log probability for each iid time frame."""
+
+        if (
+            raw_innovation.shape != mean_innovation.shape
+            or raw_innovation.shape[-1] != self._cps_flat_dim
+        ):
             raise ValueError(
-                f"raw_z and mean_z must have matching [B,{self._cps_flat_dim}] shapes, "
-                f"got {tuple(raw_z.shape)} and {tuple(mean_z.shape)}"
+                "raw_innovation and mean_innovation must have matching "
+                f"[B,{self._cps_flat_dim}] shapes, got "
+                f"{tuple(raw_innovation.shape)} and {tuple(mean_innovation.shape)}"
             )
-        chol, _ = self._effective_cps_cholesky(device=raw_z.device, dtype=raw_z.dtype)
-        residual = raw_z - mean_z
+        chol = self._effective_joint_cholesky(
+            device=raw_innovation.device,
+            dtype=raw_innovation.dtype,
+        )
+        residual = (raw_innovation - mean_innovation).view(
+            -1,
+            self.num_act,
+        )
         whitened = torch.linalg.solve_triangular(
             chol,
             residual.transpose(0, 1),
             upper=False,
         ).transpose(0, 1)
-        log_diag = torch.log(torch.diagonal(chol).clamp(min=1.0e-12))
-        component = (
-            -0.5 * (whitened.square() + math.log(2.0 * math.pi))
-            - log_diag.view(1, self._cps_flat_dim)
+        normalizer = (
+            0.5 * float(self.num_act) * math.log(2.0 * math.pi)
+            + torch.log(torch.diagonal(chol)).sum()
         )
-        return component.view(raw_z.shape[0], self.horizon_h, self.num_act).sum(dim=-1)
+        return (
+            -0.5 * whitened.square().sum(dim=-1) - normalizer
+        ).view(raw_innovation.shape[0], self.horizon_h)
 
-    def _final_cps_expected_conditional_kl(
+    def _expected_innovation_frame_kl(
         self,
         old_mean: torch.Tensor,
         new_mean: torch.Tensor,
         old_chol: torch.Tensor,
         new_chol: torch.Tensor,
     ) -> torch.Tensor:
-        """Return exact old||new expected conditional KL for every frame.
+        """Return exact old||new KL for every independent frame."""
 
-        For a joint Gaussian, the chain rule makes frame-k conditional KL equal
-        to the difference between adjacent prefix-marginal KLs.  Leading blocks
-        of a frame-major lower Cholesky are exactly those prefix marginals, so
-        this remains exact for a fully dense cross-frame covariance.
-        """
         if (
             old_mean.shape != new_mean.shape
             or old_mean.ndim != 2
@@ -451,81 +411,84 @@ class FlowCPSBase(Algorithm):
                 "old_mean and new_mean must have matching "
                 f"[B,{self._cps_flat_dim}] shapes"
             )
-        expected_chol_shape = (self._cps_flat_dim, self._cps_flat_dim)
+        expected_chol_shape = (self.num_act, self.num_act)
         if old_chol.shape != expected_chol_shape or new_chol.shape != expected_chol_shape:
             raise ValueError(
                 "old_chol and new_chol must both have shape "
                 f"{expected_chol_shape}"
             )
 
-        # Prefix subtraction can lose a few ulps in float32 even when the
-        # distributions match.  The acceptance statistic is small and worth
-        # evaluating in float64.
         work_dtype = torch.float64
-        old_mu = old_mean.to(dtype=work_dtype)
-        new_mu = new_mean.to(dtype=work_dtype)
+        old_mu = old_mean.view(
+            -1,
+            self.horizon_h,
+            self.num_act,
+        ).to(dtype=work_dtype)
+        new_mu = new_mean.view_as(old_mu).to(dtype=work_dtype)
         old_l = old_chol.to(device=old_mean.device, dtype=work_dtype)
         new_l = new_chol.to(device=old_mean.device, dtype=work_dtype)
-        previous_prefix = torch.zeros(
-            old_mean.shape[0],
-            device=old_mean.device,
-            dtype=work_dtype,
+        covariance_whitened = torch.linalg.solve_triangular(
+            new_l,
+            old_l,
+            upper=False,
         )
-        conditional: list[torch.Tensor] = []
-        for frame in range(self.horizon_h):
-            prefix_dim = (frame + 1) * self.num_act
-            old_prefix_l = old_l[:prefix_dim, :prefix_dim]
-            new_prefix_l = new_l[:prefix_dim, :prefix_dim]
-            covariance_whitened = torch.linalg.solve_triangular(
-                new_prefix_l,
-                old_prefix_l,
-                upper=False,
+        mean_difference = (old_mu - new_mu).reshape(-1, self.num_act)
+        mean_whitened = torch.linalg.solve_triangular(
+            new_l,
+            mean_difference.transpose(0, 1),
+            upper=False,
+        ).transpose(0, 1).view(old_mean.shape[0], self.horizon_h, self.num_act)
+        covariance_term = (
+            covariance_whitened.square().sum()
+            - float(self.num_act)
+            + 2.0
+            * (
+                torch.log(torch.diagonal(new_l)).sum()
+                - torch.log(torch.diagonal(old_l)).sum()
             )
-            mean_whitened = torch.linalg.solve_triangular(
-                new_prefix_l,
-                (old_mu[:, :prefix_dim] - new_mu[:, :prefix_dim]).transpose(0, 1),
-                upper=False,
-            ).transpose(0, 1)
-            logdet_ratio = 2.0 * (
-                torch.log(torch.diagonal(new_prefix_l)).sum()
-                - torch.log(torch.diagonal(old_prefix_l)).sum()
+        )
+        frame_kl = 0.5 * (
+            covariance_term + mean_whitened.square().sum(dim=-1)
+        )
+        minimum = float(frame_kl.min().item())
+        if minimum < -1.0e-7:
+            raise FloatingPointError(
+                f"Gaussian frame KL became materially negative: min={minimum:.3e}"
             )
-            prefix_kl = 0.5 * (
-                covariance_whitened.square().sum()
-                + mean_whitened.square().sum(dim=-1)
-                - float(prefix_dim)
-                + logdet_ratio
-            )
-            frame_kl = prefix_kl - previous_prefix
-            minimum = float(frame_kl.min().item())
-            if minimum < -1.0e-7:
-                raise FloatingPointError(
-                    "Gaussian conditional KL became materially negative: "
-                    f"frame={frame} min={minimum:.3e}"
-                )
-            conditional.append(frame_kl.clamp_min(0.0))
-            previous_prefix = prefix_kl
-        return torch.stack(conditional, dim=-1).to(dtype=old_mean.dtype)
+        return frame_kl.clamp_min(0.0).to(dtype=old_mean.dtype)
 
-    def _sample_final_cps(
+    def _sample_innovations(
         self,
         actor_obs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Sample the sole actor random variable after deterministic Flow ODE."""
-        mean_z = self._flow_mean_raw(actor_obs)
-        chol, _ = self._effective_cps_cholesky(device=actor_obs.device, dtype=actor_obs.dtype)
-        epsilon = torch.randn_like(mean_z)
-        raw_z = mean_z + epsilon @ chol.transpose(0, 1)
-        conditional_logp = self._final_cps_conditional_log_prob(raw_z, mean_z)
-        return raw_z, mean_z, conditional_logp
+        """Sample H iid-in-time, joint-across-joints raw innovations."""
 
-    def _recompute_final_cps_log_prob(
+        mean_innovation = self._flow_mean_innovation(actor_obs)
+        chol = self._effective_joint_cholesky(
+            device=actor_obs.device,
+            dtype=actor_obs.dtype,
+        )
+        mean_frames = mean_innovation.view(-1, self.horizon_h, self.num_act)
+        epsilon = torch.randn_like(mean_frames)
+        raw_innovation = (
+            mean_frames + epsilon @ chol.transpose(0, 1)
+        ).reshape_as(mean_innovation)
+        frame_logp = self._innovation_frame_log_prob(
+            raw_innovation,
+            mean_innovation,
+        )
+        return raw_innovation, mean_innovation, frame_logp
+
+    def _recompute_innovation_log_prob(
         self,
         actor_obs: torch.Tensor,
-        raw_z: torch.Tensor,
+        raw_innovation: torch.Tensor,
     ) -> torch.Tensor:
-        mean_z = self._flow_mean_raw(actor_obs)
-        return self._final_cps_conditional_log_prob(raw_z, mean_z)
+        mean_innovation = self._flow_mean_innovation(actor_obs)
+        return self._innovation_frame_log_prob(
+            raw_innovation,
+            mean_innovation,
+        )
 
     def reset_for_update(self, update_idx: int) -> torch.Tensor:
         del update_idx

@@ -14,10 +14,9 @@ from envs.g1_mimic import G1MimicEnv
 from method.fcamp import FCAMP
 
 
-# Protocol 6 evaluates the cached raw policy coordinates through the same
-# per-frame stateful decoder used by training/playback and records applied
-# commands rather than pre-decoded policy payloads.
-VALIDATION_PROTOCOL_VERSION = 6.0
+# Protocol 7 executes the same cached four-frame bounded action plan used by
+# training/playback and records the environment-confirmed applied commands.
+VALIDATION_PROTOCOL_VERSION = 7.0
 
 
 class CoreTrainer:

@@ -32,7 +32,7 @@ def masked_stats(prefix: str, values: torch.Tensor, mask: torch.Tensor | None = 
 
 
 @torch.no_grad()
-def stream_rollout_metrics(algorithm, rollout: dict) -> dict[str, float]:
+def stream_rollout_metrics(rollout: dict) -> dict[str, float]:
     stream_ids = rollout["stream_ids"]
     valid = rollout["valid"]
     amp_valid = rollout["amp_valid"]
@@ -43,11 +43,6 @@ def stream_rollout_metrics(algorithm, rollout: dict) -> dict[str, float]:
     total_valid = max(int(valid.sum().item()), 1)
     total_amp_valid = max(int(amp_valid.sum().item()), 1)
     metrics: dict[str, float] = {}
-    configured_weights = {
-        "phase0": float(algorithm.cfg.streams.phase0_fraction),
-        "curriculum": 1.0
-        - float(algorithm.cfg.streams.phase0_fraction),
-    }
     for name, stream_id in (
         ("phase0", PHASE0_STREAM),
         ("curriculum", CURRICULUM_STREAM),
@@ -78,9 +73,6 @@ def stream_rollout_metrics(algorithm, rollout: dict) -> dict[str, float]:
                 f"{prefix}/env_fraction": float(
                     env_count / max(stream_ids.numel(), 1)
                 ),
-                f"{prefix}/configured_objective_weight": (
-                    configured_weights[name]
-                ),
                 f"{prefix}/valid_transition_count": float(
                     valid_count
                 ),
@@ -105,9 +97,6 @@ def stream_rollout_metrics(algorithm, rollout: dict) -> dict[str, float]:
                 ),
                 f"{prefix}/completion_rate": float(
                     complete_count / max(terminal_count, 1)
-                ),
-                f"{prefix}/sampler_failure_eligible": float(
-                    stream_id == CURRICULUM_STREAM
                 ),
             }
         )
@@ -184,7 +173,6 @@ def collect_update_metrics(
     actor_time: float,
     critic_time: float,
     disc_time: float,
-    update_idx: int,
     update_start: float,
 ) -> dict[str, float]:
     valid = rollout["valid"]
@@ -192,11 +180,19 @@ def collect_update_metrics(
     channel_valid = rollout["channel_valid"]
     metrics: dict[str, float] = {}
     metrics.update(actor_metrics)
-    metrics.update(algorithm._final_cps_statistics())
+    metrics.update(algorithm._cps_statistics())
+    metrics.update(
+        {
+            "critic/prefix_normalizer_frozen": 1.0,
+            "critic/prefix_normalizer_count": float(
+                algorithm.prefix_context_normalizer.count.item()
+            ),
+        }
+    )
     metrics.update(critic_metrics)
     metrics.update(disc_metrics)
     metrics.update(reward_metrics)
-    metrics.update(stream_rollout_metrics(algorithm, rollout))
+    metrics.update(stream_rollout_metrics(rollout))
     metrics.update(algorithm.phase0_attempts.metrics())
     metrics.update(masked_stats("reward/task", rollout["task_reward"], valid))
     metrics.update(masked_stats("reward/amp_raw", rollout["amp_reward_raw"], amp_valid))
@@ -273,37 +269,6 @@ def collect_update_metrics(
             prefix="amp_reward",
         )
     )
-    for frame_idx in range(algorithm.horizon_h):
-        frame_valid = valid[..., frame_idx]
-        frame_amp_valid = channel_valid[..., frame_idx, 1]
-        metrics.update(
-            masked_stats(
-                f"credit/frame_{frame_idx}_task_adv",
-                rollout["channel_advantages"][..., frame_idx, 0],
-                frame_valid,
-            )
-        )
-        metrics.update(
-            masked_stats(
-                f"credit/frame_{frame_idx}_amp_adv",
-                rollout["channel_advantages"][..., frame_idx, 1],
-                frame_amp_valid,
-            )
-        )
-        metrics.update(
-            masked_stats(
-                f"credit/frame_{frame_idx}_task_actor_component",
-                rollout["actor_advantage_components"][..., frame_idx, 0],
-                frame_valid,
-            )
-        )
-        metrics.update(
-            masked_stats(
-                f"credit/frame_{frame_idx}_amp_actor_component",
-                rollout["actor_advantage_components"][..., frame_idx, 1],
-                frame_amp_valid,
-            )
-        )
     metrics.update(algorithm.disc_normalizer.statistics())
     metrics.update(algorithm.imitation_history.statistics())
     metrics.update(
@@ -324,33 +289,41 @@ def collect_update_metrics(
             ),
             "phase/start_min": float(rollout["collection_start_phases"].min().item()),
             "phase/start_max": float(rollout["collection_start_phases"].max().item()),
-            "act/abs_max": float(rollout["action_abs_max"]),
-            "act/policy_bound_violation_max": float(
-                rollout["action_bound_violation_max"]
+            "control/raw_innovation_abs_max": float(
+                rollout["raw_innovation_abs_max"]
             ),
-            "control/raw_z_abs_max": float(
-                rollout["raw_z_abs_max"]
+            "control/raw_innovation_tanh_saturation_fraction": float(
+                rollout["raw_innovation_tanh_saturation_fraction"]
             ),
-            "control/raw_z_tanh_saturation_fraction": float(
-                rollout["raw_z_tanh_saturation_fraction"]
+            "control/action_delta_abs_max": float(
+                rollout["action_delta_abs_max"]
             ),
-            "control/command_rate_abs_max": float(
-                rollout["command_rate_abs_max"]
+            "control/raw_innovation_boundary_internal_rms_ratio": float(
+                rollout["raw_innovation_boundary_internal_rms_ratio"]
             ),
-            "control/command_rate_support_max": float(
-                rollout["command_rate_support_max"]
+            "control/action_delta_boundary_internal_rms_ratio": float(
+                rollout["action_delta_boundary_internal_rms_ratio"]
+            ),
+            "control/action_d2_boundary_internal_rms_ratio": float(
+                rollout["action_d2_boundary_internal_rms_ratio"]
+            ),
+            "control/continuation_boundary_count": float(
+                rollout["continuation_boundary_count"]
+            ),
+            "control/reset_boundary_count": float(
+                rollout["reset_boundary_count"]
+            ),
+            "control/reset_action_delta_rms": float(
+                rollout["reset_action_delta_rms"]
+            ),
+            "control/reset_action_d2_rms": float(
+                rollout["reset_action_d2_rms"]
             ),
             "disc_contract/fk_alignment_abs_max": float(
                 rollout["fk_alignment_abs_max"]
             ),
-            "disc_contract/fk_alignment_abs_mean": float(
-                rollout["fk_alignment_abs_mean"]
-            ),
             "disc_contract/dirty_window_excluded_count": float(
                 rollout["dirty_window_excluded_count"]
-            ),
-            "disc_contract/replay_dirty_insert_count": float(
-                metrics.get("disc_replay/dirty_insert_count", -1.0)
             ),
             "intervention/edge_count": float(
                 rollout["intervention_edge"].sum().item()
@@ -387,12 +360,6 @@ def collect_update_metrics(
             "timing/critic_update_s": float(critic_time),
             "timing/disc_update_s": float(disc_time),
             "timing/update_s": float(time.perf_counter() - update_start),
-            "system/primitive_steps": float(
-                algorithm.warmup_env_transitions
-                + update_idx
-                * int(algorithm.cfg.rollout_env_steps)
-                * algorithm.env.num_envs
-            ),
             "system/cuda_peak_allocated_gib": float(
                 torch.cuda.max_memory_allocated(algorithm.env.device) / (1024**3)
                 if torch.cuda.is_available()
@@ -438,16 +405,37 @@ def log_update(algorithm, update_idx: int, max_updates: int, metrics: dict) -> N
     )
     print(
         "[FCAMP_CONTROL] "
-        f"physical_rms={metrics.get('policy/cps_physical_rms_achieved', float('nan')):.5f}/"
-        f"{metrics.get('policy/cps_physical_rms_target', float('nan')):.5f} "
-        f"cps_scale={metrics.get('policy/cps_physical_scale', float('nan')):.6f} "
-        f"mean_scale={metrics.get('policy/flow_mean_raw_scale', float('nan')):.6f} "
+        f"cps_raw_rms={metrics.get('policy/cps_raw_rms_achieved', float('nan')):.5f}/"
+        f"{metrics.get('policy/cps_raw_rms_target', float('nan')):.5f} "
         f"shape={metrics.get('policy/cps_shape_norm', float('nan')):.4f}/"
         f"{metrics.get('policy/cps_shape_radius', float('nan')):.4f} "
-        f"raw_z_max={metrics.get('control/raw_z_abs_max', float('nan')):.4f} "
-        f"tanh_sat={metrics.get('control/raw_z_tanh_saturation_fraction', float('nan')):.6f} "
-        f"rate_support={metrics.get('control/command_rate_support_max', float('nan')):.4f} "
-        f"bound_violation={metrics.get('act/policy_bound_violation_max', float('nan')):.2e}",
+        f"raw_max={metrics.get('control/raw_innovation_abs_max', float('nan')):.4f} "
+        f"tanh_sat={metrics.get('control/raw_innovation_tanh_saturation_fraction', float('nan')):.6f} "
+        f"delta_max={metrics.get('control/action_delta_abs_max', float('nan')):.4f}/"
+        f"{float(algorithm.cfg.innovation_step_bound):.4f}",
+        flush=True,
+    )
+    print(
+        "[FCAMP_NORM] "
+        f"actor_fixed={metrics.get('policy/actor_obs_normalizer_frozen', float('nan')):.0f} "
+        f"actor_n={metrics.get('policy/actor_obs_normalizer_count', float('nan')):.0f} "
+        f"critic_fixed={metrics.get('critic/prefix_normalizer_frozen', float('nan')):.0f} "
+        f"critic_n={metrics.get('critic/prefix_normalizer_count', float('nan')):.0f} "
+        f"mean_abs={metrics.get('policy/actor_obs_normalizer_mean_abs', float('nan')):.5f} "
+        f"scale={metrics.get('policy/actor_obs_normalizer_scale_min', float('nan')):.5f}/"
+        f"{metrics.get('policy/actor_obs_normalizer_scale_mean', float('nan')):.5f}/"
+        f"{metrics.get('policy/actor_obs_normalizer_scale_max', float('nan')):.5f}",
+        flush=True,
+    )
+    print(
+        "[FCAMP_SEAM] "
+        f"continuation_n={metrics.get('control/continuation_boundary_count', float('nan')):.0f} "
+        f"raw_rms_ratio={metrics.get('control/raw_innovation_boundary_internal_rms_ratio', float('nan')):.5f} "
+        f"d1_rms_ratio={metrics.get('control/action_delta_boundary_internal_rms_ratio', float('nan')):.5f} "
+        f"d2_rms_ratio={metrics.get('control/action_d2_boundary_internal_rms_ratio', float('nan')):.5f} "
+        f"reset_n={metrics.get('control/reset_boundary_count', float('nan')):.0f} "
+        f"reset_d1={metrics.get('control/reset_action_delta_rms', float('nan')):.5f} "
+        f"reset_d2={metrics.get('control/reset_action_d2_rms', float('nan')):.5f}",
         flush=True,
     )
     print(
@@ -507,9 +495,8 @@ def log_update(algorithm, update_idx: int, max_updates: int, metrics: dict) -> N
     print(
         "[FCAMP_CONTRACT] "
         f"fk_max={metrics.get('disc_contract/fk_alignment_abs_max', float('nan')):.3e} "
-        f"policy_action_violation={metrics.get('act/policy_bound_violation_max', float('nan')):.3e} "
         f"dirty_excluded={metrics.get('disc_contract/dirty_window_excluded_count', 0.0):.0f} "
-        f"replay_dirty={metrics.get('disc_contract/replay_dirty_insert_count', -1.0):.0f} "
+        f"replay_dirty={metrics.get('disc_replay/dirty_insert_count', -1.0):.0f} "
         f"push_edges={metrics.get('intervention/edge_count', 0.0):.0f} "
         f"amp_trace_cuts={metrics.get('intervention/amp_trace_cut_count', 0.0):.0f} "
         f"replay_phase0={metrics.get('disc_replay/stream_0_size', 0.0):.0f}/"
@@ -524,22 +511,6 @@ def log_update(algorithm, update_idx: int, max_updates: int, metrics: dict) -> N
         f"critic={metrics['timing/critic_update_s']:.3f}s "
         f"disc={metrics['timing/disc_update_s']:.3f}s "
         f"gpu_peak={metrics['system/cuda_peak_allocated_gib']:.2f}GiB",
-        flush=True,
-    )
-    frame_metrics = " ".join(
-        f"frame{frame_idx}_kl="
-        f"{metrics.get(f'fcamp/frame_{frame_idx}_kl', float('nan')):.6f} "
-        f"frame{frame_idx}_ratio="
-        f"{metrics.get(f'fcamp/frame_{frame_idx}_ratio', float('nan')):.4f} "
-        f"frame{frame_idx}_clip="
-        f"{metrics.get(f'fcamp/frame_{frame_idx}_clip', float('nan')):.4f}"
-        for frame_idx in range(algorithm.horizon_h)
-    )
-    print(
-        f"[FCAMP_FRAMES] {frame_metrics} "
-        f"joint_chunk_kl={metrics.get('fcamp/joint_chunk_kl', float('nan')):.6f} "
-        f"joint_log_ratio_abs_max="
-        f"{metrics.get('fcamp/joint_log_ratio_abs_max', float('nan')):.6f}",
         flush=True,
     )
     print(
@@ -561,7 +532,7 @@ def log_update(algorithm, update_idx: int, max_updates: int, metrics: dict) -> N
 
 def log_banner(algorithm) -> None:
     print(
-        "[METHOD] name=fcamp actor=causal_flow_cps prior=temporal_discriminator "
+        "[METHOD] name=fcamp actor=flat_chunk_flow_cps prior=temporal_discriminator "
         "credit=causal_frame critic=shared_dual_flow",
         flush=True,
     )
@@ -576,21 +547,20 @@ def log_banner(algorithm) -> None:
     print(
         f"[CREDIT] critic_sharing=encoder heads=task,amp "
         f"credit=causal_frame advantage_norm=global "
-        f"ratio_mode=conditional_frame "
+        f"ratio_mode=factorized_frame "
         f"task_weight={algorithm.cfg.credit.task_weight} amp_weight={algorithm.cfg.credit.amp_weight} "
         f"amp_dt=True",
         flush=True,
     )
     print(
-        "[CONTROL] variable=raw_target_rate "
-        "decoder_owner=environment mean=initial_cps_standardized_flow "
-        "covariance=bounded_single_final_dense_cholesky "
-        "metric=finite_h_carried_rate_response "
-        f"dt={algorithm.env.dt:.5f} rho={algorithm.env.command_rate_decay:.8f} "
-        f"half_life={algorithm.env.rate_half_life_seconds:.5f}s "
-        f"rate_limit=[{float(algorithm.env.command_rate_limit.min().item()):.3f},"
-        f"{float(algorithm.env.command_rate_limit.max().item()):.3f}]/s "
-        f"physical_rms={algorithm.cps_physical_rms:.5f}",
+        "[CONTROL] variable=raw_action_innovation "
+        "mapping=continuous_pre_squash_residual "
+        "covariance=shared_joint_iid_time "
+        "mean=zero_source_flat_chunk_flow "
+        f"dt={algorithm.env.dt:.5f} "
+        f"action_bound={float(algorithm.action_high.max().item()):.3f} "
+        f"step_bound={float(algorithm.cfg.innovation_step_bound):.3f} "
+        f"cps_raw_rms={float(algorithm.cfg.cps_raw_rms):.5f}",
         flush=True,
     )
     print(
@@ -603,6 +573,7 @@ def log_banner(algorithm) -> None:
         f"reset_contract={FCAMP_CHECKPOINT_CONTRACT['reset_contract']} "
         f"validation_contract={FCAMP_CHECKPOINT_CONTRACT['validation_contract']} "
         f"actor_mean_contract={FCAMP_CHECKPOINT_CONTRACT['actor_mean_contract']} "
+        f"actor_norm_contract={FCAMP_CHECKPOINT_CONTRACT['actor_normalizer_contract']} "
         f"cps_metric_contract={FCAMP_CHECKPOINT_CONTRACT['cps_metric_contract']} "
         f"ppo_contract={FCAMP_CHECKPOINT_CONTRACT['ppo_contract']} "
         f"phase0_trajectory_attempt_stream={algorithm.cfg.streams.phase0_fraction:.2f}",

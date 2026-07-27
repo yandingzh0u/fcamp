@@ -31,10 +31,8 @@ class EnvironmentConfig:
     adaptive_alpha: float
     adaptive_predecessor_ratio: float
     adaptive_predecessor_lookback_bins: int
-    action_rate_weight: float
+    action_delta_weight: float
     policy_action_bound: float
-    command_rate_limit: tuple[float, ...]
-    rate_half_life_seconds: float
     root_velocity_mode: str
     physics_material_combine_mode: str
     contact_sensor_update_period: str
@@ -61,7 +59,6 @@ class StylePriorConfig:
     normalizer_clip: float
     reward_eval_batch_size: int
     max_updates_per_iteration: int
-    discriminator_warmup_rollouts: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,13 +84,14 @@ class FCAMPStreamsConfig:
 
 @dataclass(frozen=True, slots=True)
 class FCAMPConfig:
-    """Causal Flow-CPS policy with a temporal discriminator prior."""
+    """One-shot innovation Flow-CPS with a temporal discriminator prior."""
 
     horizon: int
     actor_hidden_dims: tuple[int, ...]
     activation: str
     flow_steps: int
-    cps_physical_rms: float
+    innovation_step_bound: float
+    cps_raw_rms: float
     rollout_env_steps: int
     discount_gamma: float
     gae_lambda: float
@@ -160,11 +158,9 @@ def _construct(cls, values: dict[str, Any]):
         "hidden_dims",
         "encoder_hidden_dims",
         "head_hidden_dims",
-        "command_rate_limit",
     ):
         if name in converted:
-            converter = float if name == "command_rate_limit" else int
-            converted[name] = tuple(converter(value) for value in converted[name])
+            converted[name] = tuple(int(value) for value in converted[name])
     return cls(**converted)
 
 
@@ -265,19 +261,12 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError(
             "environment.policy_action_bound must be finite and positive"
         )
-    if len(env.command_rate_limit) != 29 or any(
-        not math.isfinite(limit) or limit <= 0.0
-        for limit in env.command_rate_limit
-    ):
-        raise ValueError(
-            "environment.command_rate_limit must contain 29 finite positive values"
-        )
     if (
-        not math.isfinite(env.rate_half_life_seconds)
-        or env.rate_half_life_seconds <= 0.0
+        not math.isfinite(env.action_delta_weight)
+        or env.action_delta_weight < 0.0
     ):
         raise ValueError(
-            "environment.rate_half_life_seconds must be finite and positive"
+            "environment.action_delta_weight must be finite and non-negative"
         )
     if env.platform_profile not in {"custom", "g1_largebox_50hz"}:
         raise ValueError("environment.platform_profile must be custom or g1_largebox_50hz")
@@ -325,19 +314,34 @@ def _validate(config: ExperimentConfig) -> None:
     if env.reset_phase_sampling == "continuous_uniform":
         raise ValueError("FCAMP fixed-window reset history requires integer phases")
     _validate_fcamp(config.parameters)
+    if (
+        config.parameters.innovation_step_bound
+        >= 2.0 * env.policy_action_bound
+    ):
+        raise ValueError(
+            "parameters.innovation_step_bound must be below the full "
+            "environment action range"
+        )
 
 def _validate_fcamp(params: FCAMPConfig) -> None:
-    if params.horizon < 1:
-        raise ValueError("Flow-CPS requires parameters.horizon >= 1")
+    if params.horizon != 4:
+        raise ValueError("FCAMP requires parameters.horizon == 4")
     if params.flow_steps < 1:
         raise ValueError("Flow-CPS requires parameters.flow_steps >= 1")
     if params.rollout_env_steps <= 0:
         raise ValueError("Flow-CPS requires parameters.rollout_env_steps > 0")
     if params.rollout_env_steps % params.horizon:
         raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
-    if not math.isfinite(params.cps_physical_rms) or params.cps_physical_rms <= 0.0:
+    if (
+        not math.isfinite(params.innovation_step_bound)
+        or params.innovation_step_bound <= 0.0
+    ):
         raise ValueError(
-            "Flow-CPS requires parameters.cps_physical_rms to be finite and positive"
+            "Flow-CPS requires parameters.innovation_step_bound to be finite and positive"
+        )
+    if not math.isfinite(params.cps_raw_rms) or params.cps_raw_rms <= 0.0:
+        raise ValueError(
+            "Flow-CPS requires parameters.cps_raw_rms to be finite and positive"
         )
     if (
         not math.isfinite(params.desired_kl)
@@ -366,8 +370,6 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError("FCstyle discriminator optimizer/batch/epoch settings are invalid")
     if style.max_updates_per_iteration < 1:
         raise ValueError("FCAMP max_updates_per_iteration must be positive")
-    if style.discriminator_warmup_rollouts not in {0, 1}:
-        raise ValueError("FCAMP discriminator_warmup_rollouts must be 0 or 1")
     if style.current_buffer_size < style.batch_size:
         raise ValueError("FCAMP style_prior.current_buffer_size must be >= batch_size")
     current_phase0 = int(

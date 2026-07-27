@@ -11,13 +11,17 @@ import torch
 
 
 FCAMP_CHECKPOINT_CONTRACT = {
-    "fcamp_schema_version": 16,
-    "action_contract": "environment_carried_target_rate_v1",
-    "reset_contract": "causal_reference_rate_v1",
-    "validation_contract": "raw_target_rate_single_decoder_v1",
-    "actor_mean_contract": "initial_cps_standardized_flow_v1",
-    "cps_metric_contract": "finite_h_carried_rate_response_v1",
-    "ppo_contract": "final_raw_target_rate_atomic_exact_kl_v1",
+    "fcamp_schema_version": 18,
+    "action_contract": "bounded_action_innovation_chain_v1",
+    "reset_contract": "causal_reference_action_delta_v1",
+    "validation_contract": "absolute_pd_action_chunk_v1",
+    "actor_mean_contract": "zero_source_forward_joint_h4_innovation_flow_v1",
+    "actor_normalizer_contract": "discarded_warmup_fit_then_frozen_v1",
+    "cps_metric_contract": "shared_joint_iid_innovation_rms_v1",
+    "ppo_contract": "factorized_raw_innovation_atomic_exact_kl_v1",
+    "critic_context_contract": "causal_raw_innovation_prefix_frozen_norm_v1",
+    "observation_contract": "last_delta_last_action_v1",
+    "environment_contract": "direct_normalized_pd_target_v1",
 }
 
 
@@ -97,10 +101,8 @@ _RESUME_ENV_KEYS = (
     "adaptive_predecessor_ratio",
     "adaptive_predecessor_lookback_bins",
     "root_velocity_mode",
-    "action_rate_weight",
+    "action_delta_weight",
     "policy_action_bound",
-    "command_rate_limit",
-    "rate_half_life_seconds",
     "physics_material_combine_mode",
     "contact_sensor_update_period",
 )
@@ -223,7 +225,7 @@ class Checkpointer:
         # Load through CPU so a large discriminator replay sidecar does not
         # transiently consume GPU memory before being copied back to its CPU ring.
         payload = torch.load(checkpoint_path, map_location="cpu")
-        # Method/schema and decoder contracts are more fundamental than a
+        # Method/schema and action contracts are more fundamental than a
         # resume-config comparison.  Reject an obsolete actor before inspecting
         # any secondary training metadata or mutating any state.
         preflight_checkpoint_payload(t.algo, payload)

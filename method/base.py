@@ -120,30 +120,29 @@ class Algorithm(ABC):
         del payload
 
     def deployment_chunk(self, obs: torch.Tensor) -> torch.Tensor:
-        """Return the deterministic payload cached for one policy chunk.
-
-        The payload is deliberately *not* required to be an absolute action.
-        For example, FCAMP returns raw target-rate coordinates here and decodes
-        exactly one row at each call to :meth:`evaluation_step_payload`.
-        """
+        """Return the deterministic payload cached for one policy chunk."""
         return self.deterministic_actions(obs)
 
     def validated_deployment_chunk(self, obs: torch.Tensor) -> torch.Tensor:
         """Return a shape-checked ``[N,H,D]`` deployment payload."""
         payload = self.deployment_chunk(obs)
-        if payload.dim() == 2:
-            payload = payload.unsqueeze(1)
         if payload.dim() != 3:
             raise ValueError(
-                "deployment_chunk must return [N,D] or [N,H,D], got "
+                "deployment_chunk must return [N,H,D], got "
                 f"shape={tuple(payload.shape)}"
             )
-        expected_prefix = (self.env.num_envs, self.horizon)
-        if payload.shape[:2] != expected_prefix:
+        expected_shape = (
+            self.env.num_envs,
+            self.horizon,
+            self.env.action_dim,
+        )
+        if payload.shape != expected_shape:
             raise ValueError(
-                "deployment_chunk batch/time shape must be "
-                f"{expected_prefix}, got {tuple(payload.shape[:2])}"
+                "deployment_chunk shape must be "
+                f"{expected_shape}, got {tuple(payload.shape)}"
             )
+        if not bool(torch.isfinite(payload).all()):
+            raise FloatingPointError("deployment_chunk contains non-finite actions")
         return payload
 
     def require_applied_action(self, info: dict) -> torch.Tensor:
@@ -152,7 +151,7 @@ class Algorithm(ABC):
         if not torch.is_tensor(action):
             raise RuntimeError(
                 "evaluation_step_payload must return info['applied_action']; "
-                "raw policy coordinates are not execution diagnostics"
+                "planned payloads are not execution diagnostics"
             )
         if action.shape != self.env.last_action.shape:
             raise RuntimeError(
@@ -172,7 +171,7 @@ class Algorithm(ABC):
         *,
         active_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
-        """Decode and execute one cached FCAMP frame."""
+        """Execute one cached policy frame."""
         ...
 
     def snapshot_runtime_state(self):

@@ -21,33 +21,21 @@ environment:
   adaptive_alpha: 0.001
   adaptive_predecessor_ratio: 0.8
   adaptive_predecessor_lookback_bins: 1
-  action_rate_weight: 0.1
-  # Environment-owned normalized PD-command domain.  The policy no longer
-  # installs either this bound or the carried-rate dynamics after first reset.
+  action_delta_weight: 0.1
+  # Environment-owned normalized PD-position command domain.
   policy_action_bound: 5.0
-  # Per-joint target-rate support in normalized action / second, ordered exactly
-  # as G1_29DOF_ACTION_NAMES.  These bounds cover the full 50 Hz reference after
-  # inverse filtering through the decoder, with 50% support margin.
-  command_rate_limit:
-    [80.0, 32.5, 66.5, 192.0, 69.0, 43.5,
-     84.0, 24.5, 22.5, 210.5, 115.5, 35.0,
-     14.0, 25.5, 28.0,
-     50.5, 45.0, 14.5, 68.0, 13.0, 155.0, 124.5,
-     26.0, 33.0, 61.0, 55.5, 4.5, 112.0, 98.5]
-  rate_half_life_seconds: 0.08
   root_velocity_mode: com
 
 parameters:
-  # Causal Flow-CPS chunk actor (kept aligned with the Flow-CPS actor).
+  # One-shot Flow-CPS chunk actor over four action innovations.
   horizon: 4
   actor_hidden_dims: [512, 256, 128]
   activation: elu
   flow_steps: 4
-  # Aggregate RMS in normalized-action units after the fixed decoder response
-  # metric (frame delta, d2, and carried terminal-rate tail).  This is an
-  # absolute physical budget, not a fraction of the very large target-rate
-  # support.
-  cps_physical_rms: 0.05
+  # Each raw innovation produces at most this normalized-position increment.
+  innovation_step_bound: 1.0
+  # Per-frame, per-joint Gaussian exploration RMS in raw innovation space.
+  cps_raw_rms: 0.05
   rollout_env_steps: 24
   discount_gamma: 0.99
   gae_lambda: 0.95
@@ -63,8 +51,8 @@ parameters:
   init_at_random_ep_len: true
   max_grad_norm: 1.0
   # A tentative actor step is committed only when every frame's exact expected
-  # conditional KL is at most this multiple of desired_kl.
-  kl_acceptance_factor: 4.0
+  # per-frame exact KL is at most this multiple of desired_kl.
+  kl_acceptance_factor: 2.0
   style_prior:
     # 16 states at 50 Hz span 0.30 s (15 transitions).
     obs_steps: 16
@@ -85,9 +73,6 @@ parameters:
     normalizer_clip: 10.0
     reward_eval_batch_size: 4096
     max_updates_per_iteration: 32
-    # Train the discriminator once on a discarded rollout before actor update 1.
-    discriminator_warmup_rollouts: 1
-
   credit:
     task_weight: 1.0
     amp_weight: 1.0

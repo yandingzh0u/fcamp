@@ -137,13 +137,9 @@ def run_validation_rollout(
     current_obs = algo.evaluation_reset(validation_phase)
     print(f"[VALIDATION_RESET_DONE] time={time.perf_counter() - reset_t0:.3f}s", flush=True)
     reset_metrics = _reset_alignment_metrics(env, "validation")
-    _, initial_joint_vel = env.get_action_joint_state()
-    initial_root_ang_vel = env.get_mimic_root_velocity_w()[:, 3:]
     chunk_diagnostics = ChunkBoundaryDiagnostics(
         horizon=horizon,
         initial_action=env.last_action,
-        initial_joint_vel=initial_joint_vel,
-        initial_root_ang_vel=initial_root_ang_vel,
     )
 
     demo_frame_indices = torch.arange(
@@ -239,19 +235,10 @@ def run_validation_rollout(
                     env.default_action_joint_pos
                     + env.action_scale * applied_action
                 )
-                reference_post = env.motion.get_frame(info["reference_phase_steps"])
-                robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
-                robot_root_ang_vel = env.get_mimic_root_velocity_w()[:, 3:]
                 chunk_diagnostics.update(
                     active_mask=active_mask,
                     chunk_offset=primitive_offset,
                     action=applied_action,
-                    joint_pos=robot_joint_pos,
-                    joint_vel=robot_joint_vel,
-                    root_ang_vel=robot_root_ang_vel,
-                    reference_joint_pos=reference_post["joint_pos"],
-                    reference_joint_vel=reference_post["joint_vel"],
-                    reference_root_ang_vel=reference_post["root_ang_vel_w"],
                 )
                 metric_env_ids = motion_metric.env_ids
                 policy_imitation_frame = env.get_evaluator_imitation_policy_frame(

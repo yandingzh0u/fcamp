@@ -17,7 +17,7 @@ class MimicRewardMixin:
         context = self.get_tracking_context()
         reference = context["reference"]
 
-        action_rate = torch.sum(torch.square(actions - previous_action), dim=-1)
+        action_delta = torch.sum(torch.square(actions - previous_action), dim=-1)
 
         out_of_limits = -(
             self.robot.data.joint_pos[:, self.action_joint_ids]
@@ -65,7 +65,7 @@ class MimicRewardMixin:
         )
         undesired_contacts = torch.sum(undesired_contact_mask.to(dtype=torch.float32), dim=-1)
 
-        action_rate_weight = self.config.action_rate_weight
+        action_delta_weight = self.config.action_delta_weight
 
         reward = (
             0.5 * anchor_pos_reward
@@ -74,12 +74,12 @@ class MimicRewardMixin:
             + 1.0 * body_ori_reward
             + 1.0 * body_lin_vel_reward
             + 1.0 * body_ang_vel_reward
-            - action_rate_weight * action_rate
+            - action_delta_weight * action_delta
             - 10.0 * joint_limit
             - 0.1 * undesired_contacts
         ) * self.dt
         return reward, {
-            "action_rate": action_rate,
+            "action_delta": action_delta,
             "joint_limit": joint_limit,
             "anchor_pos_reward": anchor_pos_reward,
             "anchor_ori_reward": anchor_ori_reward,

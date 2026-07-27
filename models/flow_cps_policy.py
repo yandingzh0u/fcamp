@@ -29,12 +29,11 @@ def _build_mlp(input_dim: int, hidden_dims: tuple[int, ...], output_dim: int, ac
 
 
 class FlowMatchingPolicy(nn.Module):
-    # The learnable covariance is a shape around the identity.  Bounding the
-    # Frobenius norm of its Cholesky perturbation makes the parameterization
-    # identifiable after physical trace normalization and guarantees
-    #   singular_values(L_shape) in [1-r, 1+r].
-    # With r=0.5 the covariance condition number is therefore at most 9.
-    CPS_CHOLESKY_SHAPE_RADIUS = 0.5
+    """One H-frame Flow mean and one shared per-frame joint covariance."""
+
+    # Bounding the lower-triangular perturbation keeps every diagonal of
+    # I + perturbation positive and prevents an ill-conditioned covariance.
+    JOINT_CHOLESKY_SHAPE_RADIUS = 0.5
 
     def __init__(
         self,
@@ -53,49 +52,21 @@ class FlowMatchingPolicy(nn.Module):
         hidden_dims = tuple(hidden_dims)
         if not hidden_dims:
             raise ValueError("hidden_dims must contain at least one layer")
-        # FCAMP has one actor architecture: an ordered causal GRU.  These
-        # constants remain public because the existing banner logs them.
-        self.causal_velocity = True
-        self.causal_arch = "causal_gru"
-        hidden = int(hidden_dims[-1])
-        self.obs_encoder = _build_mlp(
-            self.obs_dim + 1, hidden_dims, hidden, activation
-        )
-        self.frame_pos_embed = nn.Parameter(torch.zeros(self.horizon, hidden))
-        nn.init.normal_(self.frame_pos_embed, std=0.02)
-        self.token_encoder = _build_mlp(
-            self.action_dim + hidden,
+        self.velocity_net = _build_mlp(
+            self.obs_dim + self.chunk_dim + 1,
             hidden_dims,
-            hidden,
+            self.chunk_dim,
             activation,
         )
-        self.causal_cell = nn.GRUCell(hidden, hidden)
-        self.vel_head = _build_mlp(
-            hidden * 2, hidden_dims, self.action_dim, activation
-        )
-        lower = torch.tril_indices(self.chunk_dim, self.chunk_dim)
-        self.cps_cholesky_raw = nn.Parameter(torch.zeros(lower.shape[1]))
-        self.register_buffer("_cps_lower_indices", lower, persistent=False)
+        output_layer = self.velocity_net[-1]
+        if not isinstance(output_layer, nn.Linear):
+            raise TypeError("velocity_net must end in nn.Linear")
+        nn.init.zeros_(output_layer.weight)
+        nn.init.zeros_(output_layer.bias)
 
-    def _prepare_observation(self, observation: torch.Tensor) -> torch.Tensor:
-        if observation.shape[-1] != self.obs_dim:
-            raise ValueError(
-                f"Expected observation dim {self.obs_dim}, got {observation.shape[-1]}"
-            )
-        return observation
-
-    def _validate_inputs(self, observation: torch.Tensor, flow_state: torch.Tensor, steps: int) -> None:
-        if steps < 1:
-            raise ValueError(f"steps must be >= 1, got {steps}")
-        if flow_state.shape[-1] != self.chunk_dim:
-            raise ValueError(
-                f"Expected Flow state dim {self.chunk_dim}, got {flow_state.shape[-1]}"
-            )
-        if observation.shape[0] != flow_state.shape[0]:
-            raise ValueError(
-                f"Observation batch size {observation.shape[0]} must match "
-                f"Flow state batch size {flow_state.shape[0]}"
-            )
+        lower = torch.tril_indices(self.action_dim, self.action_dim)
+        self.joint_cholesky_raw = nn.Parameter(torch.zeros(lower.shape[1]))
+        self.register_buffer("_joint_lower_indices", lower, persistent=False)
 
     def velocity_field(
         self,
@@ -103,34 +74,22 @@ class FlowMatchingPolicy(nn.Module):
         flow_state: torch.Tensor,
         time: torch.Tensor,
     ) -> torch.Tensor:
-        observation = self._prepare_observation(observation)
-        if time.ndim != 1 or time.shape[0] != observation.shape[0]:
-            raise ValueError(f"time must have shape ({observation.shape[0]},), got {tuple(time.shape)}")
-        # Ordered causal-GRU velocity: v_k depends only on z_0..z_k.
-        # flow_state: [B, chunk_dim] -> [B, h, A]
-        b = observation.shape[0]
-        chunk = flow_state.view(b, self.horizon, self.action_dim)
-        obs_h = self.obs_encoder(torch.cat([observation, time.unsqueeze(-1)], dim=-1))  # [B, H]
-        frame_pos = self.frame_pos_embed.unsqueeze(0).expand(b, -1, -1)
-        token_h = self.token_encoder(torch.cat([chunk, frame_pos], dim=-1))  # [B, h, H]
-        state = obs_h
-        velocity_frames: list[torch.Tensor] = []
-        for frame_idx in range(self.horizon):
-            state = self.causal_cell(token_h[:, frame_idx], state)
-            velocity_frames.append(self.vel_head(torch.cat([obs_h, state], dim=-1)))
-        vel = torch.stack(velocity_frames, dim=1)  # [B, h, A]
-        return vel.reshape(b, self.chunk_dim)
+        return self.velocity_net(
+            torch.cat([observation, flow_state, time.unsqueeze(-1)], dim=-1)
+        )
 
-    def raw_cps_cholesky(
+    def joint_cholesky_shape(
         self,
         *,
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        """Materialize a full, bounded, positive-diagonal covariance shape."""
-        raw = self.cps_cholesky_raw.to(device=device, dtype=dtype)
-        lower = self._cps_lower_indices.to(device=device)
-        radius = float(self.CPS_CHOLESKY_SHAPE_RADIUS)
+        """Materialize the shared A x A bounded Cholesky shape."""
+        raw = self.joint_cholesky_raw.to(device=device, dtype=dtype)
+        if not bool(torch.isfinite(raw).all()):
+            raise FloatingPointError("CPS Cholesky parameters are non-finite")
+        lower = self._joint_lower_indices.to(device=device)
+        radius = float(self.JOINT_CHOLESKY_SHAPE_RADIUS)
         raw_norm = torch.linalg.vector_norm(raw)
         projection = torch.clamp(
             torch.as_tensor(radius, device=device, dtype=dtype)
@@ -138,14 +97,20 @@ class FlowMatchingPolicy(nn.Module):
             max=1.0,
         )
         perturbation = torch.zeros(
-            self.chunk_dim,
-            self.chunk_dim,
+            self.action_dim,
+            self.action_dim,
             device=device,
             dtype=dtype,
         )
         perturbation[lower[0], lower[1]] = raw * projection
-        return torch.eye(
-            self.chunk_dim,
+        chol = torch.eye(
+            self.action_dim,
             device=device,
             dtype=dtype,
         ) + perturbation
+        diagonal = torch.diagonal(chol)
+        if not bool(torch.isfinite(chol).all()) or not bool((diagonal > 0.0).all()):
+            raise FloatingPointError(
+                "CPS Cholesky shape must be finite with a positive diagonal"
+            )
+        return chol

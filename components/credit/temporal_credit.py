@@ -296,30 +296,55 @@ def compute_dual_channel_gae(
     effective_channel_valid = base_valid_bool.expand_as(rewards)
     if channel_valid_mask is not None:
         effective_channel_valid = effective_channel_valid & channel_valid_mask.bool()
-    bootstrap = bootstrap_mask.to(dtype).unsqueeze(-1).expand_as(rewards)
+    bootstrap_valid = bootstrap_mask.bool().unsqueeze(-1).expand_as(rewards)
     if channel_bootstrap_mask is not None:
-        bootstrap = bootstrap * channel_bootstrap_mask.to(dtype)
-    trace = trace_mask.to(dtype).unsqueeze(-1).expand_as(rewards)
+        bootstrap_valid = bootstrap_valid & channel_bootstrap_mask.bool()
+    trace_valid = trace_mask.bool().unsqueeze(-1).expand_as(rewards)
     if channel_trace_mask is not None:
-        trace = trace * channel_trace_mask.to(dtype)
-    valid = effective_channel_valid.to(dtype)
+        trace_valid = trace_valid & channel_trace_mask.bool()
+    zero = torch.zeros((), device=rewards.device, dtype=dtype)
+    safe_rewards = torch.where(effective_channel_valid, rewards, zero)
+    safe_values = torch.where(effective_channel_valid, values, zero)
+    safe_next_values = torch.where(
+        effective_channel_valid & bootstrap_valid,
+        next_values,
+        zero,
+    )
+    for name, tensor in (
+        ("rewards", safe_rewards),
+        ("values", safe_values),
+        ("next_values", safe_next_values),
+    ):
+        if not bool(torch.isfinite(tensor).all()):
+            raise FloatingPointError(
+                f"non-finite valid {name} entered temporal credit"
+            )
     td_errors = (
-        rewards + float(gamma) * bootstrap * next_values - values
-    ) * valid
+        safe_rewards + float(gamma) * safe_next_values - safe_values
+    )
 
     advantages = torch.zeros_like(rewards)
     running = torch.zeros_like(rewards[0])
     trace_coefficient = float(gamma) * float(gae_lambda)
     for time_index in range(rewards.shape[0] - 1, -1, -1):
         current = td_errors[time_index] + (
-            trace_coefficient * trace[time_index] * running
+            trace_coefficient
+            * torch.where(trace_valid[time_index], running, zero)
         )
-        running = current * valid[time_index]
+        running = torch.where(
+            effective_channel_valid[time_index],
+            current,
+            zero,
+        )
         advantages[time_index] = running
 
     # Invalid padded frames must never become accidental critic targets if a
     # caller forgets to apply its minibatch mask a second time.
-    value_targets = (values + advantages) * valid
+    value_targets = torch.where(
+        effective_channel_valid,
+        safe_values + advantages,
+        zero,
+    )
     mixed_advantage, actor_advantage, actor_components = _mix_then_normalize_masked(
         advantages,
         valid_mask.to(torch.bool),

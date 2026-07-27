@@ -24,10 +24,6 @@ from .contracts import (
     resolve_root_velocity_frame,
     validate_actions_in_bounds,
 )
-from .action_rate import (
-    command_rate_decay,
-    decode_raw_target_rate as decode_raw_target_rate_command,
-)
 from engine.config import EnvironmentConfig
 
 
@@ -133,33 +129,10 @@ class G1Env:
         self._policy_action_high = torch.full(
             (self.action_dim,), action_bound, device=self.device
         )
-        rate_limit = torch.tensor(
-            cfg.command_rate_limit,
-            dtype=torch.float32,
-            device=self.device,
-        )
-        if rate_limit.shape != (self.action_dim,):
-            raise ValueError(
-                "environment.command_rate_limit must follow "
-                f"G1_29DOF_ACTION_NAMES and have shape {(self.action_dim,)}, "
-                f"got {tuple(rate_limit.shape)}"
-            )
-        if not bool(torch.isfinite(rate_limit).all()) or bool(
-            (rate_limit <= 0.0).any()
-        ):
-            raise ValueError(
-                "environment.command_rate_limit must be finite and positive"
-            )
-        self.command_rate_limit = rate_limit
-        self.rate_half_life_seconds = float(cfg.rate_half_life_seconds)
-        self.command_rate_decay = command_rate_decay(
-            self.dt,
-            self.rate_half_life_seconds,
-        )
         self.last_action = torch.zeros(
             self.num_envs, self.action_dim, device=self.device
         )
-        self.command_rate = torch.zeros_like(self.last_action)
+        self.last_delta = torch.zeros_like(self.last_action)
         self._action_space = self._build_action_space()
         self._push_interval_step_range = PUSH_INTERVAL_STEP_RANGE
         min_push, max_push = self._push_interval_step_range
@@ -233,40 +206,6 @@ class G1Env:
             self._policy_action_high,
             tolerance=float(tolerance),
         )
-
-    def decode_raw_target_rate(
-        self,
-        raw_target_rate: torch.Tensor,
-        *,
-        active_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Decode one raw policy frame without mutating command state."""
-
-        return decode_raw_target_rate_command(
-            raw_target_rate,
-            self.last_action,
-            self.command_rate,
-            self.command_rate_limit,
-            self._policy_action_low,
-            self._policy_action_high,
-            control_dt=self.dt,
-            decay=self.command_rate_decay,
-            active_mask=active_mask,
-        )
-
-    def step_raw_target_rate(
-        self,
-        raw_target_rate: torch.Tensor,
-        *,
-        active_mask: torch.Tensor | None = None,
-    ):
-        """Decode and execute exactly one physical policy frame."""
-
-        requested_action = self.decode_raw_target_rate(
-            raw_target_rate,
-            active_mask=active_mask,
-        )
-        return self.step(requested_action)
 
     def get_action_joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         joint_pos = self.robot.data.joint_pos.index_select(1, self.action_joint_ids)

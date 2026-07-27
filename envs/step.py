@@ -9,9 +9,25 @@ class MimicStepMixin:
     def step(
         self,
         actions: torch.Tensor,
+        active_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        if active_mask is None:
+            active = torch.ones(
+                self.num_envs,
+                dtype=torch.bool,
+                device=self.device,
+            )
+        else:
+            active = active_mask.to(device=self.device, dtype=torch.bool)
+            if active.shape != (self.num_envs,):
+                raise ValueError(
+                    f"active_mask must have shape {(self.num_envs,)}, "
+                    f"got {tuple(active.shape)}"
+                )
         previous_action = self.last_action.clone()
-        applied_actions = self._apply_action_targets(actions)
+        applied_actions = self._apply_action_targets(
+            torch.where(active.unsqueeze(-1), actions, previous_action)
+        )
         for _ in range(self.decimation):
             self.scene.write_data_to_sim()
             self.sim.step(render=False)
@@ -27,11 +43,19 @@ class MimicStepMixin:
             float(self.motion_frame_delta),
             dtype=torch.float32,
         )
-        next_phase_steps = phase_start_steps + reference_frame_delta.to(dtype=phase_start_steps.dtype)
-        self.episode_steps += 1
-        self._motion_end_mask = next_phase_steps >= (
-            self.motion.num_frames - 1
+        advanced_phase_steps = (
+            phase_start_steps
+            + reference_frame_delta.to(dtype=phase_start_steps.dtype)
         )
+        next_phase_steps = torch.where(
+            active,
+            advanced_phase_steps,
+            phase_start_steps,
+        )
+        self.episode_steps += active.to(dtype=self.episode_steps.dtype)
+        self._motion_end_mask = active & (next_phase_steps >= (
+            self.motion.num_frames - 1
+        ))
         reference_phase_steps = torch.clamp(
             next_phase_steps, max=self.motion.num_frames - 1
         )
@@ -42,16 +66,28 @@ class MimicStepMixin:
             applied_actions, previous_action
         )
         done, done_terms, debug_terms = self.compute_termination()
+        done = done.bool() & active
+        done_terms = {
+            name: value.bool() & active
+            if torch.is_tensor(value)
+            and value.shape == active.shape
+            and value.dtype == torch.bool
+            else value
+            for name, value in done_terms.items()
+        }
+        reward = reward * active.to(dtype=reward.dtype)
         # The returned transition is always the true post-action state. FCAMP
         # resets terminal environments explicitly after recording it.
-        applied_command_rate = (
-            applied_actions - previous_action
-        ) / float(self.dt)
-        self.command_rate.copy_(applied_command_rate)
-        self.last_action.copy_(applied_actions)
+        applied_delta = applied_actions - previous_action
+        self.last_delta[active] = applied_delta[active]
+        self.last_action[active] = applied_actions[active]
         imitation_frame = self.get_imitation_policy_frame()
 
-        tracking_failure = done_terms["anchor_pos_bad"] | done_terms["anchor_ori_bad"] | done_terms["ee_body_bad"]
+        tracking_failure = (
+            done_terms["anchor_pos_bad"]
+            | done_terms["anchor_ori_bad"]
+            | done_terms["ee_body_bad"]
+        )
         self._record_adaptive_failures(tracking_failure, termination_phase_steps)
 
         self._fold_adaptive_sampler()
@@ -59,7 +95,7 @@ class MimicStepMixin:
         # External impulses are interventions on the edge leading to the next
         # returned observation. Never mutate an already terminal transition.
         intervention_edge_mask = self._apply_interval_pushes(
-            eligible_mask=~done.bool()
+            eligible_mask=active & ~done
         )
         observation = self.get_observation()
         info = {
@@ -76,7 +112,7 @@ class MimicStepMixin:
             "imitation_frame": imitation_frame,
             "previous_action": previous_action,
             "applied_action": applied_actions.clone(),
-            "command_rate": applied_command_rate.clone(),
+            "applied_delta": applied_delta.clone(),
         }
         return observation, reward, done, info
 
