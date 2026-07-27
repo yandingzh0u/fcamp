@@ -95,8 +95,8 @@ CONTACT_ALLOWED_SUBSTRINGS = (
     "foot_contact_point",
     "sphere_hand_link",
 )
-OBS_DIM = 200
-CRITIC_OBS_DIM = 315
+OBS_DIM = 229
+CRITIC_OBS_DIM = 344
 UNDESIRED_CONTACT_THRESHOLD = 1.0
 
 

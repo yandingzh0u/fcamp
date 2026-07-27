@@ -13,14 +13,20 @@ class MimicStepMixin:
         reset_horizon: int = 1,
         reference_dt: torch.Tensor | float | None = None,
         physics_substep_actions: torch.Tensor | None = None,
+        command_state: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         previous_action = self.last_action.clone()
+        previous_rate = self.command_rate.clone()
         if physics_substep_actions is not None:
             expected_shape = (self.decimation, self.num_envs, self.action_dim)
             if tuple(physics_substep_actions.shape) != expected_shape:
                 raise ValueError(
                     f"Expected physics_substep_actions {expected_shape}, "
                     f"got {tuple(physics_substep_actions.shape)}"
+                )
+            if command_state is None:
+                raise ValueError(
+                    "physics_substep_actions require an analytic command_state"
                 )
             if getattr(self, "_strict_action_contract", False):
                 self.validate_policy_actions(actions)
@@ -94,10 +100,29 @@ class MimicStepMixin:
         # From this point onward every post-action observation must expose the
         # target that was actually executed. Done envs overwrite this state
         # with their reconstructed reset target inside ``_reset_env_state``.
-        applied_command_rate = (
-            applied_actions - previous_action
-        ) / float(self.dt)
+        if command_state is None:
+            applied_command_rate = (
+                applied_actions - previous_action
+            ) / float(self.dt)
+            applied_command_acceleration = (
+                applied_command_rate - previous_rate
+            ) / float(self.dt)
+        else:
+            applied_command_rate, applied_command_acceleration = command_state
+            expected_shape = (self.num_envs, self.action_dim)
+            for name, value in (
+                ("command_rate", applied_command_rate),
+                ("command_acceleration", applied_command_acceleration),
+            ):
+                if value.shape != expected_shape:
+                    raise ValueError(
+                        f"{name} must have shape {expected_shape}, "
+                        f"got {tuple(value.shape)}"
+                    )
+                if not bool(torch.isfinite(value).all()):
+                    raise ValueError(f"{name} must be finite")
         self.command_rate.copy_(applied_command_rate)
+        self.command_acceleration.copy_(applied_command_acceleration)
         self.last_action.copy_(applied_actions)
         # Capture the true post-action state before any optional reset.  FCAMP
         # normally disables auto-reset within a chunk, while this also makes the
@@ -163,6 +188,7 @@ class MimicStepMixin:
             "previous_action": previous_action,
             "applied_action": applied_actions.clone(),
             "command_rate": applied_command_rate.clone(),
+            "command_acceleration": applied_command_acceleration.clone(),
         }
         if terminal_observation is not None:
             info["final_observation"] = terminal_observation

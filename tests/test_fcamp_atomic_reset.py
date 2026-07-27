@@ -146,15 +146,31 @@ def mimic_env_type(monkeypatch):
 class _Motion:
     def __init__(self, joint_positions: torch.Tensor) -> None:
         self.joint_positions = joint_positions
+        self.joint_pos = joint_positions
         self.fps = 50.0
         self.queries: list[torch.Tensor] = []
+        self.joint_velocities = torch.zeros_like(joint_positions)
+        self.joint_velocities[1:] = (
+            joint_positions[1:] - joint_positions[:-1]
+        ) * self.fps
 
     def clamp_time_steps(self, phases: torch.Tensor) -> torch.Tensor:
         return phases.clamp(0, self.joint_positions.shape[0] - 1)
 
     def get_frame(self, phases: torch.Tensor) -> dict[str, torch.Tensor]:
         self.queries.append(phases.detach().clone())
-        joint_pos = self.joint_positions.index_select(0, phases.long())
+        phase = phases.to(dtype=torch.float32)
+        lower = phase.floor().long()
+        upper = phase.ceil().long()
+        fraction = (phase - lower).unsqueeze(-1)
+        joint_pos = (
+            self.joint_positions.index_select(0, lower) * (1.0 - fraction)
+            + self.joint_positions.index_select(0, upper) * fraction
+        )
+        joint_vel = (
+            self.joint_velocities.index_select(0, lower) * (1.0 - fraction)
+            + self.joint_velocities.index_select(0, upper) * fraction
+        )
         count = phases.numel()
         return {
             "root_pos_w": torch.zeros(count, 3),
@@ -164,7 +180,7 @@ class _Motion:
             "root_lin_vel_w": torch.zeros(count, 3),
             "root_ang_vel_w": torch.zeros(count, 3),
             "joint_pos": joint_pos,
-            "joint_vel": torch.zeros_like(joint_pos),
+            "joint_vel": joint_vel,
         }
 
 
@@ -203,7 +219,8 @@ def _make_env(
     env._failure_recorded = torch.ones(4, dtype=torch.bool)
     env.last_action = torch.full((4, 2), -99.0)
     env.command_rate = torch.full((4, 2), -77.0)
-    env.command_rate_limit = torch.full((2,), 1000.0)
+    env.command_acceleration = torch.full((4, 2), -55.0)
+    env.command_servo_omega = 20.0
     env.action_dim = 2
     env.default_action_joint_pos = torch.tensor(
         [
@@ -283,16 +300,22 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
 
     torch.testing.assert_close(observation, expected)
     torch.testing.assert_close(env.last_action.index_select(0, env_ids), expected)
-    expected_rate = torch.tensor(
-        [
-            [0.0, 0.0],
-            [45.0, 80.0],
-            [-80.0, 130.0],
-        ]
+    reference_velocity = env.motion.joint_velocities.index_select(0, phases)
+    expected_rate = reference_velocity / env.action_scale
+    past_phases = torch.clamp(phases - 1, min=0)
+    expected_acceleration = (
+        reference_velocity
+        - env.motion.joint_velocities.index_select(0, past_phases)
+    ) / (
+        env.dt * env.action_scale
     )
     torch.testing.assert_close(
         env.command_rate.index_select(0, env_ids),
         expected_rate,
+    )
+    torch.testing.assert_close(
+        env.command_acceleration.index_select(0, env_ids),
+        expected_acceleration,
     )
     torch.testing.assert_close(
         env.last_action[0],
@@ -301,6 +324,10 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
     torch.testing.assert_close(
         env.command_rate[0],
         torch.full((2,), -77.0),
+    )
+    torch.testing.assert_close(
+        env.command_acceleration[0],
+        torch.full((2,), -55.0),
     )
     torch.testing.assert_close(env.validated_actions[0], expected)
     torch.testing.assert_close(
@@ -314,7 +341,7 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
     assert env.scene.events == ["reset", "update"]
 
 
-def test_reset_rate_queries_only_absolute_past_for_nonzero_phases(
+def test_reset_command_state_queries_only_current_and_strict_past(
     mimic_env_type,
 ) -> None:
     references = torch.tensor(
@@ -336,8 +363,6 @@ def test_reset_rate_queries_only_absolute_past_for_nonzero_phases(
 
     env.reset_envs(env_ids, phase_indices=phases)
 
-    # First query is the requested reset pose. The rate constructor then asks
-    # only for strict past phases of the nonzero rows; phase zero is omitted.
     assert len(env.motion.queries) == 2
     torch.testing.assert_close(env.motion.queries[0], phases)
     torch.testing.assert_close(env.motion.queries[1], torch.tensor([0.0, 2.0]))
@@ -352,6 +377,71 @@ def test_reset_rate_queries_only_absolute_past_for_nonzero_phases(
         torch.zeros(2),
     )
     assert bool((env.command_rate[env_ids[1:]].abs().sum(dim=-1) > 0.0).all())
+    torch.testing.assert_close(
+        env.command_acceleration[env_ids[0]],
+        torch.zeros(2),
+    )
+    assert bool(
+        (
+            env.command_acceleration[env_ids[1:]].abs().sum(dim=-1)
+            > 0.0
+        ).all()
+    )
+
+
+def test_continuous_reset_command_state_never_queries_future(
+    mimic_env_type,
+) -> None:
+    references = torch.tensor(
+        [
+            [0.0, 0.0],
+            [0.1, -0.2],
+            [0.4, 0.1],
+            [0.8, 0.5],
+        ]
+    )
+    env = _make_env(
+        mimic_env_type,
+        reference_joint_pos=references,
+        strict=True,
+        reset_noise=False,
+    )
+    env_ids = torch.tensor([1, 3])
+    phases = torch.tensor([0.5, 1.75])
+
+    env.reset_envs(env_ids, phase_indices=phases)
+
+    assert len(env.motion.queries) == 2
+    torch.testing.assert_close(env.motion.queries[0], phases)
+    past_phases = torch.tensor([0.0, 0.75])
+    torch.testing.assert_close(env.motion.queries[1], past_phases)
+    assert bool((env.motion.queries[1] < phases).all())
+
+    def interpolate(values: torch.Tensor, at: torch.Tensor) -> torch.Tensor:
+        lower = at.floor().long()
+        upper = at.ceil().long()
+        fraction = (at - lower).unsqueeze(-1)
+        return (
+            values.index_select(0, lower) * (1.0 - fraction)
+            + values.index_select(0, upper) * fraction
+        )
+
+    current_velocity = interpolate(env.motion.joint_velocities, phases)
+    past_velocity = interpolate(env.motion.joint_velocities, past_phases)
+    expected_rate = current_velocity / env.action_scale
+    expected_acceleration = (
+        current_velocity - past_velocity
+    ) / (
+        ((phases - past_phases) / env.motion.fps).unsqueeze(-1)
+        * env.action_scale
+    )
+    torch.testing.assert_close(
+        env.command_rate.index_select(0, env_ids), expected_rate
+    )
+    torch.testing.assert_close(
+        env.command_acceleration.index_select(0, env_ids),
+        expected_acceleration,
+    )
 
 
 def test_pre_contract_reset_is_finite_and_does_not_clamp(

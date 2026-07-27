@@ -169,7 +169,13 @@ def test_static_fcamp_preflight_rejects_old_schema_without_runtime() -> None:
 
     old_payload = {
         **payload,
-        "algo_state": {**state, "fcamp_schema_version": 15},
+        "algo_state": {
+            **state,
+            "fcamp_schema_version": FCAMP_CHECKPOINT_CONTRACT[
+                "fcamp_schema_version"
+            ]
+            - 1,
+        },
     }
     with pytest.raises(ValueError, match="fcamp_schema_version"):
         preflight_static_checkpoint_payload(

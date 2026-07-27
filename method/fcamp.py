@@ -71,7 +71,7 @@ def _masked_stats(prefix: str, values: torch.Tensor, mask: torch.Tensor | None =
 class FCAMP(FlowCPSBase):
     """Full H=4 causal Flow-CPS policy with W=16 temporal discriminator prior."""
 
-    control_parameterization = "raw_target_rate"
+    control_parameterization = "c2_target_rate"
 
     def build(self) -> None:
         cfg = self.cfg
@@ -82,9 +82,8 @@ class FCAMP(FlowCPSBase):
         self.imitation_history_steps = int(amp_cfg.obs_steps)
         super().build()
 
-        # Bounds and carried-rate dynamics exist before the first reset and are
-        # owned solely by the environment.  FCAMP only records the immutable
-        # domain as part of its fresh-checkpoint contract.
+        # Bounds and the complete C2 servo state exist before the first reset
+        # and are owned solely by the environment.
         self.action_low = env.action_low
         self.action_high = env.action_high
         if not bool(env.motion.fcamp_has_runtime_fk):
@@ -229,7 +228,6 @@ class FCAMP(FlowCPSBase):
         tensor_contract = (
             ("action_low", self.action_low),
             ("action_high", self.action_high),
-            ("decoder_command_rate_limit", self.env.command_rate_limit),
         )
         for name, expected in tensor_contract:
             saved = state.get(name)
@@ -247,8 +245,8 @@ class FCAMP(FlowCPSBase):
         scalar_contract = (
             ("decoder_control_dt", float(self.env.dt)),
             (
-                "decoder_command_rate_decay",
-                float(self.env.command_rate_decay),
+                "decoder_command_servo_omega",
+                float(self.env.command_servo_omega),
             ),
         )
         for name, expected in scalar_contract:
@@ -273,11 +271,8 @@ class FCAMP(FlowCPSBase):
                 "action_low": self.action_low.detach().cpu(),
                 "action_high": self.action_high.detach().cpu(),
                 "decoder_control_dt": float(self.env.dt),
-                "decoder_command_rate_decay": float(
-                    self.env.command_rate_decay
-                ),
-                "decoder_command_rate_limit": (
-                    self.env.command_rate_limit.detach().cpu()
+                "decoder_command_servo_omega": float(
+                    self.env.command_servo_omega
                 ),
                 "disc_window_replay": self.disc_window_replay.state_dict(),
                 **FCAMP_CHECKPOINT_CONTRACT,
@@ -342,15 +337,17 @@ class FCAMP(FlowCPSBase):
         offset: int,
     ) -> torch.Tensor:
         batch = current_critic_obs.shape[0]
-        raw_target_rate = raw_z.reshape(batch, self.horizon_h, self.num_act)
-        prefix = torch.zeros_like(raw_target_rate)
+        target_rate_chunk = raw_z.reshape(
+            batch, self.horizon_h, self.num_act
+        )
+        prefix = torch.zeros_like(target_rate_chunk)
         if offset > 0:
-            prefix[:, :offset] = raw_target_rate[:, :offset]
+            prefix[:, :offset] = target_rate_chunk[:, :offset]
         prefix_mask = torch.zeros(
             batch,
             self.horizon_h,
-            device=raw_target_rate.device,
-            dtype=raw_target_rate.dtype,
+            device=target_rate_chunk.device,
+            dtype=target_rate_chunk.dtype,
         )
         if offset > 0:
             prefix_mask[:, :offset] = 1.0
@@ -631,7 +628,7 @@ class FCAMP(FlowCPSBase):
         return next_observation, metrics, transitions
 
     def deployment_chunk(self, obs: torch.Tensor) -> torch.Tensor:
-        """Return the deterministic raw target-rate chunk used by the decoder."""
+        """Return the deterministic physical target-rate chunk."""
 
         if obs.shape[-1] != self.base_actor_obs_dim:
             raise ValueError(
@@ -646,7 +643,7 @@ class FCAMP(FlowCPSBase):
         )
 
     def deterministic_actions(self, obs: torch.Tensor) -> torch.Tensor:
-        """FCAMP's deterministic control payload is raw target rate, not action."""
+        """FCAMP's deterministic payload is target rate, not absolute action."""
 
         return self.deployment_chunk(obs)
 
@@ -656,7 +653,7 @@ class FCAMP(FlowCPSBase):
         reference_dt: torch.Tensor | None,
         active_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
-        return self.env.step_raw_target_rate(
+        return self.env.step_target_rate(
             frame_payload,
             auto_reset=False,
             reference_dt=reference_dt,
@@ -745,11 +742,12 @@ class FCAMP(FlowCPSBase):
         amp_dt_scale = float(env.dt)
         action_abs_max = 0.0
         action_bound_violation_max = 0.0
-        raw_z_abs_max = 0.0
+        target_rate_abs_max = 0.0
         command_rate_abs_max = 0.0
-        command_rate_support_max = 0.0
-        tanh_saturated_count = 0
-        raw_z_active_count = 0
+        command_acceleration_abs_max = 0.0
+        command_jerk_abs_max = 0.0
+        action_projection_count = 0
+        active_action_joint_count = 0
         fk_alignment_abs_max = 0.0
         fk_alignment_abs_sum = 0.0
         fk_alignment_count = 0
@@ -795,8 +793,8 @@ class FCAMP(FlowCPSBase):
                     actor_obs_n
                 )
                 raw_z_chunk = raw_z.view(n_envs, h, self.num_act)
-                raw_z_abs_max = max(
-                    raw_z_abs_max,
+                target_rate_abs_max = max(
+                    target_rate_abs_max,
                     float(raw_z_chunk.abs().max().item()),
                 )
 
@@ -818,7 +816,11 @@ class FCAMP(FlowCPSBase):
                         frame_idx,
                     )
                     raw_z_t = raw_z_chunk[:, frame_idx]
-                    next_obs, task_reward, done, info = env.step_raw_target_rate(
+                    previous_rate = env.command_rate.detach().clone()
+                    previous_acceleration = (
+                        env.command_acceleration.detach().clone()
+                    )
+                    next_obs, task_reward, done, info = env.step_target_rate(
                         raw_z_t,
                         auto_reset=False,
                         active_mask=alive_before,
@@ -826,12 +828,20 @@ class FCAMP(FlowCPSBase):
                     next_critic_obs = env.get_critic_observation()
                     applied_action = info.get("applied_action")
                     command_rate = info.get("command_rate")
-                    if not torch.is_tensor(applied_action) or not torch.is_tensor(
-                        command_rate
+                    command_acceleration = info.get("command_acceleration")
+                    projection_mask = info.get("action_projection_mask")
+                    if not all(
+                        torch.is_tensor(value)
+                        for value in (
+                            applied_action,
+                            command_rate,
+                            command_acceleration,
+                            projection_mask,
+                        )
                     ):
                         raise RuntimeError(
-                            "FCAMP target-rate decoder did not report its applied "
-                            "action and carried command rate"
+                            "FCAMP C2 servo did not report its applied action, "
+                            "carried rate/acceleration, and projection mask"
                         )
                     action_abs_max = max(
                         action_abs_max,
@@ -844,23 +854,34 @@ class FCAMP(FlowCPSBase):
                         float(torch.maximum(below, above).max().item()),
                     )
                     if bool(alive_before.any()):
-                        active_raw_z = raw_z_t[alive_before]
-                        tanh_saturated_count += int(
-                            (torch.tanh(active_raw_z).abs() >= 0.99).sum().item()
-                        )
-                        raw_z_active_count += int(active_raw_z.numel())
                         active_rate = command_rate[alive_before]
                         command_rate_abs_max = max(
                             command_rate_abs_max,
                             float(active_rate.abs().max().item()),
                         )
-                        rate_support = (
-                            active_rate.abs()
-                            / env.command_rate_limit.view(1, -1)
+                        active_acceleration = command_acceleration[alive_before]
+                        command_acceleration_abs_max = max(
+                            command_acceleration_abs_max,
+                            float(active_acceleration.abs().max().item()),
                         )
-                        command_rate_support_max = max(
-                            command_rate_support_max,
-                            float(rate_support.max().item()),
+                        initial_jerk = (
+                            float(env.command_servo_omega) ** 2
+                            * (raw_z_t - previous_rate)
+                            - 2.0
+                            * float(env.command_servo_omega)
+                            * previous_acceleration
+                        )
+                        command_jerk_abs_max = max(
+                            command_jerk_abs_max,
+                            float(
+                                initial_jerk[alive_before].abs().max().item()
+                            ),
+                        )
+                        action_projection_count += int(
+                            projection_mask[alive_before].sum().item()
+                        )
+                        active_action_joint_count += int(
+                            projection_mask[alive_before].numel()
                         )
 
                     # Reset installs a complete phase-matched demo predecessor
@@ -1210,12 +1231,13 @@ class FCAMP(FlowCPSBase):
             "collection_start_phases": collection_start_phases,
             "action_abs_max": action_abs_max,
             "action_bound_violation_max": action_bound_violation_max,
-            "raw_z_abs_max": raw_z_abs_max,
-            "raw_z_tanh_saturation_fraction": float(
-                tanh_saturated_count / max(raw_z_active_count, 1)
-            ),
+            "target_rate_abs_max": target_rate_abs_max,
             "command_rate_abs_max": command_rate_abs_max,
-            "command_rate_support_max": command_rate_support_max,
+            "command_acceleration_abs_max": command_acceleration_abs_max,
+            "command_jerk_abs_max": command_jerk_abs_max,
+            "action_projection_fraction": float(
+                action_projection_count / max(active_action_joint_count, 1)
+            ),
             "fk_alignment_abs_max": fk_alignment_abs_max,
             "fk_alignment_abs_mean": (
                 fk_alignment_abs_sum / max(fk_alignment_count, 1)
@@ -1638,7 +1660,7 @@ class FCAMP(FlowCPSBase):
                         adv = advantages[sub]
                         mask = valid[sub].to(dtype=delta.dtype)
                         # The frame-major Cholesky gives the exact conditional
-                        # density of each executed raw target-rate frame.  PPO
+                        # density of each executed target-rate frame.  PPO
                         # therefore constrains the final physical control
                         # variable, never an internal Flow integration path.
                         log_ratio = delta
@@ -2802,17 +2824,20 @@ class FCAMP(FlowCPSBase):
                 "act/policy_bound_violation_max": float(
                     rollout["action_bound_violation_max"]
                 ),
-                "control/raw_z_abs_max": float(
-                    rollout["raw_z_abs_max"]
-                ),
-                "control/raw_z_tanh_saturation_fraction": float(
-                    rollout["raw_z_tanh_saturation_fraction"]
+                "control/target_rate_abs_max": float(
+                    rollout["target_rate_abs_max"]
                 ),
                 "control/command_rate_abs_max": float(
                     rollout["command_rate_abs_max"]
                 ),
-                "control/command_rate_support_max": float(
-                    rollout["command_rate_support_max"]
+                "control/command_acceleration_abs_max": float(
+                    rollout["command_acceleration_abs_max"]
+                ),
+                "control/command_jerk_abs_max": float(
+                    rollout["command_jerk_abs_max"]
+                ),
+                "control/action_projection_fraction": float(
+                    rollout["action_projection_fraction"]
                 ),
                 "disc_contract/fk_alignment_abs_max": float(
                     rollout["fk_alignment_abs_max"]
@@ -2917,9 +2942,11 @@ class FCAMP(FlowCPSBase):
             f"mean_scale={metrics.get('policy/flow_mean_raw_scale', float('nan')):.6f} "
             f"shape={metrics.get('policy/cps_shape_norm', float('nan')):.4f}/"
             f"{metrics.get('policy/cps_shape_radius', float('nan')):.4f} "
-            f"raw_z_max={metrics.get('control/raw_z_abs_max', float('nan')):.4f} "
-            f"tanh_sat={metrics.get('control/raw_z_tanh_saturation_fraction', float('nan')):.6f} "
-            f"rate_support={metrics.get('control/command_rate_support_max', float('nan')):.4f} "
+            f"target_rate_max={metrics.get('control/target_rate_abs_max', float('nan')):.4f} "
+            f"rate_max={metrics.get('control/command_rate_abs_max', float('nan')):.4f} "
+            f"accel_max={metrics.get('control/command_acceleration_abs_max', float('nan')):.4f} "
+            f"jerk_max={metrics.get('control/command_jerk_abs_max', float('nan')):.4f} "
+            f"projection={metrics.get('control/action_projection_fraction', float('nan')):.6f} "
             f"bound_violation={metrics.get('act/policy_bound_violation_max', float('nan')):.2e}",
             flush=True,
         )
@@ -3023,14 +3050,14 @@ class FCAMP(FlowCPSBase):
             flush=True,
         )
         print(
-            "[CONTROL] variable=raw_target_rate "
+            "[CONTROL] variable=linear_target_rate "
             "decoder_owner=environment mean=initial_cps_standardized_flow "
             "covariance=bounded_single_final_dense_cholesky "
-            "metric=finite_h_carried_rate_response "
-            f"dt={self.env.dt:.5f} rho={self.env.command_rate_decay:.8f} "
-            f"half_life={self.env.rate_half_life_seconds:.5f}s "
-            f"rate_limit=[{float(self.env.command_rate_limit.min().item()):.3f},"
-            f"{float(self.env.command_rate_limit.max().item()):.3f}]/s "
+            "decoder=exact_critical_c2_rate_servo "
+            "metric=finite_h_carried_rate_acceleration_response "
+            f"dt={self.env.dt:.5f} "
+            f"physics_dt={self.env.physics_dt:.5f} "
+            f"omega={self.env.command_servo_omega:.5f}/s "
             f"physical_rms={self.cps_physical_rms:.5f}",
             flush=True,
         )

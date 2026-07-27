@@ -36,8 +36,7 @@ class EnvironmentConfig:
     adaptive_predecessor_lookback_bins: int
     action_rate_weight: float
     policy_action_bound: float
-    command_rate_limit: tuple[float, ...]
-    rate_half_life_seconds: float
+    command_servo_omega: float
     terminate_on_motion_end: bool
     motion_reference_mode: str
     root_velocity_mode: str
@@ -204,11 +203,9 @@ def _construct(cls, values: dict[str, Any]):
         "hidden_dims",
         "encoder_hidden_dims",
         "head_hidden_dims",
-        "command_rate_limit",
     ):
         if name in converted:
-            converter = float if name == "command_rate_limit" else int
-            converted[name] = tuple(converter(value) for value in converted[name])
+            converted[name] = tuple(int(value) for value in converted[name])
     return cls(**converted)
 
 
@@ -326,19 +323,12 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError(
             "environment.policy_action_bound must be finite and positive"
         )
-    if len(env.command_rate_limit) != 29 or any(
-        not math.isfinite(limit) or limit <= 0.0
-        for limit in env.command_rate_limit
-    ):
-        raise ValueError(
-            "environment.command_rate_limit must contain 29 finite positive values"
-        )
     if (
-        not math.isfinite(env.rate_half_life_seconds)
-        or env.rate_half_life_seconds <= 0.0
+        not math.isfinite(env.command_servo_omega)
+        or env.command_servo_omega <= 0.0
     ):
         raise ValueError(
-            "environment.rate_half_life_seconds must be finite and positive"
+            "environment.command_servo_omega must be finite and positive"
         )
     if env.platform_profile not in {"custom", "g1_largebox_50hz"}:
         raise ValueError("environment.platform_profile must be custom or g1_largebox_50hz")

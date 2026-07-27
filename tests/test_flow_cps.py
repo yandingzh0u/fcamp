@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import torch
 
 from components.rollout.flow_cps_base import FlowCPSBase
-from envs.action_rate import decode_raw_target_rate
+from envs.action_rate import advance_rate_servo
 from models.flow_cps_policy import FlowMatchingPolicy
 
 
@@ -29,8 +29,7 @@ class _CPSGeometryEnv:
         self.device = torch.device("cpu")
         self.max_episode_steps = 20
         self.dt = 0.02
-        self.command_rate_decay = 2.0 ** (-self.dt / 0.08)
-        self.command_rate_limit = torch.full((action_dim,), 5.0)
+        self.command_servo_omega = 20.0
 
     def adaptive_sampling_stats(self) -> dict[str, float]:
         return {}
@@ -309,39 +308,51 @@ def test_cps_covariance_shape_has_hard_condition_bound() -> None:
     )
 
 
-def test_cps_physical_response_matches_rate_decoder_jacobian() -> None:
+def test_cps_physical_response_matches_exact_c2_servo_jacobian() -> None:
     env = _CPSGeometryEnv()
     algo = _build_algo(env)
     horizon = algo.horizon_h
     action_dim = env.action_dim
-    dt = env.dt
-    rho = env.command_rate_decay
-    rate_limit = env.command_rate_limit
 
-    def physical_features(flat_raw_z: torch.Tensor) -> torch.Tensor:
-        raw_z = flat_raw_z.view(horizon, action_dim)
+    def physical_features(flat_target_rate: torch.Tensor) -> torch.Tensor:
+        target_rate = flat_target_rate.view(horizon, action_dim)
+        action = torch.zeros(action_dim)
         rate = torch.zeros(action_dim)
+        acceleration = torch.zeros(action_dim)
         previous_delta = torch.zeros(action_dim)
         deltas = []
         d2 = []
         for frame in range(horizon):
-            desired_rate = rate_limit * torch.tanh(raw_z[frame])
-            rate = rho * rate + (1.0 - rho) * desired_rate
-            delta = dt * rate
+            next_action, rate, acceleration = advance_rate_servo(
+                target_rate[frame],
+                action,
+                rate,
+                acceleration,
+                dt=env.dt,
+                omega=env.command_servo_omega,
+            )
+            delta = next_action - action
             deltas.append(delta)
             d2.append(delta - previous_delta)
+            action = next_action
             previous_delta = delta
-        tail = torch.stack(
-            [
-                dt * (rho ** (frame + 1)) * rate
-                for frame in range(horizon)
-            ]
-        )
+        tail = []
+        for _ in range(horizon):
+            next_action, rate, acceleration = advance_rate_servo(
+                torch.zeros_like(rate),
+                action,
+                rate,
+                acceleration,
+                dt=env.dt,
+                omega=env.command_servo_omega,
+            )
+            tail.append(next_action - action)
+            action = next_action
         return torch.cat(
             [
                 torch.stack(deltas).reshape(-1) / math.sqrt(float(horizon)),
                 torch.stack(d2).reshape(-1) / math.sqrt(float(horizon)),
-                tail.reshape(-1) / math.sqrt(float(horizon)),
+                torch.stack(tail).reshape(-1) / math.sqrt(float(horizon)),
             ]
         )
 
@@ -356,10 +367,9 @@ def test_cps_physical_response_matches_rate_decoder_jacobian() -> None:
     )
 
 
-def test_true_nonlinear_decoder_noise_respects_physical_rms_budget() -> None:
+def test_c2_servo_noise_matches_physical_rms_budget() -> None:
     torch.manual_seed(23)
     env = _CPSGeometryEnv(action_dim=3)
-    env.command_rate_limit = torch.tensor([80.0, 100.0, 120.0])
     algo = _build_algo(env, cps_physical_rms=0.05)
     chol, _ = algo._effective_cps_cholesky(
         device=env.device,
@@ -371,24 +381,20 @@ def test_true_nonlinear_decoder_noise_respects_physical_rms_budget() -> None:
     ).view(samples, algo.horizon_h, env.action_dim)
     action = torch.zeros(samples, env.action_dim)
     rate = torch.zeros_like(action)
+    acceleration = torch.zeros_like(action)
     previous_delta = torch.zeros_like(action)
-    low = torch.full((env.action_dim,), -5.0)
-    high = torch.full((env.action_dim,), 5.0)
     deltas = []
     d2 = []
     for frame in range(algo.horizon_h):
-        next_action = decode_raw_target_rate(
+        next_action, rate, acceleration = advance_rate_servo(
             raw_z[:, frame],
             action,
             rate,
-            env.command_rate_limit,
-            low,
-            high,
-            control_dt=env.dt,
-            decay=env.command_rate_decay,
+            acceleration,
+            dt=env.dt,
+            omega=env.command_servo_omega,
         )
         delta = next_action - action
-        rate = delta / env.dt
         action = next_action
         deltas.append(delta)
         d2.append(delta - previous_delta)
@@ -396,18 +402,15 @@ def test_true_nonlinear_decoder_noise_respects_physical_rms_budget() -> None:
 
     tail = []
     for _ in range(algo.horizon_h):
-        next_action = decode_raw_target_rate(
+        next_action, rate, acceleration = advance_rate_servo(
             torch.zeros_like(action),
             action,
             rate,
-            env.command_rate_limit,
-            low,
-            high,
-            control_dt=env.dt,
-            decay=env.command_rate_decay,
+            acceleration,
+            dt=env.dt,
+            omega=env.command_servo_omega,
         )
         delta = next_action - action
-        rate = delta / env.dt
         action = next_action
         tail.append(delta)
 
@@ -415,9 +418,9 @@ def test_true_nonlinear_decoder_noise_respects_physical_rms_budget() -> None:
         torch.stack(group, dim=1).square().mean()
         for group in (deltas, d2, tail)
     ]
-    nonlinear_rms = torch.sqrt(sum(group_rms_sq) / 3.0)
-    assert float(nonlinear_rms.item()) <= 0.0505
-    assert float(nonlinear_rms.item()) >= 0.0475
+    sampled_rms = torch.sqrt(sum(group_rms_sq) / 3.0)
+    assert float(sampled_rms.item()) <= 0.0505
+    assert float(sampled_rms.item()) >= 0.0495
 
 
 def _causal_raw_target_grad_leak(
@@ -526,7 +529,7 @@ def test_causal_velocity_future_token_does_not_change_earlier_frames() -> None:
     assert not torch.equal(velocity[:, 3], changed_velocity[:, 3])
 
 
-def test_policy_output_is_frame_major_raw_target_rate() -> None:
+def test_policy_output_is_frame_major_target_rate() -> None:
     policy = FlowMatchingPolicy(
         obs_dim=5,
         action_dim=3,

@@ -249,8 +249,7 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
     algo.action_high = torch.tensor([5.0, 5.0])
     algo.env = SimpleNamespace(
         dt=0.02,
-        command_rate_decay=2.0 ** (-0.02 / 0.08),
-        command_rate_limit=torch.tensor([80.0, 40.0]),
+        command_servo_omega=20.0,
     )
 
     valid_state = {
@@ -259,11 +258,8 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
         "action_low": algo.action_low.clone(),
         "action_high": algo.action_high.clone(),
         "decoder_control_dt": float(algo.env.dt),
-        "decoder_command_rate_decay": float(
-            algo.env.command_rate_decay
-        ),
-        "decoder_command_rate_limit": (
-            algo.env.command_rate_limit.clone()
+        "decoder_command_servo_omega": float(
+            algo.env.command_servo_omega
         ),
     }
     algo.validate_checkpoint_payload({"algo_state": valid_state})
@@ -282,7 +278,7 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
         with pytest.raises(ValueError, match=name):
             algo.validate_checkpoint_payload({"algo_state": mismatched})
 
-    for historical_schema in (8, 9, 11, 13, 14, 15):
+    for historical_schema in (8, 9, 11, 13, 14, 15, 16):
         historical = dict(valid_state)
         historical["fcamp_schema_version"] = historical_schema
         with pytest.raises(ValueError, match="fcamp_schema_version"):
@@ -304,8 +300,7 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
 
     decoder_mismatches = {
         "decoder_control_dt": 0.01,
-        "decoder_command_rate_decay": 0.5,
-        "decoder_command_rate_limit": torch.tensor([80.0, 41.0]),
+        "decoder_command_servo_omega": 10.0,
     }
     for name, mismatched_value in decoder_mismatches.items():
         mismatched = dict(valid_state)

@@ -21,6 +21,9 @@ def test_fcamp_config_is_h4_w16_flow_cps() -> None:
     assert cfg.parameters.flow_steps == 4
     assert cfg.parameters.cps_physical_rms == 0.05
     assert cfg.parameters.cps_trainable is True
+    assert cfg.environment.command_servo_omega == 20.0
+    assert "command_rate_limit" not in asdict(cfg.environment)
+    assert "rate_half_life_seconds" not in asdict(cfg.environment)
     assert cfg.parameters.desired_kl == 0.01
     assert cfg.parameters.policy_lr == 0.0003
     assert cfg.parameters.value_lr == 0.0003
@@ -30,6 +33,15 @@ def test_fcamp_config_is_h4_w16_flow_cps() -> None:
     assert cfg.parameters.credit.integrate_amp_reward_dt is True
     assert cfg.parameters.streams.phase0_fraction == 0.10
     assert cfg.training.max_updates == 500
+
+
+def test_fcamp_requires_positive_finite_servo_frequency() -> None:
+    for value in ("0", "-1", ".inf"):
+        with pytest.raises(ValueError, match="command_servo_omega"):
+            load_config(
+                ROOT / "configs" / "fcamp_largebox.yaml",
+                [f"environment.command_servo_omega={value}"],
+            )
 
 
 def test_fcamp_rejects_negative_discriminator_warmup_rollouts() -> None:

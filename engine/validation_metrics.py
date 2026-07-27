@@ -4,6 +4,8 @@ import math
 
 import torch
 
+from envs.action_rate import advance_rate_servo
+
 
 class ChunkBoundaryDiagnostics:
     """Collect primitive-level chunk diagnostics without changing control.
@@ -18,6 +20,7 @@ class ChunkBoundaryDiagnostics:
     _DISTRIBUTIONS = (
         "action_delta",
         "action_d2",
+        "action_d3",
         "joint_vel_jump",
         "root_ang_vel_jump",
     )
@@ -53,9 +56,13 @@ class ChunkBoundaryDiagnostics:
         self.device = initial_action.device
         self._previous_action = initial_action.detach().clone()
         self._previous_action_delta = torch.zeros_like(initial_action)
+        self._previous_action_d2 = torch.zeros_like(initial_action)
         self._previous_joint_vel = initial_joint_vel.detach().clone()
         self._previous_root_ang_vel = initial_root_ang_vel.detach().clone()
         self._has_previous_action_delta = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._has_previous_action_d2 = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
         self._episode_steps = torch.zeros(
@@ -100,9 +107,11 @@ class ChunkBoundaryDiagnostics:
             raise ValueError("reset initial_root_ang_vel shape does not match accumulator state")
         self._previous_action[selected] = initial_action[selected]
         self._previous_action_delta[selected] = 0.0
+        self._previous_action_d2[selected] = 0.0
         self._previous_joint_vel[selected] = initial_joint_vel[selected]
         self._previous_root_ang_vel[selected] = initial_root_ang_vel[selected]
         self._has_previous_action_delta[selected] = False
+        self._has_previous_action_d2[selected] = False
         self._episode_steps[selected] = 0
 
     def update(
@@ -168,14 +177,20 @@ class ChunkBoundaryDiagnostics:
         boundary = active & (self._episode_steps > 0) & (offsets == 0)
         internal = active & (self._episode_steps > 0) & (offsets != 0)
 
+        previous_delta_valid = self._has_previous_action_delta.clone()
         action_delta_vector = action - self._previous_action
         action_delta = action_delta_vector.abs().mean(dim=-1)
-        action_d2 = (action_delta_vector - self._previous_action_delta).abs().mean(dim=-1)
+        action_d2_vector = action_delta_vector - self._previous_action_delta
+        action_d2 = action_d2_vector.abs().mean(dim=-1)
+        action_d3 = (
+            action_d2_vector - self._previous_action_d2
+        ).abs().mean(dim=-1)
         joint_vel_jump = (joint_vel - self._previous_joint_vel).abs().mean(dim=-1)
         root_ang_vel_jump = (root_ang_vel - self._previous_root_ang_vel).abs().mean(dim=-1)
         values = {
             "action_delta": action_delta,
             "action_d2": action_d2,
+            "action_d3": action_d3,
             "joint_vel_jump": joint_vel_jump,
             "root_ang_vel_jump": root_ang_vel_jump,
         }
@@ -190,6 +205,8 @@ class ChunkBoundaryDiagnostics:
                 # an episode because there is no preceding action delta.
                 if name == "action_d2":
                     mask = mask & self._has_previous_action_delta
+                elif name == "action_d3":
+                    mask = mask & self._has_previous_action_d2
                 if bool(mask.any()):
                     self._values[name][category].append(value[mask].detach().clone())
 
@@ -212,9 +229,11 @@ class ChunkBoundaryDiagnostics:
 
         self._previous_action[active] = action[active]
         self._previous_action_delta[active] = action_delta_vector[active]
+        self._previous_action_d2[active] = action_d2_vector[active]
         self._previous_joint_vel[active] = joint_vel[active]
         self._previous_root_ang_vel[active] = root_ang_vel[active]
         self._has_previous_action_delta[active] = True
+        self._has_previous_action_d2[active] = previous_delta_valid[active]
         self._episode_steps[active] += 1
 
     def metrics(self, prefix: str = "validation") -> dict[str, float]:
@@ -257,28 +276,23 @@ class ChunkBoundaryDiagnostics:
         return selected
 
 
-class RateControllerDiagnostics:
-    """Diagnose the one-pole target-rate decoder without changing control.
-
-    FCAMP predicts a raw target rate ``z``.  For an unprojected action, the
-    decoder implies the exact causal identity
-
-    ``d2(action) = dt * (1 - decay) * (rate_limit * tanh(z) - previous_rate)``.
-
-    The first transition after reset is excluded because a reference second
-    difference needs two in-episode reference deltas.  This also keeps offset
-    zero restricted to real chunk boundaries instead of mixing in reset.
-    """
+class C2ServoDiagnostics:
+    """Measure the exact C2 target-rate servo and its chunk-offset behavior."""
 
     _VALUES = (
         "target_rate_abs",
-        "target_rate_support",
         "previous_command_rate_abs",
-        "previous_command_rate_support",
+        "previous_command_acceleration_abs",
+        "actual_command_acceleration_abs",
         "rate_error_abs",
+        "initial_jerk_abs",
+        "command_acceleration_delta_abs",
         "predicted_action_d2_abs",
         "actual_action_d2_abs",
         "reference_action_d2_abs",
+        "predicted_action_d3_abs",
+        "actual_action_d3_abs",
+        "reference_action_d3_abs",
         "prediction_residual_abs",
         "projection_joint_fraction",
     )
@@ -288,21 +302,25 @@ class RateControllerDiagnostics:
         *,
         horizon: int,
         control_dt: float,
-        decay: float,
+        omega: float,
+        initial_action: torch.Tensor,
         initial_reference_action: torch.Tensor,
-        command_rate_limit: torch.Tensor,
         transition_end_phase_window: tuple[float, float] = (280.0, 310.0),
     ) -> None:
         if int(horizon) <= 0:
             raise ValueError(f"horizon must be positive, got {horizon}")
-        if initial_reference_action.ndim != 2:
-            raise ValueError("initial_reference_action must be rank 2")
+        if initial_action.ndim != 2:
+            raise ValueError("initial_action must be rank 2")
+        if initial_reference_action.shape != initial_action.shape:
+            raise ValueError(
+                "initial_reference_action must match initial_action"
+            )
         control_dt = float(control_dt)
-        decay = float(decay)
+        omega = float(omega)
         if not math.isfinite(control_dt) or control_dt <= 0.0:
             raise ValueError("control_dt must be finite and positive")
-        if not math.isfinite(decay) or not 0.0 < decay < 1.0:
-            raise ValueError("decay must lie strictly between zero and one")
+        if not math.isfinite(omega) or omega <= 0.0:
+            raise ValueError("omega must be finite and positive")
         phase_low, phase_high = map(float, transition_end_phase_window)
         if (
             not math.isfinite(phase_low)
@@ -315,39 +333,40 @@ class RateControllerDiagnostics:
 
         self.horizon = int(horizon)
         self.control_dt = control_dt
-        self.decay = decay
-        self.num_envs, self.action_dim = initial_reference_action.shape
-        self.device = initial_reference_action.device
-        self.dtype = initial_reference_action.dtype
+        self.omega = omega
+        self.num_envs, self.action_dim = initial_action.shape
+        self.device = initial_action.device
         self.phase_low = phase_low
         self.phase_high = phase_high
         self._phase_label = (
             f"transition_end_phase{_metric_number(phase_low)}_{_metric_number(phase_high)}"
         )
-        if command_rate_limit.shape != (self.action_dim,):
-            raise ValueError(
-                "command_rate_limit must have shape "
-                f"{(self.action_dim,)}, got {tuple(command_rate_limit.shape)}"
-            )
-        if (
-            not bool(torch.isfinite(command_rate_limit).all())
-            or bool((command_rate_limit <= 0.0).any())
-        ):
-            raise ValueError("command_rate_limit must be finite and positive")
-        self._command_rate_limit = command_rate_limit.to(
-            device=self.device, dtype=self.dtype
-        ).detach().clone()
-        self._previous_reference_action = initial_reference_action.detach().clone()
-        self._previous_reference_delta = torch.zeros_like(initial_reference_action)
-        self._has_previous_reference_delta = torch.zeros(
+        self._previous_action = initial_action.detach().clone()
+        self._previous_action_delta = torch.zeros_like(initial_action)
+        self._previous_action_d2 = torch.zeros_like(initial_action)
+        self._previous_reference_action = (
+            initial_reference_action.detach().clone()
+        )
+        self._previous_reference_delta = torch.zeros_like(initial_action)
+        self._previous_reference_d2 = torch.zeros_like(initial_action)
+        self._has_previous_action_delta = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
+        self._has_previous_action_d2 = torch.zeros_like(
+            self._has_previous_action_delta
+        )
+        self._has_previous_reference_delta = torch.zeros_like(
+            self._has_previous_action_delta
+        )
+        self._has_previous_reference_d2 = torch.zeros_like(
+            self._has_previous_action_delta
+        )
         self._tracked_offsets = max(4, self.horizon)
-        self._offset_values: dict[str, list[list[torch.Tensor]]] = {
+        self._offset_values = {
             name: [[] for _ in range(self._tracked_offsets)]
             for name in self._VALUES
         }
-        self._phase_offset_values: dict[str, list[list[torch.Tensor]]] = {
+        self._phase_offset_values = {
             name: [[] for _ in range(self._tracked_offsets)]
             for name in self._VALUES
         }
@@ -358,23 +377,49 @@ class RateControllerDiagnostics:
         active_mask: torch.Tensor,
         chunk_offset: int | torch.Tensor,
         transition_end_phase_steps: torch.Tensor,
-        raw_target_rate: torch.Tensor,
+        target_rate: torch.Tensor,
+        previous_action: torch.Tensor,
         previous_command_rate: torch.Tensor,
+        previous_command_acceleration: torch.Tensor,
+        actual_action: torch.Tensor,
         actual_command_rate: torch.Tensor,
+        actual_command_acceleration: torch.Tensor,
+        action_projection_mask: torch.Tensor,
         reference_action: torch.Tensor,
     ) -> None:
         active = self._validate_mask(active_mask)
         expected = (self.num_envs, self.action_dim)
         for name, value in (
-            ("raw_target_rate", raw_target_rate),
+            ("target_rate", target_rate),
+            ("previous_action", previous_action),
             ("previous_command_rate", previous_command_rate),
+            (
+                "previous_command_acceleration",
+                previous_command_acceleration,
+            ),
+            ("actual_action", actual_action),
             ("actual_command_rate", actual_command_rate),
+            (
+                "actual_command_acceleration",
+                actual_command_acceleration,
+            ),
             ("reference_action", reference_action),
         ):
             if value.shape != expected:
                 raise ValueError(
                     f"{name} must have shape {expected}, got {tuple(value.shape)}"
                 )
+        if action_projection_mask.shape != expected:
+            raise ValueError(
+                "action_projection_mask must have shape "
+                f"{expected}, got {tuple(action_projection_mask.shape)}"
+            )
+        if not torch.equal(
+            previous_action[active], self._previous_action[active]
+        ):
+            raise RuntimeError(
+                "validation previous_action differs from servo history"
+            )
 
         phases = transition_end_phase_steps.to(
             device=self.device, dtype=torch.float32
@@ -385,97 +430,114 @@ class RateControllerDiagnostics:
                 f"{self.num_envs} values, got {tuple(phases.shape)}"
             )
 
-        rate_limit = self._command_rate_limit
-        target_rate = rate_limit * torch.tanh(raw_target_rate)
-        rate_error = target_rate - previous_command_rate
-        predicted_action_d2 = (
-            self.control_dt * (1.0 - self.decay) * rate_error
+        predicted_action, _, _ = advance_rate_servo(
+            target_rate,
+            previous_action,
+            previous_command_rate,
+            previous_command_acceleration,
+            dt=self.control_dt,
+            omega=self.omega,
         )
-        actual_action_d2 = self.control_dt * (
-            actual_command_rate - previous_command_rate
-        )
-        prediction_residual = actual_action_d2 - predicted_action_d2
+        predicted_delta = predicted_action - previous_action
+        actual_delta = actual_action - previous_action
+        predicted_d2 = predicted_delta - self._previous_action_delta
+        actual_d2 = actual_delta - self._previous_action_delta
+        predicted_d3 = predicted_d2 - self._previous_action_d2
+        actual_d3 = actual_d2 - self._previous_action_d2
+        prediction_residual = actual_action - predicted_action
 
         reference_delta = reference_action - self._previous_reference_action
-        reference_action_d2 = reference_delta - self._previous_reference_delta
-        # Test projection in normalized-action units.  This tolerance is well
-        # above float32 subtraction noise but far below a meaningful clamp.
-        projection_joint_fraction = (
-            prediction_residual.abs() > 1.0e-5
-        ).float().mean(dim=-1)
+        reference_d2 = reference_delta - self._previous_reference_delta
+        reference_d3 = reference_d2 - self._previous_reference_d2
+        rate_error = target_rate - previous_command_rate
+        initial_jerk = (
+            self.omega**2 * rate_error
+            - 2.0 * self.omega * previous_command_acceleration
+        )
         values = {
             "target_rate_abs": target_rate.abs().mean(dim=-1),
-            "target_rate_support": (
-                target_rate / rate_limit
-            ).abs().mean(dim=-1),
-            "previous_command_rate_abs": previous_command_rate.abs().mean(dim=-1),
-            "previous_command_rate_support": (
-                previous_command_rate / rate_limit
-            ).abs().mean(dim=-1),
+            "previous_command_rate_abs": (
+                previous_command_rate.abs().mean(dim=-1)
+            ),
+            "previous_command_acceleration_abs": (
+                previous_command_acceleration.abs().mean(dim=-1)
+            ),
+            "actual_command_acceleration_abs": (
+                actual_command_acceleration.abs().mean(dim=-1)
+            ),
             "rate_error_abs": rate_error.abs().mean(dim=-1),
-            "predicted_action_d2_abs": predicted_action_d2.abs().mean(dim=-1),
-            "actual_action_d2_abs": actual_action_d2.abs().mean(dim=-1),
-            "reference_action_d2_abs": reference_action_d2.abs().mean(dim=-1),
-            "prediction_residual_abs": prediction_residual.abs().mean(dim=-1),
-            "projection_joint_fraction": projection_joint_fraction,
+            "initial_jerk_abs": initial_jerk.abs().mean(dim=-1),
+            "command_acceleration_delta_abs": (
+                actual_command_acceleration
+                - previous_command_acceleration
+            ).abs().mean(dim=-1),
+            "predicted_action_d2_abs": predicted_d2.abs().mean(dim=-1),
+            "actual_action_d2_abs": actual_d2.abs().mean(dim=-1),
+            "reference_action_d2_abs": reference_d2.abs().mean(dim=-1),
+            "predicted_action_d3_abs": predicted_d3.abs().mean(dim=-1),
+            "actual_action_d3_abs": actual_d3.abs().mean(dim=-1),
+            "reference_action_d3_abs": reference_d3.abs().mean(dim=-1),
+            "prediction_residual_abs": (
+                prediction_residual.abs().mean(dim=-1)
+            ),
+            "projection_joint_fraction": action_projection_mask.to(
+                device=self.device, dtype=torch.float32
+            ).mean(dim=-1),
         }
 
-        # A terminal transition remains a valid sample.  Later transitions for
-        # that environment are removed by active_mask in the caller.
-        eligible = active & self._has_previous_reference_delta
+        eligible = (
+            active
+            & self._has_previous_action_d2
+            & self._has_previous_reference_d2
+        )
         in_phase_window = (
             eligible
             & (phases >= self.phase_low)
             & (phases <= self.phase_high)
         )
-        if torch.is_tensor(chunk_offset):
-            offsets = self._offset_tensor(chunk_offset)
-            offset_masks = (
-                (
-                    offset,
-                    eligible & (offsets == offset),
-                    in_phase_window & (offsets == offset),
-                )
-                for offset in range(self._tracked_offsets)
-            )
-        else:
-            offset = int(chunk_offset)
-            if offset < 0 or offset >= self.horizon:
-                raise ValueError(
-                    f"chunk offsets must lie in [0, {self.horizon - 1}]"
-                )
-            offset_masks = ((offset, eligible, in_phase_window),)
-        for offset, offset_mask, phase_offset_mask in offset_masks:
-            has_offset = bool(offset_mask.any())
-            has_phase_offset = bool(phase_offset_mask.any())
-            if not has_offset and not has_phase_offset:
+        offsets = self._offset_tensor(chunk_offset)
+        for offset in range(self._tracked_offsets):
+            offset_mask = eligible & (offsets == offset)
+            phase_offset_mask = in_phase_window & (offsets == offset)
+            if not bool(offset_mask.any()) and not bool(
+                phase_offset_mask.any()
+            ):
                 continue
             for name, value in values.items():
-                if has_offset:
+                if bool(offset_mask.any()):
                     self._offset_values[name][offset].append(
                         value[offset_mask].detach().clone()
                     )
-                if has_phase_offset:
+                if bool(phase_offset_mask.any()):
                     self._phase_offset_values[name][offset].append(
                         value[phase_offset_mask].detach().clone()
                     )
 
+        had_action_delta = self._has_previous_action_delta.clone()
+        had_reference_delta = self._has_previous_reference_delta.clone()
+        self._previous_action[active] = actual_action[active]
+        self._previous_action_delta[active] = actual_delta[active]
+        self._previous_action_d2[active] = actual_d2[active]
         self._previous_reference_action[active] = reference_action[active]
         self._previous_reference_delta[active] = reference_delta[active]
+        self._previous_reference_d2[active] = reference_d2[active]
+        self._has_previous_action_delta[active] = True
+        self._has_previous_action_d2[active] = had_action_delta[active]
         self._has_previous_reference_delta[active] = True
+        self._has_previous_reference_d2[active] = had_reference_delta[active]
 
     def metrics(self, prefix: str = "validation") -> dict[str, float]:
         metrics: dict[str, float] = {}
         self._add_group_metrics(
             metrics,
             prefix=prefix,
-            group_prefix="rate",
+            group_prefix="servo",
             values=self._offset_values,
         )
         self._add_group_metrics(
             metrics,
             prefix=prefix,
-            group_prefix=f"rate_{self._phase_label}",
+            group_prefix=f"servo_{self._phase_label}",
             values=self._phase_offset_values,
         )
         return metrics

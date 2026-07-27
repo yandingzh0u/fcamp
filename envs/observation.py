@@ -14,28 +14,20 @@ from isaaclab.utils.math import (
 from .spec import CRITIC_OBS_DIM, OBS_DIM
 from .imitation_data import build_g1_imitation_frame
 from .contracts import select_imitation_root_domain
-from .action_rate import normalize_command_rate
 
 
 class MimicObservationMixin:
-    def _command_rate_observation(self) -> torch.Tensor:
-        """Return dimensionless carried rate without mutating environment state."""
-
-        return normalize_command_rate(
-            self.command_rate,
-            self.command_rate_limit,
-        )
-
     def _append_command_state(
         self,
         terms: tuple[torch.Tensor, ...],
     ) -> torch.Tensor:
-        """Append normalized rate then raw last action under one layout contract."""
+        """Append the carried servo state in motion-independent natural units."""
 
         return torch.cat(
             (
                 *terms,
-                self._command_rate_observation(),
+                self.command_rate / self.command_servo_omega,
+                self.command_acceleration / self.command_servo_omega**2,
                 self.last_action,
             ),
             dim=-1,

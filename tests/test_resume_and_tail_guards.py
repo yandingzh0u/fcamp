@@ -34,8 +34,7 @@ class _FakeAlgo:
 def test_resume_signature_contains_the_complete_physical_decoder() -> None:
     environment = {
         "policy_action_bound": 5.0,
-        "command_rate_limit": [80.0, 40.0],
-        "rate_half_life_seconds": 0.08,
+        "command_servo_omega": 20.0,
     }
     signature = _resume_signature(
         {

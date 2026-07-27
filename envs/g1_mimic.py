@@ -147,7 +147,6 @@ class G1MimicEnv(
             kinematic_urdf_file=PROJECT_ROOT / "assets" / "robots" / "holosoma_g1" / "g1_29dof.urdf",
             motion_reference_mode=cfg.motion_reference_mode,
         )
-        self._validate_reference_target_rate_support()
         self._init_adaptive_motion_sampling()
 
 
@@ -352,84 +351,32 @@ class G1MimicEnv(
             self.validate_policy_actions(reference_action)
         return reference_action
 
-    def _validate_reference_target_rate_support(self) -> None:
-        """Fail construction if the configured target-rate support is incomplete."""
-
-        if self.motion.num_frames < 2:
-            raise ValueError("Rate-controlled FCAMP requires at least two motion frames")
-        frame_dt = 1.0 / float(self.motion.fps)
-        reference_action = (
-            self.motion.joint_pos / self.action_scale[0]
-        )
-        reference_rate = (
-            reference_action[1:] - reference_action[:-1]
-        ) / frame_dt
-        previous_rate = torch.cat(
-            (torch.zeros_like(reference_rate[:1]), reference_rate[:-1]),
-            dim=0,
-        )
-        required_target_rate = (
-            reference_rate - self.command_rate_decay * previous_rate
-        ) / (1.0 - self.command_rate_decay)
-        peak = required_target_rate.abs().amax(dim=0)
-        self.reference_target_rate_peak = peak
-        unsupported = peak >= self.command_rate_limit
-        if bool(unsupported.any()):
-            joint_idx = int(torch.argmax(peak - self.command_rate_limit).item())
-            raise RuntimeError(
-                "Configured command-rate support cannot reproduce the "
-                "inverse-filtered reference: "
-                f"joint={G1_29DOF_ACTION_NAMES[joint_idx]!r}, "
-                f"required={float(peak[joint_idx].item()):.6g}/s, "
-                f"limit={float(self.command_rate_limit[joint_idx].item()):.6g}/s"
-            )
-
-    def _reference_command_rate(
+    def _reference_command_state(
         self,
-        env_ids: torch.Tensor,
         phase_indices: torch.Tensor,
-        reference_action: torch.Tensor,
-    ) -> torch.Tensor:
-        """Construct the causal reset rate from only current and past reference."""
+        reference_joint_velocity: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build reset rate/acceleration from current and strict-past reference."""
 
-        current_phase = phase_indices.to(device=self.device, dtype=torch.float32)
-        reset_rate = torch.zeros_like(reference_action)
-        has_past = current_phase > 0.0
+        phase = phase_indices.to(device=self.device, dtype=torch.float32)
+        rate = reference_joint_velocity / self.action_scale
+        acceleration = torch.zeros_like(rate)
+        has_past = phase > 0.0
         if bool(has_past.any()):
-            # Use one absolute past phase per reset row. A start inside the
-            # first control interval looks back to absolute phase zero; only
-            # absolute phase zero itself has no causal rate.
             past_phase = torch.clamp(
-                current_phase[has_past] - float(self.motion_frame_delta),
+                phase[has_past] - float(self.motion_frame_delta),
                 min=0.0,
             )
-            if not bool((past_phase < current_phase[has_past]).all()):
-                raise RuntimeError("Nonzero reset phase did not resolve to a strict past phase")
-            past_env_ids = env_ids[has_past]
-            past_reference = self.motion.get_frame(past_phase)
-            past_action = self._reference_policy_action(
-                past_env_ids,
-                past_reference["joint_pos"],
-            )
-            elapsed_seconds = (
-                current_phase[has_past] - past_phase
+            elapsed = (
+                phase[has_past] - past_phase
             ) / float(self.motion.fps)
-            reset_rate[has_past] = (
-                reference_action[has_past] - past_action
-            ) / elapsed_seconds.unsqueeze(-1)
-        violation = reset_rate.abs() - self.command_rate_limit
-        if bool((violation > 1.0e-5).any()):
-            flat_idx = int(torch.argmax(violation).item())
-            env_row = flat_idx // self.action_dim
-            joint_idx = flat_idx % self.action_dim
-            raise RuntimeError(
-                "Reference reset rate exceeds command-rate support: "
-                f"env={int(env_ids[env_row].item())}, "
-                f"joint={G1_29DOF_ACTION_NAMES[joint_idx]!r}, "
-                f"rate={float(reset_rate[env_row, joint_idx].item()):.6g}/s, "
-                f"limit={float(self.command_rate_limit[joint_idx].item()):.6g}/s"
+            past_joint_velocity = self.motion.get_frame(past_phase)["joint_vel"]
+            acceleration[has_past] = (
+                reference_joint_velocity[has_past] - past_joint_velocity
+            ) / (
+                elapsed.unsqueeze(-1) * self.action_scale
             )
-        return reset_rate
+        return rate, acceleration
 
     def _reset_env_state(
         self,
@@ -473,10 +420,9 @@ class G1MimicEnv(
             env_ids,
             reference["joint_pos"],
         )
-        reference_rate = self._reference_command_rate(
-            env_ids,
+        reference_rate, reference_acceleration = self._reference_command_state(
             phase_indices,
-            reference_action,
+            reference["joint_vel"],
         )
         root_pos = reference["root_pos_w"].clone()
         root_quat = reference["root_quat_w"].clone()
@@ -501,6 +447,7 @@ class G1MimicEnv(
         # plant pose written above.
         self.last_action[env_ids] = reference_action
         self.command_rate[env_ids] = reference_rate
+        self.command_acceleration[env_ids] = reference_acceleration
         self.scene.update(self.physics_dt)
 
     def begin_reset_phase_diagnostics(self) -> None:

@@ -4,9 +4,10 @@ import pytest
 import torch
 
 from engine.validation_metrics import (
+    C2ServoDiagnostics,
     ChunkBoundaryDiagnostics,
-    RateControllerDiagnostics,
 )
+from envs.action_rate import advance_rate_servo
 
 
 def _state(batch: int = 2) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -97,6 +98,8 @@ def test_chunk_boundary_metrics_separate_reset_boundary_internal_and_done() -> N
     assert metrics["validation/chunk_action_d2_internal_mean"] == pytest.approx(2.0 / 3.0)
     assert metrics["validation/chunk_action_d2_boundary_mean"] == pytest.approx(1.0)
     assert metrics["validation/chunk_action_d2_boundary_internal_ratio"] == pytest.approx(1.5)
+    assert metrics["validation/chunk_action_d3_internal_mean"] == pytest.approx(0.5)
+    assert metrics["validation/chunk_action_d3_boundary_mean"] == pytest.approx(0.0)
     assert metrics["validation/chunk_joint_vel_jump_internal_mean"] == pytest.approx(3.0)
     assert metrics["validation/chunk_joint_vel_jump_boundary_mean"] == pytest.approx(5.0)
     assert metrics["validation/chunk_root_ang_vel_jump_internal_mean"] == pytest.approx(2.0)
@@ -171,6 +174,7 @@ def test_empty_chunk_metrics_have_stable_safe_schema() -> None:
         "validation_directional/chunk_action_delta_boundary_p95",
         "validation_directional/chunk_action_delta_boundary_p99",
         "validation_directional/chunk_action_d2_boundary_internal_ratio",
+        "validation_directional/chunk_action_d3_boundary_internal_ratio",
         "validation_directional/chunk_joint_vel_jump_internal_mean",
         "validation_directional/chunk_root_ang_vel_jump_reset_first_mean",
         "validation_directional/chunk_joint_vel_error_reset_first_mean",
@@ -188,85 +192,141 @@ def test_empty_chunk_metrics_have_stable_safe_schema() -> None:
             assert metrics[key] == -1.0
 
 
-def _rate_update(
-    diagnostics: RateControllerDiagnostics,
+def _servo_update(
+    diagnostics: C2ServoDiagnostics,
     *,
     active: torch.Tensor,
     offset: int | torch.Tensor,
     phase: torch.Tensor,
-    raw: torch.Tensor,
+    target_rate: torch.Tensor,
+    previous_action: torch.Tensor,
     previous_rate: torch.Tensor,
+    previous_acceleration: torch.Tensor,
+    actual_action: torch.Tensor,
     actual_rate: torch.Tensor,
+    actual_acceleration: torch.Tensor,
     reference_action: torch.Tensor,
+    projection_mask: torch.Tensor | None = None,
 ) -> None:
+    if projection_mask is None:
+        projection_mask = torch.zeros_like(actual_action, dtype=torch.bool)
     diagnostics.update(
         active_mask=active,
         chunk_offset=offset,
         transition_end_phase_steps=phase,
-        raw_target_rate=raw,
+        target_rate=target_rate,
+        previous_action=previous_action,
         previous_command_rate=previous_rate,
+        previous_command_acceleration=previous_acceleration,
+        actual_action=actual_action,
         actual_command_rate=actual_rate,
+        actual_command_acceleration=actual_acceleration,
+        action_projection_mask=projection_mask,
         reference_action=reference_action,
     )
 
 
-def test_rate_diagnostics_bucket_exact_causal_values_by_offset() -> None:
+def _advance(
+    target_rate: torch.Tensor,
+    action: torch.Tensor,
+    rate: torch.Tensor,
+    acceleration: torch.Tensor,
+    *,
+    dt: float = 0.02,
+    omega: float = 20.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return advance_rate_servo(
+        target_rate,
+        action,
+        rate,
+        acceleration,
+        dt=dt,
+        omega=omega,
+    )
+
+
+def test_c2_servo_diagnostics_bucket_exact_causal_values_by_offset() -> None:
     batch = 4
-    dt = 0.1
-    decay = 0.5
-    rate_limit = torch.tensor([10.0, 10.0])
-    diagnostics = RateControllerDiagnostics(
+    dt = 0.02
+    omega = 20.0
+    zeros = torch.zeros(batch, 2)
+    diagnostics = C2ServoDiagnostics(
         horizon=4,
         control_dt=dt,
-        decay=decay,
-        initial_reference_action=torch.zeros(batch, 2),
-        command_rate_limit=rate_limit,
+        omega=omega,
+        initial_action=zeros,
+        initial_reference_action=zeros,
     )
 
-    # Seed the first reference delta.  Reset-first is deliberately absent from
-    # all offset buckets, including offset zero.
-    zeros = torch.zeros(batch, 2)
-    _rate_update(
-        diagnostics,
-        active=torch.ones(batch, dtype=torch.bool),
-        offset=0,
-        phase=torch.zeros(batch),
-        raw=zeros,
-        previous_rate=zeros,
-        actual_rate=zeros,
-        reference_action=torch.ones(batch, 2),
-    )
+    action = rate = acceleration = zeros
+    for offset, reference_value in ((0, 1.0), (1, 3.0)):
+        next_action, next_rate, next_acceleration = _advance(
+            zeros, action, rate, acceleration, dt=dt, omega=omega
+        )
+        _servo_update(
+            diagnostics,
+            active=torch.ones(batch, dtype=torch.bool),
+            offset=offset,
+            phase=torch.full((batch,), float(offset)),
+            target_rate=zeros,
+            previous_action=action,
+            previous_rate=rate,
+            previous_acceleration=acceleration,
+            actual_action=next_action,
+            actual_rate=next_rate,
+            actual_acceleration=next_acceleration,
+            reference_action=torch.full((batch, 2), reference_value),
+        )
+        action, rate, acceleration = (
+            next_action,
+            next_rate,
+            next_acceleration,
+        )
 
     target_values = torch.arange(1.0, 5.0)
-    raw = torch.atanh((target_values / 10.0)[:, None]).expand(-1, 2).clone()
-    previous_rate = torch.zeros_like(raw)
-    actual_rate = 0.5 * target_values[:, None].expand(-1, 2)
-    _rate_update(
+    target_rate = target_values[:, None].expand(-1, 2).clone()
+    next_action, next_rate, next_acceleration = _advance(
+        target_rate, action, rate, acceleration, dt=dt, omega=omega
+    )
+    _servo_update(
         diagnostics,
         active=torch.ones(batch, dtype=torch.bool),
         offset=torch.arange(4),
         phase=torch.full((batch,), 100.0),
-        raw=raw,
-        previous_rate=previous_rate,
-        actual_rate=actual_rate,
-        reference_action=torch.full((batch, 2), 3.0),
+        target_rate=target_rate,
+        previous_action=action,
+        previous_rate=rate,
+        previous_acceleration=acceleration,
+        actual_action=next_action,
+        actual_rate=next_rate,
+        actual_acceleration=next_acceleration,
+        reference_action=torch.full((batch, 2), 6.0),
     )
 
     metrics = diagnostics.metrics()
+    unit_action, _, _ = _advance(
+        torch.ones(1, 1),
+        torch.zeros(1, 1),
+        torch.zeros(1, 1),
+        torch.zeros(1, 1),
+        dt=dt,
+        omega=omega,
+    )
+    action_gain = float(unit_action.item())
     for offset, target in enumerate(target_values.tolist()):
-        stem = f"validation/rate_offset{offset}"
+        stem = f"validation/servo_offset{offset}"
         assert metrics[f"{stem}_target_rate_abs_count"] == 1.0
         assert metrics[f"{stem}_target_rate_abs_mean"] == pytest.approx(target)
-        assert metrics[f"{stem}_target_rate_support_mean"] == pytest.approx(
-            target / 10.0
-        )
         assert metrics[f"{stem}_previous_command_rate_abs_mean"] == 0.0
         assert metrics[f"{stem}_rate_error_abs_mean"] == pytest.approx(target)
+        assert metrics[f"{stem}_initial_jerk_abs_mean"] == pytest.approx(
+            omega**2 * target
+        )
         assert metrics[f"{stem}_predicted_action_d2_abs_mean"] == pytest.approx(
-            0.05 * target
+            action_gain * target, rel=1.0e-5, abs=1.0e-8
         )
         assert metrics[f"{stem}_actual_action_d2_abs_mean"] == pytest.approx(
-            0.05 * target
+            action_gain * target, rel=1.0e-5, abs=1.0e-8
         )
         assert metrics[f"{stem}_reference_action_d2_abs_mean"] == pytest.approx(
             1.0
@@ -277,192 +337,150 @@ def test_rate_diagnostics_bucket_exact_causal_values_by_offset() -> None:
         assert metrics[f"{stem}_projection_joint_fraction_mean"] == 0.0
 
     assert metrics[
-        "validation/rate_rate_error_abs_boundary_internal_ratio"
+        "validation/servo_rate_error_abs_boundary_internal_ratio"
     ] == pytest.approx(1.0 / 3.0)
     assert metrics[
-        "validation/rate_actual_action_d2_abs_boundary_internal_ratio"
+        "validation/servo_actual_action_d2_abs_boundary_internal_ratio"
     ] == pytest.approx(1.0 / 3.0)
     assert metrics[
-        "validation/rate_reference_action_d2_abs_boundary_internal_ratio"
+        "validation/servo_reference_action_d2_abs_boundary_internal_ratio"
     ] == pytest.approx(1.0)
 
 
-def test_rate_diagnostics_phase_window_is_inclusive_and_uses_transition_end_phase() -> None:
+def test_c2_servo_phase_window_uses_transition_end_phase() -> None:
     batch = 5
-    rate_limit = torch.tensor([10.0])
-    diagnostics = RateControllerDiagnostics(
+    zeros = torch.zeros(batch, 1)
+    diagnostics = C2ServoDiagnostics(
         horizon=4,
         control_dt=0.02,
-        decay=0.5,
-        initial_reference_action=torch.zeros(batch, 1),
-        command_rate_limit=rate_limit,
+        omega=20.0,
+        initial_action=zeros,
+        initial_reference_action=zeros,
     )
-    zeros = torch.zeros(batch, 1)
-    _rate_update(
-        diagnostics,
-        active=torch.ones(batch, dtype=torch.bool),
-        offset=0,
-        phase=torch.zeros(batch),
-        raw=zeros,
-        previous_rate=zeros,
-        actual_rate=zeros,
-        reference_action=torch.ones(batch, 1),
-    )
+    action = rate = acceleration = zeros
+    for offset, reference_value in ((0, 1.0), (1, 3.0)):
+        next_state = _advance(zeros, action, rate, acceleration)
+        _servo_update(
+            diagnostics,
+            active=torch.ones(batch, dtype=torch.bool),
+            offset=offset,
+            phase=torch.zeros(batch),
+            target_rate=zeros,
+            previous_action=action,
+            previous_rate=rate,
+            previous_acceleration=acceleration,
+            actual_action=next_state[0],
+            actual_rate=next_state[1],
+            actual_acceleration=next_state[2],
+            reference_action=torch.full((batch, 1), reference_value),
+        )
+        action, rate, acceleration = next_state
 
     target_values = torch.tensor([1.0, 2.0, 3.0, 4.0, 9.0])
-    raw = torch.atanh((target_values / 10.0)[:, None])
-    proposed_rate = 0.5 * target_values[:, None]
-    _rate_update(
+    target_rate = target_values[:, None]
+    next_state = _advance(target_rate, action, rate, acceleration)
+    _servo_update(
         diagnostics,
         active=torch.tensor([True, True, True, True, False]),
         offset=0,
         phase=torch.tensor([279.0, 280.0, 310.0, 311.0, 300.0]),
-        raw=raw,
-        previous_rate=zeros,
-        actual_rate=proposed_rate,
-        reference_action=torch.full((batch, 1), 3.0),
+        target_rate=target_rate,
+        previous_action=action,
+        previous_rate=rate,
+        previous_acceleration=acceleration,
+        actual_action=next_state[0],
+        actual_rate=next_state[1],
+        actual_acceleration=next_state[2],
+        reference_action=torch.full((batch, 1), 6.0),
     )
 
     metrics = diagnostics.metrics()
-    assert metrics["validation/rate_offset0_target_rate_abs_count"] == 4.0
-    assert metrics["validation/rate_offset0_target_rate_abs_p95"] == pytest.approx(
+    assert metrics["validation/servo_offset0_target_rate_abs_count"] == 4.0
+    assert metrics["validation/servo_offset0_target_rate_abs_p95"] == pytest.approx(
         float(torch.quantile(torch.tensor([1.0, 2.0, 3.0, 4.0]), 0.95))
     )
-    assert metrics["validation/rate_offset0_target_rate_abs_p99"] == pytest.approx(
+    assert metrics["validation/servo_offset0_target_rate_abs_p99"] == pytest.approx(
         float(torch.quantile(torch.tensor([1.0, 2.0, 3.0, 4.0]), 0.99))
     )
-    phase_stem = "validation/rate_transition_end_phase280_310_offset0"
+    phase_stem = "validation/servo_transition_end_phase280_310_offset0"
     assert metrics[f"{phase_stem}_target_rate_abs_count"] == 2.0
     assert metrics[f"{phase_stem}_target_rate_abs_mean"] == pytest.approx(2.5)
 
 
-def test_rate_diagnostics_separate_reference_d2_and_projection_residual() -> None:
-    rate_limit = torch.tensor([10.0])
-    diagnostics = RateControllerDiagnostics(
+def test_c2_servo_diagnostics_isolate_projection_residual() -> None:
+    zeros = torch.zeros(1, 1)
+    diagnostics = C2ServoDiagnostics(
         horizon=4,
         control_dt=0.02,
-        decay=0.5,
-        initial_reference_action=torch.zeros(1, 1),
-        command_rate_limit=rate_limit,
+        omega=20.0,
+        initial_action=zeros,
+        initial_reference_action=zeros,
     )
-    _rate_update(
-        diagnostics,
-        active=torch.tensor([True]),
-        offset=0,
-        phase=torch.tensor([0.0]),
-        raw=torch.zeros(1, 1),
-        previous_rate=torch.zeros(1, 1),
-        actual_rate=torch.zeros(1, 1),
-        reference_action=torch.ones(1, 1),
-    )
+    action = rate = acceleration = zeros
+    for offset, reference_value in ((0, 1.0), (1, 3.0)):
+        next_state = _advance(zeros, action, rate, acceleration)
+        _servo_update(
+            diagnostics,
+            active=torch.tensor([True]),
+            offset=offset,
+            phase=torch.tensor([float(offset)]),
+            target_rate=zeros,
+            previous_action=action,
+            previous_rate=rate,
+            previous_acceleration=acceleration,
+            actual_action=next_state[0],
+            actual_rate=next_state[1],
+            actual_acceleration=next_state[2],
+            reference_action=torch.full((1, 1), reference_value),
+        )
+        action, rate, acceleration = next_state
 
-    raw = torch.full((1, 1), 100.0)
-    previous_rate = torch.full((1, 1), 10.0)
-    actual_rate = torch.full((1, 1), 0.5)
-    _rate_update(
-        diagnostics,
-        active=torch.tensor([True]),
-        offset=1,
-        phase=torch.tensor([1.0]),
-        raw=raw,
-        previous_rate=previous_rate,
-        actual_rate=actual_rate,
-        reference_action=torch.full((1, 1), 3.0),
-    )
-    _rate_update(
+    target_rate = torch.ones_like(zeros)
+    predicted = _advance(target_rate, action, rate, acceleration)
+    _servo_update(
         diagnostics,
         active=torch.tensor([True]),
         offset=2,
         phase=torch.tensor([2.0]),
-        raw=torch.zeros(1, 1),
-        previous_rate=torch.zeros(1, 1),
-        actual_rate=torch.zeros(1, 1),
+        target_rate=target_rate,
+        previous_action=action,
+        previous_rate=rate,
+        previous_acceleration=acceleration,
+        actual_action=predicted[0] + 0.01,
+        actual_rate=predicted[1],
+        actual_acceleration=predicted[2],
         reference_action=torch.full((1, 1), 6.0),
+        projection_mask=torch.ones_like(zeros, dtype=torch.bool),
     )
 
     metrics = diagnostics.metrics()
     assert metrics[
-        "validation/rate_offset1_reference_action_d2_abs_mean"
+        "validation/servo_offset2_reference_action_d2_abs_mean"
     ] == pytest.approx(1.0)
     assert metrics[
-        "validation/rate_offset2_reference_action_d2_abs_mean"
+        "validation/servo_offset2_projection_joint_fraction_mean"
     ] == pytest.approx(1.0)
     assert metrics[
-        "validation/rate_offset1_projection_joint_fraction_mean"
-    ] == pytest.approx(1.0)
-    assert metrics[
-        "validation/rate_offset1_prediction_residual_abs_mean"
-    ] == pytest.approx(0.19)
+        "validation/servo_offset2_prediction_residual_abs_mean"
+    ] == pytest.approx(0.01)
 
 
-def test_rate_projection_diagnostic_ignores_float32_rate_reconstruction_noise() -> None:
-    batch = 256
-    dt = 0.02
-    decay = 0.5
-    rate_limit = torch.tensor([10.0, 10.0])
-    diagnostics = RateControllerDiagnostics(
-        horizon=4,
-        control_dt=dt,
-        decay=decay,
-        initial_reference_action=torch.zeros(batch, 2),
-        command_rate_limit=rate_limit,
-    )
-    zeros = torch.zeros(batch, 2)
-    _rate_update(
-        diagnostics,
-        active=torch.ones(batch, dtype=torch.bool),
-        offset=0,
-        phase=torch.zeros(batch),
-        raw=zeros,
-        previous_rate=zeros,
-        actual_rate=zeros,
-        reference_action=torch.ones(batch, 2),
-    )
-
-    generator = torch.Generator().manual_seed(19)
-    previous_action = 2.0 * torch.rand(batch, 2, generator=generator) - 1.0
-    previous_rate = 10.0 * torch.rand(batch, 2, generator=generator) - 5.0
-    raw = 0.8 * torch.rand(batch, 2, generator=generator) - 0.4
-    target_rate = rate_limit * torch.tanh(raw)
-    proposed_rate = decay * previous_rate + (1.0 - decay) * target_rate
-    applied_action = previous_action + dt * proposed_rate
-    reconstructed_rate = (applied_action - previous_action) / dt
-    _rate_update(
-        diagnostics,
-        active=torch.ones(batch, dtype=torch.bool),
-        offset=1,
-        phase=torch.ones(batch),
-        raw=raw,
-        previous_rate=previous_rate,
-        actual_rate=reconstructed_rate,
-        reference_action=torch.full((batch, 2), 3.0),
-    )
-
-    metrics = diagnostics.metrics()
-    assert metrics[
-        "validation/rate_offset1_projection_joint_fraction_mean"
-    ] == 0.0
-    assert metrics[
-        "validation/rate_offset1_prediction_residual_abs_p99"
-    ] < 1.0e-5
-
-
-def test_empty_rate_diagnostics_have_stable_schema() -> None:
-    diagnostics = RateControllerDiagnostics(
+def test_empty_c2_servo_diagnostics_have_stable_schema() -> None:
+    diagnostics = C2ServoDiagnostics(
         horizon=4,
         control_dt=0.02,
-        decay=0.5,
+        omega=20.0,
+        initial_action=torch.zeros(1, 2),
         initial_reference_action=torch.zeros(1, 2),
-        command_rate_limit=torch.ones(2),
     )
 
     metrics = diagnostics.metrics(prefix="validation_directional")
     required = (
-        "validation_directional/rate_offset0_rate_error_abs_count",
-        "validation_directional/rate_offset3_actual_action_d2_abs_p99",
-        "validation_directional/rate_rate_error_abs_boundary_internal_ratio",
-        "validation_directional/rate_transition_end_phase280_310_offset0_reference_action_d2_abs_mean",
-        "validation_directional/rate_transition_end_phase280_310_projection_joint_fraction_internal_mean",
+        "validation_directional/servo_offset0_rate_error_abs_count",
+        "validation_directional/servo_offset3_actual_action_d3_abs_p99",
+        "validation_directional/servo_rate_error_abs_boundary_internal_ratio",
+        "validation_directional/servo_transition_end_phase280_310_offset0_reference_action_d2_abs_mean",
+        "validation_directional/servo_transition_end_phase280_310_projection_joint_fraction_internal_mean",
     )
     assert set(required).issubset(metrics)
     assert metrics[required[0]] == 0.0

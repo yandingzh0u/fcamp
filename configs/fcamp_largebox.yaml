@@ -23,18 +23,10 @@ environment:
   adaptive_predecessor_lookback_bins: 1
   action_rate_weight: 0.1
   # Environment-owned normalized PD-command domain.  The policy no longer
-  # installs either this bound or the carried-rate dynamics after first reset.
+  # installs either this bound or the carried servo state after first reset.
   policy_action_bound: 5.0
-  # Per-joint target-rate support in normalized action / second, ordered exactly
-  # as G1_29DOF_ACTION_NAMES.  These bounds cover the full 50 Hz reference after
-  # inverse filtering through the decoder, with 50% support margin.
-  command_rate_limit:
-    [80.0, 32.5, 66.5, 192.0, 69.0, 43.5,
-     84.0, 24.5, 22.5, 210.5, 115.5, 35.0,
-     14.0, 25.5, 28.0,
-     50.5, 45.0, 14.5, 68.0, 13.0, 155.0, 124.5,
-     26.0, 33.0, 61.0, 55.5, 4.5, 112.0, 98.5]
-  rate_half_life_seconds: 0.08
+  # Motion-independent critically damped target-rate servo frequency (rad/s).
+  command_servo_omega: 20.0
   motion_reference_mode: frame
   root_velocity_mode: com
 
@@ -44,10 +36,8 @@ parameters:
   actor_hidden_dims: [512, 256, 128]
   activation: elu
   flow_steps: 4
-  # Aggregate RMS in normalized-action units after the fixed decoder response
-  # metric (frame delta, d2, and carried terminal-rate tail).  This is an
-  # absolute physical budget, not a fraction of the very large target-rate
-  # support.
+  # Aggregate RMS in normalized-action units after the exact C2 servo response
+  # metric (frame delta, d2, and homogeneous terminal-state tail).
   cps_physical_rms: 0.05
   cps_trainable: true
   rollout_env_steps: 24

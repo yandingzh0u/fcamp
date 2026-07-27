@@ -5,124 +5,89 @@ import math
 import torch
 
 
-def normalize_command_rate(
-    command_rate: torch.Tensor,
-    rate_limit: torch.Tensor,
-) -> torch.Tensor:
-    """Expose carried rate to policies as a dimensionless support fraction."""
-
-    if command_rate.ndim < 1:
-        raise ValueError("command_rate must have at least one dimension")
-    action_dim = command_rate.shape[-1]
-    if rate_limit.shape != (action_dim,):
-        raise ValueError(
-            f"rate_limit must have shape {(action_dim,)}, "
-            f"got {tuple(rate_limit.shape)}"
-        )
-    if not bool(torch.isfinite(command_rate).all()):
-        raise ValueError("command_rate must be finite")
-    if not bool(torch.isfinite(rate_limit).all()) or bool(
-        (rate_limit <= 0.0).any()
-    ):
-        raise ValueError("rate_limit must be finite and strictly positive")
-    return command_rate / rate_limit
-
-
-def command_rate_decay(
-    control_dt: float,
-    half_life_seconds: float,
-) -> float:
-    """Return the per-control-frame decay for a physical rate half-life."""
-
-    control_dt = float(control_dt)
-    half_life_seconds = float(half_life_seconds)
-    if not math.isfinite(control_dt) or control_dt <= 0.0:
-        raise ValueError("control_dt must be finite and positive")
-    if not math.isfinite(half_life_seconds) or half_life_seconds <= 0.0:
-        raise ValueError("half_life_seconds must be finite and positive")
-    return 2.0 ** (-control_dt / half_life_seconds)
-
-
-def decode_raw_target_rate(
-    raw_target_rate: torch.Tensor,
-    previous_action: torch.Tensor,
-    previous_rate: torch.Tensor,
-    rate_limit: torch.Tensor,
-    action_low: torch.Tensor,
-    action_high: torch.Tensor,
+def advance_rate_servo(
+    target_rate: torch.Tensor,
+    action: torch.Tensor,
+    rate: torch.Tensor,
+    acceleration: torch.Tensor,
     *,
-    control_dt: float,
-    decay: float,
+    dt: float,
+    omega: float,
     active_mask: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Pure one-frame decoder from raw target rate to normalized PD command.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Advance the critically damped target-rate servo exactly.
 
-    ``previous_rate`` and ``rate_limit`` are expressed in normalized action per
-    second.  This function projects exactly once into the environment-owned
-    action domain and never mutates the carried state.
+    ``target_rate`` is constant over this interval.  The carried state follows
+
+    ``action_dot = rate``,
+    ``rate_dot = acceleration``,
+    ``acceleration_dot = omega**2 * (target_rate - rate)
+                         - 2 * omega * acceleration``.
+
+    Repeated calls with a physics-substep ``dt`` therefore produce the exact
+    substep command trajectory without Euler integration or interpolation.
     """
 
-    if (
-        raw_target_rate.shape != previous_action.shape
-        or previous_rate.shape != previous_action.shape
-    ):
-        raise ValueError(
-            "raw_target_rate, previous_action, and previous_rate must have "
-            "identical shapes"
-        )
-    if previous_action.ndim < 1:
-        raise ValueError("decoder tensors must have at least one dimension")
-    action_dim = previous_action.shape[-1]
+    state_shape = action.shape
+    if action.ndim < 1:
+        raise ValueError("servo tensors must have at least one dimension")
     for name, value in (
-        ("rate_limit", rate_limit),
-        ("action_low", action_low),
-        ("action_high", action_high),
+        ("target_rate", target_rate),
+        ("rate", rate),
+        ("acceleration", acceleration),
     ):
-        if value.shape != (action_dim,):
-            raise ValueError(f"{name} must have shape {(action_dim,)}")
+        if value.shape != state_shape:
+            raise ValueError(
+                "target_rate, action, rate, and acceleration must have "
+                "identical shapes"
+            )
     for name, value in (
-        ("raw_target_rate", raw_target_rate),
-        ("previous_action", previous_action),
-        ("previous_rate", previous_rate),
-        ("rate_limit", rate_limit),
-        ("action_low", action_low),
-        ("action_high", action_high),
+        ("target_rate", target_rate),
+        ("action", action),
+        ("rate", rate),
+        ("acceleration", acceleration),
     ):
         if not bool(torch.isfinite(value).all()):
             raise ValueError(f"{name} must be finite")
-    if bool((rate_limit <= 0.0).any()):
-        raise ValueError("rate_limit must be strictly positive")
-    if bool((action_low >= action_high).any()):
-        raise ValueError("action_low must be strictly below action_high")
 
-    control_dt = float(control_dt)
-    decay = float(decay)
-    if not math.isfinite(control_dt) or control_dt <= 0.0:
-        raise ValueError("control_dt must be finite and positive")
-    if not math.isfinite(decay) or not 0.0 < decay < 1.0:
-        raise ValueError("decay must lie strictly between zero and one")
+    dt = float(dt)
+    omega = float(omega)
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be finite and positive")
+    if not math.isfinite(omega) or omega <= 0.0:
+        raise ValueError("omega must be finite and positive")
 
-    desired_rate = rate_limit * torch.tanh(raw_target_rate)
-    proposed_rate = (
-        decay * previous_rate + (1.0 - decay) * desired_rate
+    scaled_time = omega * dt
+    decay = math.exp(-scaled_time)
+    rate_error = rate - target_rate
+    repeated_root_coefficient = acceleration + omega * rate_error
+
+    next_rate = target_rate + (
+        rate_error + repeated_root_coefficient * dt
+    ) * decay
+    next_acceleration = (
+        acceleration
+        - omega * repeated_root_coefficient * dt
+    ) * decay
+    rate_error_integral = (
+        rate_error * (-math.expm1(-scaled_time) / omega)
+        + repeated_root_coefficient
+        * ((-math.expm1(-scaled_time) - scaled_time * decay) / omega**2)
     )
-    requested_action = previous_action + control_dt * proposed_rate
-    requested_action = torch.maximum(
-        torch.minimum(requested_action, action_high),
-        action_low,
-    )
+    next_action = action + target_rate * dt + rate_error_integral
 
     if active_mask is not None:
-        expected_mask_shape = previous_action.shape[:-1]
-        if active_mask.shape != expected_mask_shape:
+        expected_shape = state_shape[:-1]
+        if active_mask.shape != expected_shape:
             raise ValueError(
-                f"active_mask must have shape {expected_mask_shape}, "
+                f"active_mask must have shape {expected_shape}, "
                 f"got {tuple(active_mask.shape)}"
             )
-        active_mask = active_mask.to(device=previous_action.device, dtype=torch.bool)
-        requested_action = torch.where(
-            active_mask.unsqueeze(-1),
-            requested_action,
-            previous_action,
+        active = active_mask.to(device=action.device, dtype=torch.bool).unsqueeze(-1)
+        next_action = torch.where(active, next_action, action)
+        next_rate = torch.where(active, next_rate, rate)
+        next_acceleration = torch.where(
+            active, next_acceleration, acceleration
         )
-    return requested_action
+
+    return next_action, next_rate, next_acceleration
