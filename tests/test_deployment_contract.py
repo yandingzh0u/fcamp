@@ -11,6 +11,7 @@ from engine.checkpoint import (
     preflight_static_checkpoint_payload,
 )
 from method.base import Algorithm
+from method.fcamp import FCAMP
 
 
 class _Algorithm(Algorithm):
@@ -86,6 +87,9 @@ def _env():
         num_envs=2,
         dt=0.02,
         last_action=torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        command_target_action=torch.tensor(
+            [[1.5, 2.5], [3.5, 4.5]]
+        ),
     )
 
 
@@ -108,6 +112,84 @@ def test_validated_deployment_chunk_enforces_full_horizon() -> None:
         algo.validated_deployment_chunk(torch.zeros(2, 2)),
         expected,
     )
+
+
+def test_fcamp_deployment_returns_frame_major_raw_residuals() -> None:
+    algo = object.__new__(FCAMP)
+    algo.base_actor_obs_dim = 10
+    algo.actor_obs_dim = 10
+    algo.num_act = 2
+    algo.horizon_h = 2
+    algo.empirical_normalization = False
+    algo.target_action_mid = torch.tensor([0.5, -0.25])
+    algo.target_action_half_range = torch.tensor([1.5, 0.75])
+    algo.action_low = algo.target_action_mid - algo.target_action_half_range
+    algo.action_high = algo.target_action_mid + algo.target_action_half_range
+    algo.env = SimpleNamespace(
+        command_position_servo_omega=20.0,
+        decimation=2,
+        physics_dt=0.01,
+        last_action=torch.tensor([[0.5, -0.25]]),
+        command_rate=torch.zeros(1, 2),
+        command_acceleration=torch.zeros(1, 2),
+        command_target_action=torch.tensor([[0.5, -0.25]]),
+    )
+    raw_z = torch.tensor([[-0.10, 0.20]])
+
+    def flow_mean_raw(actor_obs):
+        return raw_z.expand(actor_obs.shape[0], 2)
+
+    algo._flow_mean_raw = flow_mean_raw
+
+    obs = torch.tensor(
+        [[0.2, -0.1, 0.0, 0.0, 0.0, 0.0, 0.5, -0.25, 0.5, -0.25]]
+    )
+    actual = algo.deployment_chunk(obs)
+    expected = raw_z.unsqueeze(1).expand(1, 2, 2)
+    torch.testing.assert_close(actual, expected)
+
+
+def test_fcamp_evaluation_decodes_residual_against_persistent_target() -> None:
+    calls = []
+
+    def step_target_action(payload, **kwargs):
+        calls.append((payload.clone(), kwargs))
+        count = payload.shape[0]
+        return (
+            payload,
+            torch.zeros(count),
+            torch.zeros(count, dtype=torch.bool),
+            {"applied_action": payload},
+        )
+
+    algo = object.__new__(FCAMP)
+    algo.num_act = 2
+    algo.target_action_mid = torch.zeros(2)
+    algo.target_action_half_range = torch.ones(2)
+    algo.action_low = -torch.ones(2)
+    algo.action_high = torch.ones(2)
+    last_action = torch.tensor([[0.10, -0.20], [-0.30, 0.40]])
+    command_target_action = torch.tensor(
+        [[0.25, -0.35], [-0.45, 0.15]]
+    )
+    algo.env = SimpleNamespace(
+        last_action=last_action,
+        command_target_action=command_target_action,
+        step_target_action=step_target_action,
+    )
+    payload = torch.tensor([[0.2, -0.3], [0.4, 0.5]])
+    reference_dt = torch.tensor([0.02, 0.04])
+    active_mask = torch.tensor([True, False])
+
+    algo.evaluation_step_payload(payload, reference_dt, active_mask)
+
+    expected = torch.tanh(
+        torch.atanh(command_target_action) + payload
+    )
+    torch.testing.assert_close(calls[0][0], expected)
+    assert calls[0][1]["auto_reset"] is False
+    torch.testing.assert_close(calls[0][1]["reference_dt"], reference_dt)
+    assert torch.equal(calls[0][1]["active_mask"], active_mask)
 
 
 def test_default_deployment_step_holds_inactive_env_without_zero_jump() -> None:

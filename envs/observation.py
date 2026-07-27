@@ -26,8 +26,10 @@ class MimicObservationMixin:
         return torch.cat(
             (
                 *terms,
-                self.command_rate / self.command_servo_omega,
-                self.command_acceleration / self.command_servo_omega**2,
+                self.command_rate / self.command_position_servo_omega,
+                self.command_acceleration
+                / self.command_position_servo_omega**2,
+                self.command_target_action,
                 self.last_action,
             ),
             dim=-1,

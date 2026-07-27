@@ -36,7 +36,7 @@ class EnvironmentConfig:
     adaptive_predecessor_lookback_bins: int
     action_rate_weight: float
     policy_action_bound: float
-    command_servo_omega: float
+    command_position_servo_omega: float
     terminate_on_motion_end: bool
     motion_reference_mode: str
     root_velocity_mode: str
@@ -55,7 +55,7 @@ class FlowCPSConfig:
     critic_hidden_dims: tuple[int, ...]
     activation: str
     flow_steps: int
-    cps_physical_rms: float
+    cps_target_increment_rms: float
     cps_trainable: bool
     rollout_env_steps: int
     discount_gamma: float
@@ -324,11 +324,11 @@ def _validate(config: ExperimentConfig) -> None:
             "environment.policy_action_bound must be finite and positive"
         )
     if (
-        not math.isfinite(env.command_servo_omega)
-        or env.command_servo_omega <= 0.0
+        not math.isfinite(env.command_position_servo_omega)
+        or env.command_position_servo_omega <= 0.0
     ):
         raise ValueError(
-            "environment.command_servo_omega must be finite and positive"
+            "environment.command_position_servo_omega must be finite and positive"
         )
     if env.platform_profile not in {"custom", "g1_largebox_50hz"}:
         raise ValueError("environment.platform_profile must be custom or g1_largebox_50hz")
@@ -393,9 +393,13 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError("Flow-CPS requires parameters.rollout_env_steps > 0")
     if params.rollout_env_steps % params.horizon:
         raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
-    if not math.isfinite(params.cps_physical_rms) or params.cps_physical_rms <= 0.0:
+    if (
+        not math.isfinite(params.cps_target_increment_rms)
+        or params.cps_target_increment_rms <= 0.0
+    ):
         raise ValueError(
-            "Flow-CPS requires parameters.cps_physical_rms to be finite and positive"
+            "Flow-CPS requires parameters.cps_target_increment_rms "
+            "to be finite and positive"
         )
     if (
         not math.isfinite(params.desired_kl)

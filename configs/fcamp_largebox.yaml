@@ -25,8 +25,9 @@ environment:
   # Environment-owned normalized PD-command domain.  The policy no longer
   # installs either this bound or the carried servo state after first reset.
   policy_action_bound: 5.0
-  # Motion-independent critically damped target-rate servo frequency (rad/s).
-  command_servo_omega: 20.0
+  # One global position-servo bandwidth, derived from a 90% H=4 chunk response
+  # at 50 Hz. It is independent of the motion and joint index.
+  command_position_servo_omega: 67.0
   motion_reference_mode: frame
   root_velocity_mode: com
 
@@ -36,9 +37,9 @@ parameters:
   actor_hidden_dims: [512, 256, 128]
   activation: elu
   flow_steps: 4
-  # Aggregate RMS in normalized-action units after the exact C2 servo response
-  # metric (frame delta, d2, and homogeneous terminal-state tail).
-  cps_physical_rms: 0.05
+  # Shared per-token target-increment RMS in normalized-action units.  Every
+  # stationary H=4 token uses this same marginal exploration scale.
+  cps_target_increment_rms: 0.10
   cps_trainable: true
   rollout_env_steps: 24
   discount_gamma: 0.99

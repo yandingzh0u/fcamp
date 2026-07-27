@@ -189,6 +189,7 @@ class _Scene:
         self.owner = owner
         self.events: list[str] = []
         self.anchor_at_update: torch.Tensor | None = None
+        self.command_state_at_update: tuple[torch.Tensor, ...] | None = None
 
     def reset(self, *, env_ids: torch.Tensor) -> None:
         del env_ids
@@ -197,6 +198,11 @@ class _Scene:
     def update(self, _physics_dt: float) -> None:
         self.events.append("update")
         self.anchor_at_update = self.owner.last_action.clone()
+        self.command_state_at_update = (
+            self.owner.command_rate.clone(),
+            self.owner.command_acceleration.clone(),
+            self.owner.command_target_action.clone(),
+        )
 
 
 def _make_env(
@@ -220,7 +226,10 @@ def _make_env(
     env.last_action = torch.full((4, 2), -99.0)
     env.command_rate = torch.full((4, 2), -77.0)
     env.command_acceleration = torch.full((4, 2), -55.0)
-    env.command_servo_omega = 20.0
+    env.command_target_action = torch.full((4, 2), -33.0)
+    env.command_position_servo_omega = 20.0
+    env._policy_action_low = torch.full((2,), -5.0)
+    env._policy_action_high = torch.full((2,), 5.0)
     env.action_dim = 2
     env.default_action_joint_pos = torch.tensor(
         [
@@ -273,6 +282,22 @@ def _make_env(
     return env
 
 
+def _expected_reference_target(
+    env,
+    action: torch.Tensor,
+    rate: torch.Tensor,
+    acceleration: torch.Tensor,
+) -> torch.Tensor:
+    omega = env.command_position_servo_omega
+    unconstrained = (
+        action + 3.0 * rate / omega + 3.0 * acceleration / omega**2
+    )
+    return torch.maximum(
+        torch.minimum(unconstrained, env._policy_action_high),
+        env._policy_action_low,
+    )
+
+
 def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
     mimic_env_type,
 ) -> None:
@@ -309,6 +334,12 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
     ) / (
         env.dt * env.action_scale
     )
+    expected_target = _expected_reference_target(
+        env,
+        expected,
+        expected_rate,
+        expected_acceleration,
+    )
     torch.testing.assert_close(
         env.command_rate.index_select(0, env_ids),
         expected_rate,
@@ -316,6 +347,10 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
     torch.testing.assert_close(
         env.command_acceleration.index_select(0, env_ids),
         expected_acceleration,
+    )
+    torch.testing.assert_close(
+        env.command_target_action.index_select(0, env_ids),
+        expected_target,
     )
     torch.testing.assert_close(
         env.last_action[0],
@@ -329,6 +364,10 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
         env.command_acceleration[0],
         torch.full((2,), -55.0),
     )
+    torch.testing.assert_close(
+        env.command_target_action[0],
+        torch.full((2,), -33.0),
+    )
     torch.testing.assert_close(env.validated_actions[0], expected)
     torch.testing.assert_close(
         env.written_joint_pos,
@@ -337,6 +376,23 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
     torch.testing.assert_close(
         env.scene.anchor_at_update.index_select(0, env_ids),
         expected,
+    )
+    assert env.scene.command_state_at_update is not None
+    update_rate, update_acceleration, update_target = (
+        env.scene.command_state_at_update
+    )
+    torch.testing.assert_close(
+        update_rate.index_select(0, env_ids), expected_rate
+    )
+    torch.testing.assert_close(
+        update_acceleration.index_select(0, env_ids),
+        expected_acceleration,
+    )
+    torch.testing.assert_close(
+        update_target.index_select(0, env_ids), expected_target
+    )
+    torch.testing.assert_close(
+        update_target[0], torch.full((2,), -33.0)
     )
     assert env.scene.events == ["reset", "update"]
 
@@ -386,6 +442,22 @@ def test_reset_command_state_queries_only_current_and_strict_past(
             env.command_acceleration[env_ids[1:]].abs().sum(dim=-1)
             > 0.0
         ).all()
+    )
+    reset_action = env.last_action.index_select(0, env_ids)
+    reset_rate = env.command_rate.index_select(0, env_ids)
+    reset_acceleration = env.command_acceleration.index_select(0, env_ids)
+    torch.testing.assert_close(
+        env.command_target_action.index_select(0, env_ids),
+        _expected_reference_target(
+            env,
+            reset_action,
+            reset_rate,
+            reset_acceleration,
+        ),
+    )
+    torch.testing.assert_close(
+        env.command_target_action[1],
+        torch.full((2,), -33.0),
     )
 
 
@@ -442,6 +514,23 @@ def test_continuous_reset_command_state_never_queries_future(
         env.command_acceleration.index_select(0, env_ids),
         expected_acceleration,
     )
+    torch.testing.assert_close(
+        env.command_target_action.index_select(0, env_ids),
+        _expected_reference_target(
+            env,
+            env.last_action.index_select(0, env_ids),
+            expected_rate,
+            expected_acceleration,
+        ),
+    )
+    torch.testing.assert_close(
+        env.command_target_action[0],
+        torch.full((2,), -33.0),
+    )
+    torch.testing.assert_close(
+        env.command_target_action[2],
+        torch.full((2,), -33.0),
+    )
 
 
 def test_pre_contract_reset_is_finite_and_does_not_clamp(
@@ -465,6 +554,9 @@ def test_pre_contract_reset_is_finite_and_does_not_clamp(
     observation = env.reset_envs(env_ids, phase_indices=torch.tensor([0]))
 
     torch.testing.assert_close(observation, torch.tensor([[7.0, 0.0]]))
+    torch.testing.assert_close(
+        env.command_target_action[0], torch.tensor([5.0, 0.0])
+    )
     assert env.validated_actions == []
 
     env.action_scale[0, 0] = 0.0

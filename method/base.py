@@ -123,9 +123,9 @@ class Algorithm(ABC):
         """Return the deterministic payload cached for one policy chunk.
 
         The payload is deliberately *not* required to be an absolute action.
-        For example, FCAMP returns target-rate coordinates here and advances
-        its environment-owned C2 command servo
-        exactly one row at each call to :meth:`evaluation_step_payload`.
+        FCAMP returns one stationary target-increment token per H=4 frame.  The
+        four-token plan is cached and executed in full while its planned C2
+        state is carried across token and chunk boundaries.
         """
         return self.deterministic_actions(obs)
 

@@ -127,10 +127,19 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
         f"d3_ratio={metrics.get(f'{prefix}/chunk_action_d3_boundary_internal_ratio', float('nan')):.4f}",
         flush=True,
     )
-    if f"{prefix}/servo_offset0_rate_error_abs_count" in metrics:
+    if f"{prefix}/servo_offset0_position_error_abs_count" in metrics:
         print(
             f"[{label}_C2_SERVO] "
-            f"rate_error_ratio={metrics.get(f'{prefix}/servo_rate_error_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"target_increment_boundary={metrics.get(f'{prefix}/servo_target_increment_abs_boundary_mean', float('nan')):.6f} "
+            f"target_increment_internal={metrics.get(f'{prefix}/servo_target_increment_abs_internal_mean', float('nan')):.6f} "
+            f"target_increment_ratio={metrics.get(f'{prefix}/servo_target_increment_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"target_increment_d2_boundary={metrics.get(f'{prefix}/servo_target_increment_d2_abs_boundary_mean', float('nan')):.6f} "
+            f"target_increment_d2_internal={metrics.get(f'{prefix}/servo_target_increment_d2_abs_internal_mean', float('nan')):.6f} "
+            f"target_increment_d2_ratio={metrics.get(f'{prefix}/servo_target_increment_d2_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"reference_delta_boundary={metrics.get(f'{prefix}/servo_reference_action_delta_abs_boundary_mean', float('nan')):.6f} "
+            f"reference_delta_internal={metrics.get(f'{prefix}/servo_reference_action_delta_abs_internal_mean', float('nan')):.6f} "
+            f"reference_delta_ratio={metrics.get(f'{prefix}/servo_reference_action_delta_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"position_error_ratio={metrics.get(f'{prefix}/servo_position_error_abs_boundary_internal_ratio', float('nan')):.4f} "
             f"jerk_ratio={metrics.get(f'{prefix}/servo_initial_jerk_abs_boundary_internal_ratio', float('nan')):.4f} "
             f"accel_ratio={metrics.get(f'{prefix}/servo_actual_command_acceleration_abs_boundary_internal_ratio', float('nan')):.4f} "
             f"accel_delta_ratio={metrics.get(f'{prefix}/servo_command_acceleration_delta_abs_boundary_internal_ratio', float('nan')):.4f} "
@@ -139,12 +148,17 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
             f"reference_d2_ratio={metrics.get(f'{prefix}/servo_reference_action_d2_abs_boundary_internal_ratio', float('nan')):.4f} "
             f"actual_d3_ratio={metrics.get(f'{prefix}/servo_actual_action_d3_abs_boundary_internal_ratio', float('nan')):.4f} "
             f"reference_d3_ratio={metrics.get(f'{prefix}/servo_reference_action_d3_abs_boundary_internal_ratio', float('nan')):.4f} "
-            f"residual_boundary={metrics.get(f'{prefix}/servo_prediction_residual_abs_boundary_mean', float('nan')):.8f} "
+            f"action_residual={metrics.get(f'{prefix}/servo_prediction_residual_abs_boundary_mean', float('nan')):.8f} "
+            f"rate_residual={metrics.get(f'{prefix}/servo_rate_prediction_residual_abs_boundary_mean', float('nan')):.8f} "
+            f"accel_residual={metrics.get(f'{prefix}/servo_acceleration_prediction_residual_abs_boundary_mean', float('nan')):.8f} "
             f"projection_boundary={metrics.get(f'{prefix}/servo_projection_joint_fraction_boundary_mean', float('nan')):.6f}",
             flush=True,
         )
         print(
             f"[{label}_C2_SERVO_PHASE280_310] "
+            f"target_increment_ratio={metrics.get(f'{prefix}/servo_transition_end_phase280_310_target_increment_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"target_increment_d2_ratio={metrics.get(f'{prefix}/servo_transition_end_phase280_310_target_increment_d2_abs_boundary_internal_ratio', float('nan')):.4f} "
+            f"reference_delta_ratio={metrics.get(f'{prefix}/servo_transition_end_phase280_310_reference_action_delta_abs_boundary_internal_ratio', float('nan')):.4f} "
             f"jerk_ratio={metrics.get(f'{prefix}/servo_transition_end_phase280_310_initial_jerk_abs_boundary_internal_ratio', float('nan')):.4f} "
             f"actual_d2_ratio={metrics.get(f'{prefix}/servo_transition_end_phase280_310_actual_action_d2_abs_boundary_internal_ratio', float('nan')):.4f} "
             f"reference_d2_ratio={metrics.get(f'{prefix}/servo_transition_end_phase280_310_reference_action_d2_abs_boundary_internal_ratio', float('nan')):.4f} "
@@ -161,14 +175,18 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
                 key = f"{prefix}/{metric_stem}_offset{offset}"
                 print(
                     f"[{label}_C2_STATE_OFFSET{offset}{phase_label}] "
-                    f"target_mean={metrics.get(f'{key}_target_rate_abs_mean', float('nan')):.6f} "
-                    f"target_p95={metrics.get(f'{key}_target_rate_abs_p95', float('nan')):.6f} "
+                    f"target_mean={metrics.get(f'{key}_target_action_abs_mean', float('nan')):.6f} "
+                    f"target_p95={metrics.get(f'{key}_target_action_abs_p95', float('nan')):.6f} "
+                    f"increment_mean={metrics.get(f'{key}_target_increment_abs_mean', float('nan')):.6f} "
+                    f"increment_p95={metrics.get(f'{key}_target_increment_abs_p95', float('nan')):.6f} "
+                    f"increment_d2_mean={metrics.get(f'{key}_target_increment_d2_abs_mean', float('nan')):.6f} "
+                    f"reference_delta_mean={metrics.get(f'{key}_reference_action_delta_abs_mean', float('nan')):.6f} "
                     f"rate_mean={metrics.get(f'{key}_previous_command_rate_abs_mean', float('nan')):.6f} "
                     f"accel_mean={metrics.get(f'{key}_previous_command_acceleration_abs_mean', float('nan')):.6f} "
                     f"accel_end_mean={metrics.get(f'{key}_actual_command_acceleration_abs_mean', float('nan')):.6f} "
                     f"jerk_mean={metrics.get(f'{key}_initial_jerk_abs_mean', float('nan')):.6f} "
                     f"jerk_p95={metrics.get(f'{key}_initial_jerk_abs_p95', float('nan')):.6f} "
-                    f"count={metrics.get(f'{key}_rate_error_abs_count', 0.0):.0f}",
+                    f"count={metrics.get(f'{key}_position_error_abs_count', 0.0):.0f}",
                     flush=True,
                 )
                 print(
@@ -178,7 +196,9 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
                     f"reference_d2={metrics.get(f'{key}_reference_action_d2_abs_mean', float('nan')):.6f} "
                     f"actual_d3={metrics.get(f'{key}_actual_action_d3_abs_mean', float('nan')):.6f} "
                     f"reference_d3={metrics.get(f'{key}_reference_action_d3_abs_mean', float('nan')):.6f} "
-                    f"residual_mean={metrics.get(f'{key}_prediction_residual_abs_mean', float('nan')):.8f} "
+                    f"action_residual={metrics.get(f'{key}_prediction_residual_abs_mean', float('nan')):.8f} "
+                    f"rate_residual={metrics.get(f'{key}_rate_prediction_residual_abs_mean', float('nan')):.8f} "
+                    f"accel_residual={metrics.get(f'{key}_acceleration_prediction_residual_abs_mean', float('nan')):.8f} "
                     f"projection={metrics.get(f'{key}_projection_joint_fraction_mean', float('nan')):.6f}",
                     flush=True,
                 )

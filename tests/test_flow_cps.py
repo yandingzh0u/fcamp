@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import inspect
-import math
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from components.rollout.flow_cps_base import FlowCPSBase
-from envs.action_rate import advance_rate_servo
+from envs.action_servo import advance_position_servo
 from models.flow_cps_policy import FlowMatchingPolicy
 
 
 class _CPSGeometryEnv:
-    """Minimal environment contract needed by the production actor/CPS code."""
+    """Minimal environment contract needed by the production Flow/CPS core."""
 
     def __init__(
         self,
@@ -29,7 +29,11 @@ class _CPSGeometryEnv:
         self.device = torch.device("cpu")
         self.max_episode_steps = 20
         self.dt = 0.02
-        self.command_servo_omega = 20.0
+        self.command_position_servo_omega = 67.0
+        action_mid = torch.linspace(-0.4, 0.4, action_dim)
+        action_half_range = torch.linspace(0.75, 1.75, action_dim)
+        self.action_low = action_mid - action_half_range
+        self.action_high = action_mid + action_half_range
 
     def adaptive_sampling_stats(self) -> dict[str, float]:
         return {}
@@ -56,7 +60,7 @@ def _build_algo(env: _CPSGeometryEnv, **overrides) -> _FlowCPSHarness:
         "horizon": 4,
         "rollout_env_steps": 8,
         "flow_steps": 2,
-        "cps_physical_rms": 0.05,
+        "cps_target_increment_rms": 0.05,
         "cps_trainable": True,
         "actor_hidden_dims": (16, 16),
         "critic_hidden_dims": (16, 16),
@@ -94,37 +98,41 @@ def test_flow_cps_base_remains_an_abstract_algorithm_component() -> None:
     assert not inspect.isabstract(_FlowCPSHarness)
 
 
-def test_flow_cps_uses_one_final_dense_cholesky_and_exact_recompute() -> None:
+def test_flow_cps_samples_one_token_with_one_shared_joint_cholesky() -> None:
     torch.manual_seed(0)
     env = _CPSGeometryEnv(num_envs=4)
     algo = _build_algo(env)
     actor_obs = torch.randn(env.num_envs, env.observation_dim)
-    raw_z, mean_z, old_log_probs = algo._sample_final_cps(actor_obs)
 
-    assert torch.isfinite(old_log_probs).all()
-    assert old_log_probs.shape == (env.num_envs, algo.horizon_h)
-    assert raw_z.shape == (env.num_envs, algo.horizon_h * env.action_dim)
-    flat_dim = algo.horizon_h * env.action_dim
-    expected_params = flat_dim * (flat_dim + 1) // 2
+    raw_z, mean_z, old_log_prob = algo._sample_final_cps(actor_obs)
+
+    assert raw_z.shape == (env.num_envs, env.action_dim)
+    assert mean_z.shape == raw_z.shape
+    assert old_log_prob.shape == (env.num_envs,)
+    assert torch.isfinite(old_log_prob).all()
+    expected_params = env.action_dim * (env.action_dim + 1) // 2
     assert algo._policy.cps_cholesky_raw.shape == (expected_params,)
-    assert not hasattr(algo._policy, "cps_diag_raw")
-    assert not hasattr(algo._policy, "cps_lowrank_raw")
-
-    recomputed = algo._recompute_final_cps_log_prob(actor_obs, raw_z)
+    assert algo.chunk_dim == algo.horizon_h * env.action_dim
     torch.testing.assert_close(
-        recomputed,
-        old_log_probs,
+        algo._recompute_final_cps_log_prob(actor_obs, raw_z),
+        old_log_prob,
         atol=2.0e-5,
         rtol=2.0e-5,
     )
-    assert mean_z.shape == raw_z.shape
+
     statistics = algo._final_cps_statistics()
-    assert abs(statistics["policy/cps_physical_rms_target"] - 0.05) < 1.0e-6
-    assert abs(statistics["policy/cps_physical_rms_achieved"] - 0.05) < 1.0e-5
+    assert (
+        abs(statistics["policy/cps_target_increment_rms_target"] - 0.05)
+        < 1.0e-6
+    )
+    assert (
+        abs(statistics["policy/cps_target_increment_rms_achieved"] - 0.05)
+        < 1.0e-6
+    )
     assert statistics["policy/cps_params"] == float(expected_params)
 
 
-def test_final_cps_conditional_log_probs_sum_to_joint_density() -> None:
+def test_shared_cps_log_prob_preserves_arbitrary_leading_dimensions() -> None:
     torch.manual_seed(1)
     env = _CPSGeometryEnv(num_envs=5)
     algo = _build_algo(env)
@@ -132,55 +140,71 @@ def test_final_cps_conditional_log_probs_sum_to_joint_density() -> None:
         offdiagonal = (~algo._policy._cps_diagonal_mask).nonzero(
             as_tuple=False
         ).squeeze(-1)
-        algo._policy.cps_cholesky_raw[offdiagonal[:8]] = torch.linspace(
-            -0.25,
-            0.25,
-            8,
+        algo._policy.cps_cholesky_raw[offdiagonal] = torch.linspace(
+            -0.2,
+            0.2,
+            offdiagonal.numel(),
         )
-    actor_obs = torch.randn(5, env.observation_dim)
-    raw_z, mean_z, conditional = algo._sample_final_cps(actor_obs)
+
+    mean = torch.randn(2, 4, env.action_dim) * 0.1
     chol, _ = algo._effective_cps_cholesky(
-        device=raw_z.device,
-        dtype=raw_z.dtype,
+        device=env.device,
+        dtype=mean.dtype,
     )
-    covariance = chol @ chol.transpose(0, 1)
-    offdiag_covariance = covariance - torch.diag_embed(
-        torch.diagonal(covariance)
-    )
-    assert float(offdiag_covariance.abs().max().item()) > 0.0
-    joint = torch.distributions.MultivariateNormal(
-        loc=mean_z,
+    raw = mean + torch.randn_like(mean) @ chol.transpose(0, 1)
+    actual = algo._final_cps_conditional_log_prob(raw, mean)
+    expected = torch.distributions.MultivariateNormal(
+        loc=mean,
         scale_tril=chol,
-    ).log_prob(raw_z)
-    torch.testing.assert_close(
-        conditional.sum(dim=-1),
-        joint,
-        atol=2.0e-5,
-        rtol=2.0e-5,
+    ).log_prob(raw)
+
+    assert actual.shape == (2, 4)
+    torch.testing.assert_close(actual, expected, atol=2.0e-5, rtol=2.0e-5)
+
+
+def test_recomputed_log_prob_preserves_arbitrary_leading_dimensions() -> None:
+    torch.manual_seed(2)
+    env = _CPSGeometryEnv(obs_dim=6, action_dim=3)
+    algo = _build_algo(env)
+    observations = torch.randn(2, 4, env.observation_dim)
+    means = algo._flow_mean_raw(
+        observations.reshape(-1, env.observation_dim)
+    ).reshape(2, 4, env.action_dim)
+    chol, _ = algo._effective_cps_cholesky(
+        device=env.device,
+        dtype=means.dtype,
     )
+    raw = means + torch.randn_like(means) @ chol.transpose(0, 1)
+
+    actual = algo._recompute_final_cps_log_prob(observations, raw)
+    expected = algo._final_cps_conditional_log_prob(raw, means)
+
+    assert actual.shape == (2, 4)
+    torch.testing.assert_close(actual, expected, atol=2.0e-5, rtol=2.0e-5)
 
 
-def test_exact_conditional_kl_is_nonnegative_and_sums_to_joint_kl() -> None:
+def test_exact_conditional_kl_matches_each_shared_gaussian_context() -> None:
     torch.manual_seed(17)
     env = _CPSGeometryEnv(num_envs=3)
     algo = _build_algo(env)
-    dim = algo.chunk_dim
-    old_mean = torch.randn(3, dim) * 0.1
-    new_mean = torch.randn(3, dim) * 0.1
-    old_chol = torch.eye(dim) + torch.randn(dim, dim).tril() * 0.015
-    new_chol = torch.eye(dim) + torch.randn(dim, dim).tril() * 0.015
+    action_dim = env.action_dim
+    old_mean = torch.randn(3, 4, action_dim) * 0.1
+    new_mean = torch.randn(3, 4, action_dim) * 0.1
+    old_chol = torch.eye(action_dim) + (
+        torch.randn(action_dim, action_dim).tril() * 0.015
+    )
+    new_chol = torch.eye(action_dim) + (
+        torch.randn(action_dim, action_dim).tril() * 0.015
+    )
     old_chol.diagonal().clamp_(min=0.5)
     new_chol.diagonal().clamp_(min=0.5)
 
-    frame_kl = algo._final_cps_expected_conditional_kl(
+    actual = algo._final_cps_expected_conditional_kl(
         old_mean,
         new_mean,
         old_chol,
         new_chol,
     )
-    assert frame_kl.shape == (3, algo.horizon_h)
-    assert bool((frame_kl >= 0.0).all())
-
     covariance_whitened = torch.linalg.solve_triangular(
         new_chol.double(),
         old_chol.double(),
@@ -188,22 +212,28 @@ def test_exact_conditional_kl_is_nonnegative_and_sums_to_joint_kl() -> None:
     )
     mean_whitened = torch.linalg.solve_triangular(
         new_chol.double(),
-        (old_mean - new_mean).double().transpose(0, 1),
+        (old_mean - new_mean).double().reshape(-1, action_dim).transpose(0, 1),
         upper=False,
     ).transpose(0, 1)
-    joint_kl = 0.5 * (
+    covariance_term = (
         covariance_whitened.square().sum()
-        + mean_whitened.square().sum(dim=-1)
-        - float(dim)
+        - float(action_dim)
         + 2.0
         * (
             torch.log(torch.diagonal(new_chol.double())).sum()
             - torch.log(torch.diagonal(old_chol.double())).sum()
         )
     )
+    expected = 0.5 * (
+        covariance_term + mean_whitened.square().sum(dim=-1)
+    )
+    expected = expected.reshape_as(actual)
+
+    assert actual.shape == (3, 4)
+    assert bool((actual >= 0.0).all())
     torch.testing.assert_close(
-        frame_kl.double().sum(dim=-1),
-        joint_kl,
+        actual.double(),
+        expected,
         atol=2.0e-6,
         rtol=2.0e-6,
     )
@@ -212,30 +242,30 @@ def test_exact_conditional_kl_is_nonnegative_and_sums_to_joint_kl() -> None:
 def test_exact_conditional_kl_is_zero_for_identical_policy() -> None:
     env = _CPSGeometryEnv(num_envs=3)
     algo = _build_algo(env)
-    mean = torch.randn(3, algo.chunk_dim)
+    mean = torch.randn(3, 4, env.action_dim)
     chol, _ = algo._effective_cps_cholesky(
         device=env.device,
         dtype=torch.float32,
     )
-    frame_kl = algo._final_cps_expected_conditional_kl(
+    actual = algo._final_cps_expected_conditional_kl(
         mean,
         mean,
         chol,
         chol,
     )
-    torch.testing.assert_close(frame_kl, torch.zeros_like(frame_kl))
+    torch.testing.assert_close(actual, torch.zeros_like(actual))
 
 
-def test_final_cps_uses_one_aggregate_physical_scale() -> None:
+def test_cps_scale_is_defined_only_by_one_target_increment() -> None:
     env = _CPSGeometryEnv()
-    algo = _build_algo(env, cps_physical_rms=0.037)
+    algo = _build_algo(env, cps_target_increment_rms=0.037)
     chol, _ = algo._effective_cps_cholesky(
         device=env.device,
         dtype=torch.float32,
     )
-    response = algo._policy.cps_physical_response
+    response = algo._policy.cps_target_increment_response
     achieved = torch.sqrt(
-        (response @ chol).square().sum() / float(3 * env.action_dim)
+        (response @ chol).square().sum() / float(env.action_dim)
     )
     torch.testing.assert_close(
         achieved,
@@ -254,16 +284,15 @@ def test_final_cps_uses_one_aggregate_physical_scale() -> None:
 
 
 def test_flow_mean_uses_fixed_initial_likelihood_scale() -> None:
-    torch.manual_seed(4)
     env = _CPSGeometryEnv()
     algo = _build_algo(env)
     actor_obs = torch.randn(2, env.observation_dim)
     scale = algo._policy.flow_mean_raw_scale.detach().clone()
     original = algo._policy.velocity_field
 
-    def unit_velocity(observation, flow_state, time):
+    def unit_velocity(observation, flow_token, time):
         del observation, time
-        return torch.ones_like(flow_state)
+        return torch.ones_like(flow_token)
 
     algo._policy.velocity_field = unit_velocity
     try:
@@ -271,9 +300,10 @@ def test_flow_mean_uses_fixed_initial_likelihood_scale() -> None:
     finally:
         algo._policy.velocity_field = original
 
+    assert mean.shape == (2, env.action_dim)
     torch.testing.assert_close(
         mean,
-        torch.full_like(mean, -float(scale.item())),
+        -torch.full_like(mean, float(scale.item())),
     )
     initial_chol, _ = algo._effective_cps_cholesky(
         device=env.device,
@@ -281,8 +311,136 @@ def test_flow_mean_uses_fixed_initial_likelihood_scale() -> None:
     )
     torch.testing.assert_close(
         torch.diagonal(initial_chol),
-        torch.full((algo.chunk_dim,), float(scale.item())),
+        torch.full((env.action_dim,), float(scale.item())),
     )
+    assert algo.deterministic_actions(actor_obs).shape == (
+        actor_obs.shape[0],
+        1,
+        env.action_dim,
+    )
+
+
+def test_zero_flow_mean_is_zero_target_increment() -> None:
+    env = _CPSGeometryEnv()
+    algo = _build_algo(env)
+    actor_obs = torch.randn(3, env.observation_dim)
+    original = algo._policy.velocity_field
+
+    def zero_velocity(observation, flow_token, time):
+        del observation, time
+        return torch.zeros_like(flow_token)
+
+    algo._policy.velocity_field = zero_velocity
+    try:
+        mean_z = algo._flow_mean_raw(actor_obs)
+    finally:
+        algo._policy.velocity_field = original
+
+    torch.testing.assert_close(mean_z, torch.zeros_like(mean_z))
+
+
+def test_zero_residual_holds_the_previous_target() -> None:
+    env = _CPSGeometryEnv()
+    algo = _build_algo(env)
+    anchor = torch.stack(
+        (env.action_low, algo.target_action_mid, env.action_high)
+    )
+    target = algo._target_residual_to_target_action(
+        torch.zeros_like(anchor),
+        anchor,
+    )
+    torch.testing.assert_close(target, anchor, atol=2.0e-6, rtol=0.0)
+
+
+def test_residual_has_one_persistent_bounded_target_map() -> None:
+    env = _CPSGeometryEnv(action_dim=3)
+    algo = _build_algo(env)
+    residual = torch.tensor(
+        [
+            [-10.0, -1.0, 0.0],
+            [2.0, -2.0, 0.75],
+        ]
+    )
+    anchor = torch.tensor(
+        [
+            [-0.4, 0.2, 0.7],
+            [0.3, -0.1, -0.6],
+        ]
+    )
+
+    target_action = algo._target_residual_to_target_action(residual, anchor)
+    normalized_anchor = (
+        anchor - algo.target_action_mid
+    ) / algo.target_action_half_range
+    expected = (
+        algo.target_action_mid
+        + algo.target_action_half_range
+        * torch.tanh(torch.atanh(normalized_anchor) + residual)
+    )
+    torch.testing.assert_close(target_action, expected)
+    assert bool((target_action >= env.action_low).all())
+    assert bool((target_action <= env.action_high).all())
+
+
+def test_persistent_target_decoder_is_invariant_to_chunk_partitioning() -> None:
+    env = _CPSGeometryEnv(action_dim=3)
+    algo = _build_algo(env)
+    residuals = torch.tensor(
+        [
+            [0.30, -0.20, 0.10],
+            [-0.15, 0.25, -0.05],
+            [0.08, 0.12, -0.18],
+            [-0.20, -0.10, 0.22],
+            [0.14, -0.16, 0.07],
+            [-0.09, 0.04, 0.13],
+            [0.11, 0.06, -0.12],
+            [-0.07, -0.08, 0.09],
+        ]
+    )
+
+    def execute(partitions: tuple[int, ...]) -> torch.Tensor:
+        assert sum(partitions) == residuals.shape[0]
+        action = torch.tensor([[0.20, -0.15, 0.35]])
+        rate = torch.tensor([[0.10, -0.05, 0.08]])
+        acceleration = torch.tensor([[-0.20, 0.12, -0.04]])
+        target = torch.tensor([[-0.10, 0.30, -0.25]])
+        trajectory = []
+        offset = 0
+        for chunk_size in partitions:
+            for residual in residuals[offset : offset + chunk_size]:
+                target = algo._target_residual_to_target_action(
+                    residual.unsqueeze(0),
+                    target,
+                )
+                action, rate, acceleration = advance_position_servo(
+                    target,
+                    action,
+                    rate,
+                    acceleration,
+                    dt=env.dt,
+                    omega=env.command_position_servo_omega,
+                )
+                trajectory.append(
+                    torch.cat(
+                        (target, action, rate, acceleration),
+                        dim=-1,
+                    )
+                )
+            offset += chunk_size
+        return torch.cat(trajectory, dim=0)
+
+    unpartitioned = execute((8,))
+    for partitions in (
+        (4, 4),
+        (2, 4, 2),
+        (1, 1, 1, 1, 1, 1, 1, 1),
+    ):
+        torch.testing.assert_close(
+            execute(partitions),
+            unpartitioned,
+            atol=0.0,
+            rtol=0.0,
+        )
 
 
 def test_cps_covariance_shape_has_hard_condition_bound() -> None:
@@ -308,243 +466,94 @@ def test_cps_covariance_shape_has_hard_condition_bound() -> None:
     )
 
 
-def test_cps_physical_response_matches_exact_c2_servo_jacobian() -> None:
+def test_target_increment_response_is_exact_midpoint_jacobian() -> None:
     env = _CPSGeometryEnv()
     algo = _build_algo(env)
-    horizon = algo.horizon_h
-    action_dim = env.action_dim
 
-    def physical_features(flat_target_rate: torch.Tensor) -> torch.Tensor:
-        target_rate = flat_target_rate.view(horizon, action_dim)
-        action = torch.zeros(action_dim)
-        rate = torch.zeros(action_dim)
-        acceleration = torch.zeros(action_dim)
-        previous_delta = torch.zeros(action_dim)
-        deltas = []
-        d2 = []
-        for frame in range(horizon):
-            next_action, rate, acceleration = advance_rate_servo(
-                target_rate[frame],
-                action,
-                rate,
-                acceleration,
-                dt=env.dt,
-                omega=env.command_servo_omega,
-            )
-            delta = next_action - action
-            deltas.append(delta)
-            d2.append(delta - previous_delta)
-            action = next_action
-            previous_delta = delta
-        tail = []
-        for _ in range(horizon):
-            next_action, rate, acceleration = advance_rate_servo(
-                torch.zeros_like(rate),
-                action,
-                rate,
-                acceleration,
-                dt=env.dt,
-                omega=env.command_servo_omega,
-            )
-            tail.append(next_action - action)
-            action = next_action
-        return torch.cat(
-            [
-                torch.stack(deltas).reshape(-1) / math.sqrt(float(horizon)),
-                torch.stack(d2).reshape(-1) / math.sqrt(float(horizon)),
-                torch.stack(tail).reshape(-1) / math.sqrt(float(horizon)),
-            ]
-        )
+    def target_increment(raw_z: torch.Tensor) -> torch.Tensor:
+        midpoint = algo.target_action_mid
+        return algo._target_residual_to_target_action(
+            raw_z.unsqueeze(0),
+            midpoint.unsqueeze(0),
+        ).squeeze(0) - midpoint
 
-    jacobian = torch.func.jacrev(physical_features)(
-        torch.zeros(horizon * action_dim)
+    jacobian = torch.func.jacrev(target_increment)(
+        torch.zeros(env.action_dim)
     )
     torch.testing.assert_close(
-        algo._policy.cps_physical_response,
+        algo._policy.cps_target_increment_response,
         jacobian,
         atol=1.0e-6,
         rtol=1.0e-6,
     )
 
 
-def test_c2_servo_noise_matches_physical_rms_budget() -> None:
+def test_linearized_target_increment_noise_matches_rms_budget() -> None:
     torch.manual_seed(23)
     env = _CPSGeometryEnv(action_dim=3)
-    algo = _build_algo(env, cps_physical_rms=0.05)
+    algo = _build_algo(env, cps_target_increment_rms=0.05)
     chol, _ = algo._effective_cps_cholesky(
         device=env.device,
         dtype=torch.float32,
     )
-    samples = 32768
-    raw_z = (
-        torch.randn(samples, algo.chunk_dim) @ chol.transpose(0, 1)
-    ).view(samples, algo.horizon_h, env.action_dim)
-    action = torch.zeros(samples, env.action_dim)
-    rate = torch.zeros_like(action)
-    acceleration = torch.zeros_like(action)
-    previous_delta = torch.zeros_like(action)
-    deltas = []
-    d2 = []
-    for frame in range(algo.horizon_h):
-        next_action, rate, acceleration = advance_rate_servo(
-            raw_z[:, frame],
-            action,
-            rate,
-            acceleration,
-            dt=env.dt,
-            omega=env.command_servo_omega,
-        )
-        delta = next_action - action
-        action = next_action
-        deltas.append(delta)
-        d2.append(delta - previous_delta)
-        previous_delta = delta
-
-    tail = []
-    for _ in range(algo.horizon_h):
-        next_action, rate, acceleration = advance_rate_servo(
-            torch.zeros_like(action),
-            action,
-            rate,
-            acceleration,
-            dt=env.dt,
-            omega=env.command_servo_omega,
-        )
-        delta = next_action - action
-        action = next_action
-        tail.append(delta)
-
-    group_rms_sq = [
-        torch.stack(group, dim=1).square().mean()
-        for group in (deltas, d2, tail)
-    ]
-    sampled_rms = torch.sqrt(sum(group_rms_sq) / 3.0)
-    assert float(sampled_rms.item()) <= 0.0505
-    assert float(sampled_rms.item()) >= 0.0495
-
-
-def _causal_raw_target_grad_leak(
-    policy: FlowMatchingPolicy,
-    frame_k: int,
-    *,
-    horizon: int = 4,
-    action_dim: int = 3,
-) -> float:
-    """Return max |grad| of frame k with respect to future Flow tokens."""
-
-    torch.manual_seed(0)
-    obs = torch.randn(2, policy.obs_dim)
-    noise = torch.randn(2, policy.chunk_dim, requires_grad=True)
-    sigma_schedule = torch.linspace(1.0, 0.0, 4, dtype=noise.dtype)
-    latent = noise * 0.8
-    time = torch.full((2,), 1.0, dtype=noise.dtype)
-    velocity = policy.velocity_field(obs, latent, time)
-    dt = sigma_schedule[1] - sigma_schedule[0]
-    new_latent = latent + velocity * dt
-    raw_targets = new_latent[0].view(horizon, action_dim)
-    raw_targets[frame_k].sum().backward()
-    future = noise.grad[0, (frame_k + 1) * action_dim :]
-    return (
-        float(future.abs().max().item())
-        if future.numel() > 0
-        else 0.0
+    raw_z = torch.randn(65536, env.action_dim) @ chol.transpose(0, 1)
+    target_increment = (
+        raw_z * algo.target_action_half_range.unsqueeze(0)
     )
+    sampled_rms = torch.sqrt(target_increment.square().mean())
+    assert float(sampled_rms.item()) == pytest.approx(0.05, abs=5.0e-4)
 
 
-def test_causal_raw_target_no_future_gradient_leak() -> None:
-    policy = FlowMatchingPolicy(
-        obs_dim=5,
-        action_dim=3,
-        horizon=4,
-        hidden_dims=(16, 16),
-        activation="elu",
-    )
-    for frame in range(3):
-        leak = _causal_raw_target_grad_leak(policy, frame)
-        assert leak <= 1.0e-6
-
-
-def test_causal_velocity_is_order_sensitive_after_swapped_prefix() -> None:
+def test_policy_is_one_position_free_shared_token_network() -> None:
     torch.manual_seed(11)
-    horizon = 4
-    action_dim = 3
-    policy = FlowMatchingPolicy(
-        obs_dim=5,
-        action_dim=action_dim,
-        horizon=horizon,
-        hidden_dims=(24, 16),
-        activation="elu",
-    )
-    obs = torch.randn(2, policy.obs_dim)
-    time = torch.full((2,), 0.37)
-    chunk = torch.randn(2, horizon, action_dim)
-    chunk[:, 0] -= 2.0
-    chunk[:, 1] += 2.0
-    swapped = chunk.clone()
-    swapped[:, [0, 1]] = swapped[:, [1, 0]]
-
-    velocity = policy.velocity_field(
-        obs,
-        chunk.reshape(2, -1),
-        time,
-    ).view(2, horizon, action_dim)
-    swapped_velocity = policy.velocity_field(
-        obs,
-        swapped.reshape(2, -1),
-        time,
-    ).view(2, horizon, action_dim)
-    mean_abs_delta = (velocity - swapped_velocity).abs().mean(dim=(0, 2))
-    for frame in range(1, horizon):
-        assert float(mean_abs_delta[frame].item()) > 1.0e-5
-
-
-def test_causal_velocity_future_token_does_not_change_earlier_frames() -> None:
-    torch.manual_seed(17)
-    horizon = 4
-    action_dim = 3
-    policy = FlowMatchingPolicy(
-        obs_dim=5,
-        action_dim=action_dim,
-        horizon=horizon,
-        hidden_dims=(24, 16),
-        activation="elu",
-    )
-    obs = torch.randn(2, policy.obs_dim)
-    time = torch.full((2,), 0.61)
-    chunk = torch.randn(2, horizon, action_dim)
-    future_changed = chunk.clone()
-    future_changed[:, 3] += 10.0 * torch.randn_like(future_changed[:, 3])
-
-    velocity = policy.velocity_field(
-        obs,
-        chunk.reshape(2, -1),
-        time,
-    ).view(2, horizon, action_dim)
-    changed_velocity = policy.velocity_field(
-        obs,
-        future_changed.reshape(2, -1),
-        time,
-    ).view(2, horizon, action_dim)
-    assert torch.equal(velocity[:, :3], changed_velocity[:, :3])
-    assert not torch.equal(velocity[:, 3], changed_velocity[:, 3])
-
-
-def test_policy_output_is_frame_major_target_rate() -> None:
     policy = FlowMatchingPolicy(
         obs_dim=5,
         action_dim=3,
-        horizon=4,
+        hidden_dims=(24, 16),
+        activation="elu",
+    )
+    parameter_names = tuple(name for name, _ in policy.named_parameters())
+    assert not hasattr(policy, "frame_pos_embed")
+    assert not hasattr(policy, "causal_cell")
+    assert not any("pos" in name or "gru" in name for name in parameter_names)
+
+    observation = torch.randn(2, policy.obs_dim)
+    flow_token = torch.randn(2, policy.action_dim)
+    time = torch.full((2,), 0.37)
+    expected = policy.velocity_field(observation, flow_token, time)
+    repeated = policy.velocity_field(
+        observation[:, None, :].expand(-1, 4, -1).reshape(-1, policy.obs_dim),
+        flow_token[:, None, :].expand(-1, 4, -1).reshape(-1, policy.action_dim),
+        time[:, None].expand(-1, 4).reshape(-1),
+    ).reshape(2, 4, policy.action_dim)
+
+    assert expected.shape == (2, policy.action_dim)
+    for offset in range(4):
+        torch.testing.assert_close(repeated[:, offset], expected)
+
+
+def test_policy_rejects_a_chunk_as_one_flow_token() -> None:
+    policy = FlowMatchingPolicy(
+        obs_dim=5,
+        action_dim=3,
         hidden_dims=(16, 16),
         activation="elu",
     )
     observation = torch.randn(2, policy.obs_dim)
-    flow_state = torch.arange(24, dtype=torch.float32).view(2, 12)
-    velocity = policy.velocity_field(
-        observation,
-        flow_state,
-        torch.full((2,), 0.5),
+    with pytest.raises(ValueError, match="flow_token"):
+        policy._validate_inputs(
+            observation,
+            torch.randn(2, 4 * policy.action_dim),
+            2,
+        )
+
+
+def test_policy_has_no_hidden_action_transform() -> None:
+    policy = FlowMatchingPolicy(
+        obs_dim=5,
+        action_dim=3,
+        hidden_dims=(16, 16),
+        activation="elu",
     )
-    assert velocity.shape == (2, 4 * 3)
-    assert velocity.view(2, 4, 3).shape == (2, 4, 3)
     assert not hasattr(policy, "_action_transform")
     assert not hasattr(policy, "action_transform")

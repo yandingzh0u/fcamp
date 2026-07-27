@@ -74,7 +74,7 @@ def test_resume_rejects_schema_before_comparing_config_or_loading_policy(
             "config": {"method": "fcamp"},
             "policy": incompatible_weight,
             "algo_state": {
-                "fcamp_schema_version": 15,
+                "fcamp_schema_version": 20,
             },
         },
         checkpoint,

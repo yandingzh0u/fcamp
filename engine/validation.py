@@ -200,11 +200,12 @@ def run_validation_rollout(
         C2ServoDiagnostics(
             horizon=horizon,
             control_dt=float(env.dt),
-            omega=float(env.command_servo_omega),
+            omega=float(env.command_position_servo_omega),
             initial_action=env.last_action,
             initial_reference_action=env.last_action,
         )
-        if getattr(algo, "control_parameterization", None) == "c2_target_rate"
+        if getattr(algo, "control_parameterization", None)
+        == "c2_persistent_target_residual"
         else None
     )
 
@@ -305,6 +306,9 @@ def run_validation_rollout(
                 chunk_index += 1
                 active_mask = ~done
                 if servo_diagnostics is not None:
+                    previous_target_action = (
+                        env.command_target_action.detach().clone()
+                    )
                     previous_action = env.last_action.detach().clone()
                     previous_command_rate = env.command_rate.detach().clone()
                     previous_command_acceleration = (
@@ -316,6 +320,7 @@ def run_validation_rollout(
                     reference_dt,
                     active_mask=active_mask,
                 )
+                diagnostic_mask = active_mask & ~step_done
                 applied_action = algo.require_applied_action(info)
                 action_target = (
                     env.default_action_joint_pos
@@ -330,25 +335,29 @@ def run_validation_rollout(
                     action_projection_mask = info.get(
                         "action_projection_mask"
                     )
+                    target_action = info.get("target_action")
                     if not torch.is_tensor(
                         actual_command_rate
                     ) or not torch.is_tensor(
                         actual_command_acceleration
-                    ) or not torch.is_tensor(action_projection_mask):
+                    ) or not torch.is_tensor(
+                        action_projection_mask
+                    ) or not torch.is_tensor(target_action):
                         raise RuntimeError(
-                            "C2 target-rate validation requires carried "
-                            "rate and acceleration"
+                            "C2 residual validation requires the decoded target "
+                            "and carried rate/acceleration"
                         )
                     reference_action = (
                         reference_post["joint_pos"] - env.default_action_joint_pos
                     ) / env.action_scale
                     servo_diagnostics.update(
-                        active_mask=active_mask,
+                        active_mask=diagnostic_mask,
                         chunk_offset=primitive_offset,
                         transition_end_phase_steps=info[
                             "termination_phase_steps"
                         ],
-                        target_rate=frame_payload,
+                        target_action=target_action,
+                        previous_target_action=previous_target_action,
                         previous_action=previous_action,
                         previous_command_rate=previous_command_rate,
                         previous_command_acceleration=(
@@ -365,7 +374,7 @@ def run_validation_rollout(
                 robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
                 robot_root_ang_vel = env.get_mimic_root_velocity_w()[:, 3:]
                 chunk_diagnostics.update(
-                    active_mask=active_mask,
+                    active_mask=diagnostic_mask,
                     chunk_offset=primitive_offset,
                     action=applied_action,
                     joint_pos=robot_joint_pos,

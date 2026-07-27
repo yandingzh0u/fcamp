@@ -26,8 +26,8 @@ from .contracts import (
     resolve_root_velocity_frame,
     validate_actions_in_bounds,
 )
-from .action_rate import (
-    advance_rate_servo,
+from .action_servo import (
+    advance_position_servo,
 )
 from engine.config import EnvironmentConfig
 
@@ -134,17 +134,22 @@ class G1Env:
         self._policy_action_high = torch.full(
             (self.action_dim,), action_bound, device=self.device
         )
-        self.command_servo_omega = float(cfg.command_servo_omega)
+        self.command_position_servo_omega = float(
+            cfg.command_position_servo_omega
+        )
         if (
-            not math.isfinite(self.command_servo_omega)
-            or self.command_servo_omega <= 0.0
+            not math.isfinite(self.command_position_servo_omega)
+            or self.command_position_servo_omega <= 0.0
         ):
-            raise ValueError("command_servo_omega must be finite and positive")
+            raise ValueError(
+                "command_position_servo_omega must be finite and positive"
+            )
         self.last_action = torch.zeros(
             self.num_envs, self.action_dim, device=self.device
         )
         self.command_rate = torch.zeros_like(self.last_action)
         self.command_acceleration = torch.zeros_like(self.last_action)
+        self.command_target_action = torch.zeros_like(self.last_action)
         self._strict_action_contract = True
         self._action_space = self._build_action_space()
         self._push_interval_step_range = PUSH_INTERVAL_STEP_RANGE
@@ -247,44 +252,58 @@ class G1Env:
         )
         return bounded_action, rate, acceleration, projection_mask
 
-    def step_target_rate(
+    def step_target_action(
         self,
-        target_rate: torch.Tensor,
+        target_action: torch.Tensor,
         *,
         active_mask: torch.Tensor | None = None,
         auto_reset: bool = False,
         reset_horizon: int = 1,
         reference_dt: torch.Tensor | float | None = None,
     ):
-        """Execute one target-rate frame through the carried C2 command servo."""
+        """Execute one equilibrium-action frame through the carried C2 servo."""
 
         expected_shape = (self.num_envs, self.action_dim)
-        if target_rate.shape != expected_shape:
+        if target_action.shape != expected_shape:
             raise ValueError(
-                f"Expected target_rate shape {expected_shape}, "
-                f"got {tuple(target_rate.shape)}"
+                f"Expected target_action shape {expected_shape}, "
+                f"got {tuple(target_action.shape)}"
             )
-        if not bool(torch.isfinite(target_rate).all()):
-            raise ValueError("target_rate must be finite")
+        if not bool(torch.isfinite(target_action).all()):
+            raise ValueError("target_action must be finite")
+        self.validate_policy_actions(target_action)
         if active_mask is not None and active_mask.shape != (self.num_envs,):
             raise ValueError(
                 f"active_mask must have shape {(self.num_envs,)}, "
                 f"got {tuple(active_mask.shape)}"
             )
 
+        previous_target_action = self.command_target_action.clone()
+        if active_mask is None:
+            applied_target_action = target_action
+        else:
+            active = active_mask.to(
+                device=self.device,
+                dtype=torch.bool,
+            ).unsqueeze(-1)
+            applied_target_action = torch.where(
+                active,
+                target_action,
+                previous_target_action,
+            )
         action = self.last_action
         rate = self.command_rate
         acceleration = self.command_acceleration
         projection_mask = torch.zeros_like(action, dtype=torch.bool)
         physics_substep_actions = []
         for _ in range(self.decimation):
-            action, rate, acceleration = advance_rate_servo(
-                target_rate,
+            action, rate, acceleration = advance_position_servo(
+                applied_target_action,
                 action,
                 rate,
                 acceleration,
                 dt=self.physics_dt,
-                omega=self.command_servo_omega,
+                omega=self.command_position_servo_omega,
                 active_mask=active_mask,
             )
             action, rate, acceleration, projected = self._project_command_state(
@@ -300,20 +319,14 @@ class G1Env:
         observation, reward, done, info = self.step(
             action,
             physics_substep_actions=torch.stack(physics_substep_actions),
-            command_state=(rate, acceleration),
+            command_state=(rate, acceleration, applied_target_action),
             auto_reset=auto_reset,
             reset_horizon=reset_horizon,
             reference_dt=reference_dt,
         )
-        applied_target_rate = target_rate
-        if active_mask is not None:
-            applied_target_rate = torch.where(
-                active_mask.to(device=self.device, dtype=torch.bool).unsqueeze(-1),
-                target_rate,
-                torch.zeros_like(target_rate),
-            )
         info.update(
-            target_rate=applied_target_rate.clone(),
+            target_action=applied_target_action.clone(),
+            previous_target_action=previous_target_action,
             action_projection_mask=projection_mask,
         )
         return observation, reward, done, info

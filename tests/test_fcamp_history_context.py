@@ -32,6 +32,43 @@ class _RecordingSGD(torch.optim.SGD):
         return super().step(closure)
 
 
+def test_exact_frame_kl_ignores_offsets_absent_after_termination() -> None:
+    algo = object.__new__(FCAMP)
+    algo.horizon_h = 4
+    algo.actor_obs_dim = 1
+    algo.num_act = 1
+    algo._effective_cps_cholesky = lambda **kwargs: (
+        torch.ones(1, 1),
+        torch.ones(()),
+    )
+    algo._flow_mean_raw = lambda actor_obs: actor_obs
+    actor_obs = torch.tensor(
+        [
+            [[[1.0]], [[2.0]], [[3.0]], [[4.0]]],
+            [[[3.0]], [[4.0]], [[5.0]], [[6.0]]],
+        ]
+    ).reshape(2, 4, 1)
+    valid = torch.tensor(
+        [
+            [True, False, False, False],
+            [True, True, False, False],
+        ]
+    )
+
+    actual = algo._exact_rollout_frame_kl(
+        actor_obs,
+        torch.zeros(2, 4, 1),
+        torch.ones(1, 1),
+        valid,
+        micro_batch_size=1,
+    )
+
+    torch.testing.assert_close(
+        actual,
+        torch.tensor([2.5, 8.0, 0.0, 0.0]),
+    )
+
+
 def test_fcamp_actor_step_is_atomic_and_uses_post_step_exact_kl() -> None:
     algo = object.__new__(FCAMP)
     algo.env = SimpleNamespace(device=torch.device("cpu"))
@@ -222,17 +259,39 @@ def test_amp_reward_uses_full_independent_discriminator() -> None:
 def test_discriminator_update_cannot_change_deterministic_actor_action() -> None:
     torch.manual_seed(8)
     algo = object.__new__(FCAMP)
-    algo.base_actor_obs_dim = 3
-    algo.actor_obs_dim = 3
+    algo.base_actor_obs_dim = 6
+    algo.actor_obs_dim = 6
     algo.num_act = 1
     algo.horizon_h = 2
     algo.empirical_normalization = False
+    algo.target_action_mid = torch.tensor([0.25])
+    algo.target_action_half_range = torch.tensor([1.5])
+    algo.action_low = algo.target_action_mid - algo.target_action_half_range
+    algo.action_high = algo.target_action_mid + algo.target_action_half_range
+    algo.env = SimpleNamespace(
+        command_position_servo_omega=20.0,
+        decimation=2,
+        physics_dt=0.01,
+        last_action=torch.tensor([[0.5], [-0.25]]),
+        command_rate=torch.zeros(2, 1),
+        command_acceleration=torch.zeros(2, 1),
+        command_target_action=torch.tensor([[0.5], [-0.25]]),
+    )
     algo.discriminator = StyleDiscriminator(6, hidden_dims=(4,))
     algo.disc_normalizer = RunningNormalizer(6, device="cpu")
-    algo._flow_mean_raw = lambda actor_obs: actor_obs[:, :2]
-    obs = torch.tensor([[1.0, 2.0, 0.5], [3.0, 4.0, -0.25]])
+    algo._flow_mean_raw = lambda actor_obs: actor_obs[:, :1]
+    obs = torch.tensor(
+        [
+            [1.0, 2.0, 0.0, 0.0, 0.5, 0.5],
+            [3.0, 4.0, 0.0, 0.0, -0.25, -0.25],
+        ]
+    )
 
     before = algo.deterministic_actions(obs)
+    torch.testing.assert_close(
+        before,
+        obs[:, :1].unsqueeze(1).expand(2, 2, 1),
+    )
     with torch.no_grad():
         for parameter in algo.discriminator.parameters():
             parameter.add_(torch.randn_like(parameter))
@@ -249,7 +308,7 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
     algo.action_high = torch.tensor([5.0, 5.0])
     algo.env = SimpleNamespace(
         dt=0.02,
-        command_servo_omega=20.0,
+        command_position_servo_omega=67.0,
     )
 
     valid_state = {
@@ -258,8 +317,8 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
         "action_low": algo.action_low.clone(),
         "action_high": algo.action_high.clone(),
         "decoder_control_dt": float(algo.env.dt),
-        "decoder_command_servo_omega": float(
-            algo.env.command_servo_omega
+        "decoder_command_position_servo_omega": float(
+            algo.env.command_position_servo_omega
         ),
     }
     algo.validate_checkpoint_payload({"algo_state": valid_state})
@@ -278,7 +337,7 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
         with pytest.raises(ValueError, match=name):
             algo.validate_checkpoint_payload({"algo_state": mismatched})
 
-    for historical_schema in (8, 9, 11, 13, 14, 15, 16):
+    for historical_schema in (8, 9, 11, 13, 14, 15, 16, 17, 18, 19, 20):
         historical = dict(valid_state)
         historical["fcamp_schema_version"] = historical_schema
         with pytest.raises(ValueError, match="fcamp_schema_version"):
@@ -300,7 +359,7 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
 
     decoder_mismatches = {
         "decoder_control_dt": 0.01,
-        "decoder_command_servo_omega": 10.0,
+        "decoder_command_position_servo_omega": 10.0,
     }
     for name, mismatched_value in decoder_mismatches.items():
         mismatched = dict(valid_state)

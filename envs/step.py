@@ -13,7 +13,7 @@ class MimicStepMixin:
         reset_horizon: int = 1,
         reference_dt: torch.Tensor | float | None = None,
         physics_substep_actions: torch.Tensor | None = None,
-        command_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+        command_state: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         previous_action = self.last_action.clone()
         previous_rate = self.command_rate.clone()
@@ -107,12 +107,18 @@ class MimicStepMixin:
             applied_command_acceleration = (
                 applied_command_rate - previous_rate
             ) / float(self.dt)
+            applied_command_target = applied_actions
         else:
-            applied_command_rate, applied_command_acceleration = command_state
+            (
+                applied_command_rate,
+                applied_command_acceleration,
+                applied_command_target,
+            ) = command_state
             expected_shape = (self.num_envs, self.action_dim)
             for name, value in (
                 ("command_rate", applied_command_rate),
                 ("command_acceleration", applied_command_acceleration),
+                ("command_target_action", applied_command_target),
             ):
                 if value.shape != expected_shape:
                     raise ValueError(
@@ -123,6 +129,7 @@ class MimicStepMixin:
                     raise ValueError(f"{name} must be finite")
         self.command_rate.copy_(applied_command_rate)
         self.command_acceleration.copy_(applied_command_acceleration)
+        self.command_target_action.copy_(applied_command_target)
         self.last_action.copy_(applied_actions)
         # Capture the true post-action state before any optional reset.  FCAMP
         # normally disables auto-reset within a chunk, while this also makes the

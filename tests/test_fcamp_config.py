@@ -19,9 +19,10 @@ def test_fcamp_config_is_h4_w16_flow_cps() -> None:
     assert cfg.parameters.rollout_env_steps == 24
     assert cfg.parameters.rollout_env_steps % cfg.parameters.horizon == 0
     assert cfg.parameters.flow_steps == 4
-    assert cfg.parameters.cps_physical_rms == 0.05
+    assert cfg.parameters.cps_target_increment_rms == 0.10
+    assert "cps_physical_rms" not in asdict(cfg.parameters)
     assert cfg.parameters.cps_trainable is True
-    assert cfg.environment.command_servo_omega == 20.0
+    assert cfg.environment.command_position_servo_omega == 67.0
     assert "command_rate_limit" not in asdict(cfg.environment)
     assert "rate_half_life_seconds" not in asdict(cfg.environment)
     assert cfg.parameters.desired_kl == 0.01
@@ -37,10 +38,19 @@ def test_fcamp_config_is_h4_w16_flow_cps() -> None:
 
 def test_fcamp_requires_positive_finite_servo_frequency() -> None:
     for value in ("0", "-1", ".inf"):
-        with pytest.raises(ValueError, match="command_servo_omega"):
+        with pytest.raises(ValueError, match="command_position_servo_omega"):
             load_config(
                 ROOT / "configs" / "fcamp_largebox.yaml",
-                [f"environment.command_servo_omega={value}"],
+                [f"environment.command_position_servo_omega={value}"],
+            )
+
+
+def test_fcamp_requires_positive_finite_target_increment_rms() -> None:
+    for value in ("0", "-1", ".inf"):
+        with pytest.raises(ValueError, match="cps_target_increment_rms"):
+            load_config(
+                ROOT / "configs" / "fcamp_largebox.yaml",
+                [f"parameters.cps_target_increment_rms={value}"],
             )
 
 
@@ -101,6 +111,8 @@ def test_validation_has_no_fractional_early_stop() -> None:
 
 def test_flow_cps_config_has_no_legacy_algorithm_fields() -> None:
     fields_by_name = {field.name for field in fields(FlowCPSConfig)}
+    assert "cps_target_increment_rms" in fields_by_name
+    assert "cps_physical_rms" not in fields_by_name
     assert "init_noise_std" not in fields_by_name
     assert "num_generations" not in fields_by_name
     assert "tail_bootstrap_steps" not in fields_by_name

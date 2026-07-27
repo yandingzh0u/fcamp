@@ -34,18 +34,24 @@ class _FakeAlgo:
 def test_resume_signature_contains_the_complete_physical_decoder() -> None:
     environment = {
         "policy_action_bound": 5.0,
-        "command_servo_omega": 20.0,
+        "command_position_servo_omega": 67.0,
+    }
+    parameters = {
+        "horizon": 4,
+        "cps_target_increment_rms": 0.10,
     }
     signature = _resume_signature(
         {
             "method": "fcamp",
             "environment": environment,
-            "parameters": {},
+            "parameters": parameters,
         }
     )
 
     for name, expected in environment.items():
         assert signature["environment"][name] == expected
+    assert signature["parameters"] == parameters
+    assert "cps_physical_rms" not in signature["parameters"]
 
 
 def test_reset_sampler_on_resume_skips_compatible_checkpoint_state(tmp_path) -> None:

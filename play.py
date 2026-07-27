@@ -43,7 +43,7 @@ checkpoint_path = Path(args_cli.checkpoint).expanduser().resolve()
 if not checkpoint_path.is_file():
     raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 # This CPU payload is retained for the complete process.  Most importantly,
-# schema 16 is checked before AppLauncher creates an Isaac runtime.
+# schema 21 is checked before AppLauncher creates an Isaac runtime.
 payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 preflight_static_checkpoint_payload(payload, expected_method="fcamp")
 
@@ -64,7 +64,7 @@ def _rebuild_config(payload: dict) -> ExperimentConfig:
         "method" not in raw and "algorithm" not in raw
     ):
         raise KeyError(
-            "Schema-16 FCAMP checkpoint has no current experiment config"
+            "Schema-21 FCAMP checkpoint has no current experiment config"
         )
     return config_from_dict(raw)
 

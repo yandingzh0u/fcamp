@@ -11,13 +11,13 @@ import torch
 
 
 FCAMP_CHECKPOINT_CONTRACT = {
-    "fcamp_schema_version": 17,
-    "action_contract": "environment_critical_rate_servo_c2_v1",
-    "reset_contract": "causal_reference_servo_state_v1",
-    "validation_contract": "target_rate_c2_single_decoder_v1",
-    "actor_mean_contract": "initial_cps_standardized_flow_v1",
-    "cps_metric_contract": "finite_h_c2_command_response_v1",
-    "ppo_contract": "final_target_rate_atomic_exact_kl_v1",
+    "fcamp_schema_version": 21,
+    "action_contract": "stationary_shared_token_h4_target_increment_c2_v1",
+    "reset_contract": "causal_planned_c2_state_v1",
+    "validation_contract": "stationary_shared_token_h4_planned_c2_state_v1",
+    "actor_mean_contract": "stationary_shared_token_h4_flow_v1",
+    "cps_metric_contract": "shared_per_token_target_increment_rms_v1",
+    "ppo_contract": "exact_conditional_stationary_shared_token_h4_v1",
 }
 
 
@@ -111,7 +111,7 @@ _RESUME_ENV_KEYS = (
     "motion_end_behavior",
     "action_rate_weight",
     "policy_action_bound",
-    "command_servo_omega",
+    "command_position_servo_omega",
     "physics_material_combine_mode",
     "contact_sensor_update_period",
 )

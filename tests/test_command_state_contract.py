@@ -5,10 +5,11 @@ import sys
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 
+import pytest
 import torch
 
 from engine.env_state import restore_env_state, snapshot_env_state
-from envs.action_rate import advance_rate_servo
+from envs.action_servo import advance_position_servo
 
 
 def _module(name: str, **attributes) -> ModuleType:
@@ -132,7 +133,7 @@ def _load_robot_type(monkeypatch):
     )
     path = Path(__file__).parents[1] / "envs" / "robot.py"
     spec = importlib.util.spec_from_file_location(
-        "envs._command_servo_environment_test",
+        "envs._position_servo_environment_test",
         path,
     )
     assert spec is not None and spec.loader is not None
@@ -148,13 +149,26 @@ def _servo_environment(robot_type):
     env.action_joint_ids = torch.arange(2)
     env.decimation = 4
     env.physics_dt = 0.005
-    env.command_servo_omega = 20.0
+    env.command_position_servo_omega = 20.0
     env._policy_action_low = torch.full((2,), -1.0)
     env._policy_action_high = torch.full((2,), 1.0)
     env.last_action = torch.tensor([[0.1, -0.2], [0.4, -0.3]])
     env.command_rate = torch.tensor([[0.2, -0.1], [0.3, -0.4]])
     env.command_acceleration = torch.tensor([[0.5, -0.2], [0.1, -0.6]])
+    env.command_target_action = torch.tensor(
+        [[-0.6, 0.25], [0.45, -0.8]]
+    )
     captured: dict[str, torch.Tensor] = {}
+
+    def validate(self, actions, *, tolerance=1.0e-6):
+        violation = torch.maximum(
+            self._policy_action_low - actions,
+            actions - self._policy_action_high,
+        ).max()
+        if float(violation.item()) > float(tolerance):
+            raise RuntimeError("target action is outside the physical domain")
+
+    env.validate_policy_actions = MethodType(validate, env)
 
     def execute(
         self,
@@ -164,14 +178,16 @@ def _servo_environment(robot_type):
         command_state,
         **_kwargs,
     ):
-        rate, acceleration = command_state
+        rate, acceleration, target = command_state
         captured["actions"] = actions.clone()
         captured["substeps"] = physics_substep_actions.clone()
         captured["rate"] = rate.clone()
         captured["acceleration"] = acceleration.clone()
+        captured["target"] = target.clone()
         self.last_action.copy_(actions)
         self.command_rate.copy_(rate)
         self.command_acceleration.copy_(acceleration)
+        self.command_target_action.copy_(target)
         return (
             torch.zeros(self.num_envs, 1),
             torch.zeros(self.num_envs),
@@ -180,6 +196,7 @@ def _servo_environment(robot_type):
                 "applied_action": actions.clone(),
                 "command_rate": rate.clone(),
                 "command_acceleration": acceleration.clone(),
+                "command_target_action": target.clone(),
             },
         )
 
@@ -198,7 +215,10 @@ def test_command_tail_uses_servo_natural_units_then_last_action(
     observation.command_acceleration = torch.tensor(
         [[100.0, -25.0], [-200.0, 12.5]]
     )
-    observation.command_servo_omega = 20.0
+    observation.command_position_servo_omega = 20.0
+    observation.command_target_action = torch.tensor(
+        [[0.6, -0.7], [-0.8, 0.9]]
+    )
     observation.last_action = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
     prefix = torch.tensor([[9.0], [8.0]])
 
@@ -208,37 +228,70 @@ def test_command_tail_uses_servo_natural_units_then_last_action(
         assembled,
         torch.tensor(
             [
-                [9.0, 1.0, -0.25, 0.25, -0.0625, 1.0, 2.0],
-                [8.0, -2.0, 0.125, -0.5, 0.03125, 3.0, 4.0],
+                [
+                    9.0,
+                    1.0,
+                    -0.25,
+                    0.25,
+                    -0.0625,
+                    0.6,
+                    -0.7,
+                    1.0,
+                    2.0,
+                ],
+                [
+                    8.0,
+                    -2.0,
+                    0.125,
+                    -0.5,
+                    0.03125,
+                    -0.8,
+                    0.9,
+                    3.0,
+                    4.0,
+                ],
             ]
         ),
+    )
+    torch.testing.assert_close(
+        assembled[:, -8:-6],
+        observation.command_rate / observation.command_position_servo_omega,
+    )
+    torch.testing.assert_close(
+        assembled[:, -6:-4],
+        observation.command_acceleration
+        / observation.command_position_servo_omega**2,
+    )
+    torch.testing.assert_close(
+        assembled[:, -4:-2], observation.command_target_action
     )
     torch.testing.assert_close(assembled[:, -2:], observation.last_action)
 
 
-def test_target_rate_executes_exact_substeps_and_persists_analytic_state(
+def test_target_action_executes_exact_substeps_and_persists_analytic_state(
     monkeypatch,
 ) -> None:
     robot_type = _load_robot_type(monkeypatch)
     env, captured = _servo_environment(robot_type)
     initial_action = env.last_action.clone()
+    initial_target = env.command_target_action.clone()
     action = initial_action.clone()
     rate = env.command_rate.clone()
     acceleration = env.command_acceleration.clone()
-    target_rate = torch.tensor([[1.2, -0.7], [-0.8, 0.9]])
+    target_action = torch.tensor([[0.8, -0.7], [-0.8, 0.9]])
     expected_substeps = []
     for _ in range(env.decimation):
-        action, rate, acceleration = advance_rate_servo(
-            target_rate,
+        action, rate, acceleration = advance_position_servo(
+            target_action,
             action,
             rate,
             acceleration,
             dt=env.physics_dt,
-            omega=env.command_servo_omega,
+            omega=env.command_position_servo_omega,
         )
         expected_substeps.append(action)
 
-    _, _, _, info = env.step_target_rate(target_rate)
+    _, _, _, info = env.step_target_action(target_action)
 
     torch.testing.assert_close(
         captured["substeps"], torch.stack(expected_substeps)
@@ -246,12 +299,37 @@ def test_target_rate_executes_exact_substeps_and_persists_analytic_state(
     torch.testing.assert_close(captured["actions"], action)
     torch.testing.assert_close(captured["rate"], rate)
     torch.testing.assert_close(captured["acceleration"], acceleration)
+    torch.testing.assert_close(captured["target"], target_action)
+    torch.testing.assert_close(env.command_target_action, target_action)
     torch.testing.assert_close(info["command_rate"], rate)
     torch.testing.assert_close(info["command_acceleration"], acceleration)
+    torch.testing.assert_close(info["command_target_action"], target_action)
+    torch.testing.assert_close(info["target_action"], target_action)
+    torch.testing.assert_close(
+        info["previous_target_action"], initial_target
+    )
     assert not torch.allclose(
         rate,
         (action - initial_action) / (env.decimation * env.physics_dt),
     )
+
+
+def test_target_action_requires_finite_in_domain_physical_values(
+    monkeypatch,
+) -> None:
+    robot_type = _load_robot_type(monkeypatch)
+    env, captured = _servo_environment(robot_type)
+
+    with pytest.raises(ValueError, match="target_action shape"):
+        env.step_target_action(torch.zeros(env.num_envs, 1))
+    with pytest.raises(ValueError, match="target_action must be finite"):
+        env.step_target_action(
+            torch.full_like(env.last_action, float("nan"))
+        )
+    with pytest.raises(RuntimeError, match="outside the physical domain"):
+        env.step_target_action(torch.full_like(env.last_action, 1.01))
+
+    assert captured == {}
 
 
 def test_projection_anti_windup_can_leave_bound_on_inward_target(
@@ -260,11 +338,11 @@ def test_projection_anti_windup_can_leave_bound_on_inward_target(
     robot_type = _load_robot_type(monkeypatch)
     env, _ = _servo_environment(robot_type)
     env.last_action.fill_(1.0)
-    env.command_rate.zero_()
+    env.command_rate.fill_(1.0)
     env.command_acceleration.zero_()
 
-    _, _, _, outward_info = env.step_target_rate(
-        torch.full_like(env.last_action, 10_000.0)
+    _, _, _, outward_info = env.step_target_action(
+        torch.ones_like(env.last_action)
     )
 
     torch.testing.assert_close(env.last_action, torch.ones_like(env.last_action))
@@ -275,7 +353,7 @@ def test_projection_anti_windup_can_leave_bound_on_inward_target(
     )
     assert bool(outward_info["action_projection_mask"].all())
 
-    _, _, _, inward_info = env.step_target_rate(
+    _, _, _, inward_info = env.step_target_action(
         torch.full_like(env.last_action, -1.0)
     )
 
@@ -284,7 +362,7 @@ def test_projection_anti_windup_can_leave_bound_on_inward_target(
     assert not bool(inward_info["action_projection_mask"].any())
 
 
-def test_inactive_target_rate_rows_keep_complete_command_state(
+def test_inactive_target_action_rows_keep_complete_command_state(
     monkeypatch,
 ) -> None:
     robot_type = _load_robot_type(monkeypatch)
@@ -292,10 +370,11 @@ def test_inactive_target_rate_rows_keep_complete_command_state(
     previous_action = env.last_action.clone()
     previous_rate = env.command_rate.clone()
     previous_acceleration = env.command_acceleration.clone()
+    previous_target = env.command_target_action.clone()
     active = torch.tensor([True, False])
 
-    _, _, _, info = env.step_target_rate(
-        torch.full_like(env.last_action, 2.0),
+    _, _, _, info = env.step_target_action(
+        torch.full_like(env.last_action, 0.75),
         active_mask=active,
     )
 
@@ -309,7 +388,20 @@ def test_inactive_target_rate_rows_keep_complete_command_state(
         env.command_acceleration[1], previous_acceleration[1]
     )
     torch.testing.assert_close(
-        info["target_rate"][1], torch.zeros_like(info["target_rate"][1])
+        env.command_target_action[0],
+        torch.full_like(env.command_target_action[0], 0.75),
+    )
+    torch.testing.assert_close(
+        env.command_target_action[1], previous_target[1]
+    )
+    torch.testing.assert_close(
+        captured["target"], env.command_target_action
+    )
+    torch.testing.assert_close(
+        info["target_action"], env.command_target_action
+    )
+    torch.testing.assert_close(
+        info["previous_target_action"], previous_target
     )
     assert not bool(info["action_projection_mask"][1].any())
 
@@ -364,6 +456,9 @@ def _state_fixture():
         command_acceleration=torch.tensor(
             [[75.0, -20.0], [0.0, 82.5], [-35.0, 10.0]]
         ),
+        command_target_action=torch.tensor(
+            [[0.25, -0.5], [0.75, 0.125], [-0.875, 0.625]]
+        ),
         next_push_step=torch.tensor([20, 21, 22]),
         push_time_left=torch.tensor([1.0, 2.0, 3.0]),
         first_push_step=torch.tensor([-1, 7, 8]),
@@ -384,11 +479,13 @@ def test_snapshot_restore_recovers_complete_command_state_exactly() -> None:
     env = _state_fixture()
     expected_rate = env.command_rate.clone()
     expected_acceleration = env.command_acceleration.clone()
+    expected_target = env.command_target_action.clone()
     expected_action = env.last_action.clone()
 
     snapshot = snapshot_env_state(env)
     env.command_rate.add_(100.0)
     env.command_acceleration.sub_(100.0)
+    env.command_target_action.mul_(-3.0)
     env.last_action.zero_()
 
     restore_env_state(env, snapshot)
@@ -400,9 +497,21 @@ def test_snapshot_restore_recovers_complete_command_state_exactly() -> None:
         rtol=0.0,
         atol=0.0,
     )
+    torch.testing.assert_close(
+        env.command_target_action,
+        expected_target,
+        rtol=0.0,
+        atol=0.0,
+    )
     torch.testing.assert_close(env.last_action, expected_action, rtol=0.0, atol=0.0)
     torch.testing.assert_close(snapshot["command_rate"], expected_rate)
     torch.testing.assert_close(
         snapshot["command_acceleration"],
         expected_acceleration,
+    )
+    torch.testing.assert_close(
+        snapshot["command_target_action"],
+        expected_target,
+        rtol=0.0,
+        atol=0.0,
     )

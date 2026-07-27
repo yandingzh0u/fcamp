@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from envs.action_rate import advance_rate_servo
+from envs.action_servo import advance_position_servo
 
 
 OMEGA = 20.0
@@ -14,31 +14,31 @@ def _state() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         torch.tensor([[1.2, -0.4], [0.3, 0.8]], dtype=torch.float64),
         torch.tensor([[0.7, -1.1], [0.2, 1.4]], dtype=torch.float64),
         torch.tensor([[-0.5, 0.9], [1.3, -0.2]], dtype=torch.float64),
-        torch.tensor([[1.5, 0.1], [-0.8, 2.0]], dtype=torch.float64),
+        torch.tensor([[0.5, 0.1], [-0.8, 1.0]], dtype=torch.float64),
     )
 
 
 def test_exact_step_is_invariant_to_splitting_the_interval() -> None:
-    action, rate, acceleration, target_rate = _state()
+    action, rate, acceleration, target_action = _state()
 
-    whole = advance_rate_servo(
-        target_rate,
+    whole = advance_position_servo(
+        target_action,
         action,
         rate,
         acceleration,
         dt=0.037,
         omega=OMEGA,
     )
-    first = advance_rate_servo(
-        target_rate,
+    first = advance_position_servo(
+        target_action,
         action,
         rate,
         acceleration,
         dt=0.011,
         omega=OMEGA,
     )
-    split = advance_rate_servo(
-        target_rate,
+    split = advance_position_servo(
+        target_action,
         *first,
         dt=0.026,
         omega=OMEGA,
@@ -46,26 +46,26 @@ def test_exact_step_is_invariant_to_splitting_the_interval() -> None:
 
     for whole_value, split_value in zip(whole, split, strict=True):
         torch.testing.assert_close(
-            whole_value, split_value, atol=2.0e-15, rtol=2.0e-15
+            whole_value, split_value, atol=2.0e-14, rtol=3.0e-15
         )
 
 
-def test_target_rate_step_enters_through_jerk_without_state_jump() -> None:
+def test_target_jump_enters_through_jerk_without_state_jump() -> None:
     zeros = torch.zeros(1, 1, dtype=torch.float64)
-    target_rate = torch.ones_like(zeros)
-    expected_jerk = OMEGA**2 * target_rate
+    target_action = torch.ones_like(zeros)
+    expected_jerk = OMEGA**3 * target_action
 
-    coarse = advance_rate_servo(
-        target_rate, zeros, zeros, zeros, dt=2.0e-5, omega=OMEGA
+    coarse = advance_position_servo(
+        target_action, zeros, zeros, zeros, dt=2.0e-5, omega=OMEGA
     )
-    fine = advance_rate_servo(
-        target_rate, zeros, zeros, zeros, dt=1.0e-5, omega=OMEGA
+    fine = advance_position_servo(
+        target_action, zeros, zeros, zeros, dt=1.0e-5, omega=OMEGA
     )
 
     torch.testing.assert_close(
         fine[2] / 1.0e-5,
         expected_jerk,
-        atol=0.17,
+        atol=2.5,
         rtol=0.0,
     )
     assert coarse[2].item() / fine[2].item() == pytest.approx(2.0, rel=5.0e-4)
@@ -73,16 +73,15 @@ def test_target_rate_step_enters_through_jerk_without_state_jump() -> None:
     assert coarse[0].item() / fine[0].item() == pytest.approx(8.0, rel=5.0e-4)
 
 
-def test_zero_target_rate_stably_settles_rate_and_acceleration() -> None:
+def test_constant_target_stably_settles_the_complete_state() -> None:
     action = torch.tensor([[0.4, -1.0]], dtype=torch.float64)
     rate = torch.tensor([[3.0, -2.0]], dtype=torch.float64)
     acceleration = torch.tensor([[-5.0, 4.0]], dtype=torch.float64)
-    target_rate = torch.zeros_like(action)
+    target_action = torch.tensor([[0.2, 0.7]], dtype=torch.float64)
 
-    initial_action = action
     for _ in range(500):
-        action, rate, acceleration = advance_rate_servo(
-            target_rate,
+        action, rate, acceleration = advance_position_servo(
+            target_action,
             action,
             rate,
             acceleration,
@@ -90,20 +89,15 @@ def test_zero_target_rate_stably_settles_rate_and_acceleration() -> None:
             omega=OMEGA,
         )
 
-    expected_final_action = (
-        initial_action
-        + torch.tensor([[3.0, -2.0]], dtype=torch.float64) * (2.0 / OMEGA)
-        + torch.tensor([[-5.0, 4.0]], dtype=torch.float64) / OMEGA**2
-    )
-    torch.testing.assert_close(action, expected_final_action)
-    assert float(rate.abs().max()) < 1.0e-38
-    assert float(acceleration.abs().max()) < 1.0e-36
+    torch.testing.assert_close(action, target_action)
+    assert float(rate.abs().max()) < 1.0e-13
+    assert float(acceleration.abs().max()) < 1.0e-12
 
 
 def test_inactive_environment_holds_all_carried_state() -> None:
-    action, rate, acceleration, target_rate = _state()
-    next_state = advance_rate_servo(
-        target_rate,
+    action, rate, acceleration, target_action = _state()
+    next_state = advance_position_servo(
+        target_action,
         action,
         rate,
         acceleration,
@@ -119,10 +113,42 @@ def test_inactive_environment_holds_all_carried_state() -> None:
         assert not torch.equal(next_value[0], previous_value[0])
 
 
+def test_exact_solution_matches_augmented_matrix_exponential() -> None:
+    action, rate, acceleration, target_action = _state()
+    dt = 0.073
+    exact = advance_position_servo(
+        target_action,
+        action,
+        rate,
+        acceleration,
+        dt=dt,
+        omega=OMEGA,
+    )
+
+    generator = torch.zeros(4, 4, dtype=torch.float64)
+    generator[0, 1] = 1.0
+    generator[1, 2] = 1.0
+    generator[2, 0] = -(OMEGA**3)
+    generator[2, 1] = -(3.0 * OMEGA**2)
+    generator[2, 2] = -(3.0 * OMEGA)
+    generator[2, 3] = OMEGA**3
+    transition = torch.matrix_exp(generator * dt)
+    augmented = torch.stack(
+        (action, rate, acceleration, target_action), dim=-1
+    )
+    expected = augmented @ transition.T
+
+    for index, exact_value in enumerate(exact):
+        torch.testing.assert_close(
+            exact_value, expected[..., index], atol=2.0e-11, rtol=2.0e-12
+        )
+    torch.testing.assert_close(expected[..., 3], target_action)
+
+
 def test_exact_solution_matches_fine_runge_kutta_integration() -> None:
-    action, rate, acceleration, target_rate = _state()
-    exact = advance_rate_servo(
-        target_rate,
+    action, rate, acceleration, target_action = _state()
+    exact = advance_position_servo(
+        target_action,
         action,
         rate,
         acceleration,
@@ -137,7 +163,12 @@ def test_exact_solution_matches_fine_runge_kutta_integration() -> None:
         state: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x, v, a = state
-        return v, a, OMEGA**2 * (target_rate - v) - 2.0 * OMEGA * a
+        jerk = (
+            OMEGA**3 * (target_action - x)
+            - 3.0 * OMEGA**2 * v
+            - 3.0 * OMEGA * a
+        )
+        return v, a, jerk
 
     def add(
         state: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -186,28 +217,28 @@ def test_servo_rejects_invalid_scalar_parameters(
     kwargs: dict[str, float],
     message: str,
 ) -> None:
-    action, rate, acceleration, target_rate = _state()
+    action, rate, acceleration, target_action = _state()
     with pytest.raises(ValueError, match=message):
-        advance_rate_servo(
-            target_rate, action, rate, acceleration, **kwargs
+        advance_position_servo(
+            target_action, action, rate, acceleration, **kwargs
         )
 
 
 def test_servo_rejects_invalid_state_or_mask() -> None:
-    action, rate, acceleration, target_rate = _state()
+    action, rate, acceleration, target_action = _state()
 
     with pytest.raises(ValueError, match="identical shapes"):
-        advance_rate_servo(
-            target_rate[:, :1],
+        advance_position_servo(
+            target_action[:, :1],
             action,
             rate,
             acceleration,
             dt=0.02,
             omega=OMEGA,
         )
-    with pytest.raises(ValueError, match="target_rate must be finite"):
-        advance_rate_servo(
-            target_rate.fill_(float("nan")),
+    with pytest.raises(ValueError, match="target_action must be finite"):
+        advance_position_servo(
+            target_action.fill_(float("nan")),
             action,
             rate,
             acceleration,
@@ -215,7 +246,7 @@ def test_servo_rejects_invalid_state_or_mask() -> None:
             omega=OMEGA,
         )
     with pytest.raises(ValueError, match="active_mask must have shape"):
-        advance_rate_servo(
+        advance_position_servo(
             torch.zeros_like(action),
             action,
             rate,

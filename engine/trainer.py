@@ -13,9 +13,9 @@ from .metrics_logger import MetricsLogger
 from envs.g1_mimic import G1MimicEnv
 
 
-# Protocol 7 evaluates cached target rates through the same per-frame C2 servo
-# and physics-substep trajectory used by training/playback.
-VALIDATION_PROTOCOL_VERSION = 7.0
+# Protocol 11 evaluates the stationary shared-token H=4 plan while carrying
+# the same planned C2 state through every frame and chunk as training/playback.
+VALIDATION_PROTOCOL_VERSION = 11.0
 
 
 class CoreTrainer:

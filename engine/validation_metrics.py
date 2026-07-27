@@ -4,17 +4,17 @@ import math
 
 import torch
 
-from envs.action_rate import advance_rate_servo
+from envs.action_servo import advance_position_servo
 
 
 class ChunkBoundaryDiagnostics:
     """Collect primitive-level chunk diagnostics without changing control.
 
     A sample is classified by the offset of the action that caused the
-    transition.  Offset zero is a chunk boundary only after an environment has
-    already executed at least one action; the first post-reset transition is
-    reported separately.  Terminal transitions are legal samples, while an
-    environment must be omitted from ``active_mask`` on every later step.
+    transition.  The first complete chunk after reset is warm-up for both
+    boundary and internal distributions, so their ratio always compares
+    identically aged transitions.  The caller excludes the current terminal
+    transition, as well as every later inactive step, from ``active_mask``.
     """
 
     _DISTRIBUTIONS = (
@@ -174,8 +174,9 @@ class ChunkBoundaryDiagnostics:
             raise ValueError(f"chunk offsets must lie in [0, {self.horizon - 1}]")
 
         reset_first = active & (self._episode_steps == 0)
-        boundary = active & (self._episode_steps > 0) & (offsets == 0)
-        internal = active & (self._episode_steps > 0) & (offsets != 0)
+        ratio_ready = active & (self._episode_steps >= self.horizon)
+        boundary = ratio_ready & (offsets == 0)
+        internal = ratio_ready & (offsets != 0)
 
         previous_delta_valid = self._has_previous_action_delta.clone()
         action_delta_vector = action - self._previous_action
@@ -277,23 +278,28 @@ class ChunkBoundaryDiagnostics:
 
 
 class C2ServoDiagnostics:
-    """Measure the exact C2 target-rate servo and its chunk-offset behavior."""
+    """Measure the exact C2 target-action servo and its chunk-offset behavior."""
 
     _VALUES = (
-        "target_rate_abs",
+        "target_action_abs",
+        "target_increment_abs",
+        "target_increment_d2_abs",
         "previous_command_rate_abs",
         "previous_command_acceleration_abs",
         "actual_command_acceleration_abs",
-        "rate_error_abs",
+        "position_error_abs",
         "initial_jerk_abs",
         "command_acceleration_delta_abs",
         "predicted_action_d2_abs",
         "actual_action_d2_abs",
+        "reference_action_delta_abs",
         "reference_action_d2_abs",
         "predicted_action_d3_abs",
         "actual_action_d3_abs",
         "reference_action_d3_abs",
         "prediction_residual_abs",
+        "rate_prediction_residual_abs",
+        "acceleration_prediction_residual_abs",
         "projection_joint_fraction",
     )
 
@@ -349,6 +355,7 @@ class C2ServoDiagnostics:
         )
         self._previous_reference_delta = torch.zeros_like(initial_action)
         self._previous_reference_d2 = torch.zeros_like(initial_action)
+        self._previous_target_increment = torch.zeros_like(initial_action)
         self._has_previous_action_delta = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
@@ -360,6 +367,12 @@ class C2ServoDiagnostics:
         )
         self._has_previous_reference_d2 = torch.zeros_like(
             self._has_previous_action_delta
+        )
+        self._has_previous_target_increment = torch.zeros_like(
+            self._has_previous_action_delta
+        )
+        self._episode_steps = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
         )
         self._tracked_offsets = max(4, self.horizon)
         self._offset_values = {
@@ -377,7 +390,8 @@ class C2ServoDiagnostics:
         active_mask: torch.Tensor,
         chunk_offset: int | torch.Tensor,
         transition_end_phase_steps: torch.Tensor,
-        target_rate: torch.Tensor,
+        target_action: torch.Tensor,
+        previous_target_action: torch.Tensor,
         previous_action: torch.Tensor,
         previous_command_rate: torch.Tensor,
         previous_command_acceleration: torch.Tensor,
@@ -390,7 +404,8 @@ class C2ServoDiagnostics:
         active = self._validate_mask(active_mask)
         expected = (self.num_envs, self.action_dim)
         for name, value in (
-            ("target_rate", target_rate),
+            ("target_action", target_action),
+            ("previous_target_action", previous_target_action),
             ("previous_action", previous_action),
             ("previous_command_rate", previous_command_rate),
             (
@@ -430,13 +445,15 @@ class C2ServoDiagnostics:
                 f"{self.num_envs} values, got {tuple(phases.shape)}"
             )
 
-        predicted_action, _, _ = advance_rate_servo(
-            target_rate,
-            previous_action,
-            previous_command_rate,
-            previous_command_acceleration,
-            dt=self.control_dt,
-            omega=self.omega,
+        predicted_action, predicted_rate, predicted_acceleration = (
+            advance_position_servo(
+                target_action,
+                previous_action,
+                previous_command_rate,
+                previous_command_acceleration,
+                dt=self.control_dt,
+                omega=self.omega,
+            )
         )
         predicted_delta = predicted_action - previous_action
         actual_delta = actual_action - previous_action
@@ -449,13 +466,22 @@ class C2ServoDiagnostics:
         reference_delta = reference_action - self._previous_reference_action
         reference_d2 = reference_delta - self._previous_reference_delta
         reference_d3 = reference_d2 - self._previous_reference_d2
-        rate_error = target_rate - previous_command_rate
+        target_increment = target_action - previous_target_action
+        target_increment_d2 = (
+            target_increment - self._previous_target_increment
+        )
+        position_error = target_action - previous_action
         initial_jerk = (
-            self.omega**2 * rate_error
-            - 2.0 * self.omega * previous_command_acceleration
+            self.omega**3 * position_error
+            - 3.0 * self.omega**2 * previous_command_rate
+            - 3.0 * self.omega * previous_command_acceleration
         )
         values = {
-            "target_rate_abs": target_rate.abs().mean(dim=-1),
+            "target_action_abs": target_action.abs().mean(dim=-1),
+            "target_increment_abs": target_increment.abs().mean(dim=-1),
+            "target_increment_d2_abs": (
+                target_increment_d2.abs().mean(dim=-1)
+            ),
             "previous_command_rate_abs": (
                 previous_command_rate.abs().mean(dim=-1)
             ),
@@ -465,7 +491,7 @@ class C2ServoDiagnostics:
             "actual_command_acceleration_abs": (
                 actual_command_acceleration.abs().mean(dim=-1)
             ),
-            "rate_error_abs": rate_error.abs().mean(dim=-1),
+            "position_error_abs": position_error.abs().mean(dim=-1),
             "initial_jerk_abs": initial_jerk.abs().mean(dim=-1),
             "command_acceleration_delta_abs": (
                 actual_command_acceleration
@@ -473,6 +499,9 @@ class C2ServoDiagnostics:
             ).abs().mean(dim=-1),
             "predicted_action_d2_abs": predicted_d2.abs().mean(dim=-1),
             "actual_action_d2_abs": actual_d2.abs().mean(dim=-1),
+            "reference_action_delta_abs": (
+                reference_delta.abs().mean(dim=-1)
+            ),
             "reference_action_d2_abs": reference_d2.abs().mean(dim=-1),
             "predicted_action_d3_abs": predicted_d3.abs().mean(dim=-1),
             "actual_action_d3_abs": actual_d3.abs().mean(dim=-1),
@@ -480,6 +509,12 @@ class C2ServoDiagnostics:
             "prediction_residual_abs": (
                 prediction_residual.abs().mean(dim=-1)
             ),
+            "rate_prediction_residual_abs": (
+                actual_command_rate - predicted_rate
+            ).abs().mean(dim=-1),
+            "acceleration_prediction_residual_abs": (
+                actual_command_acceleration - predicted_acceleration
+            ).abs().mean(dim=-1),
             "projection_joint_fraction": action_projection_mask.to(
                 device=self.device, dtype=torch.float32
             ).mean(dim=-1),
@@ -487,8 +522,10 @@ class C2ServoDiagnostics:
 
         eligible = (
             active
+            & (self._episode_steps >= self.horizon)
             & self._has_previous_action_d2
             & self._has_previous_reference_d2
+            & self._has_previous_target_increment
         )
         in_phase_window = (
             eligible
@@ -521,10 +558,13 @@ class C2ServoDiagnostics:
         self._previous_reference_action[active] = reference_action[active]
         self._previous_reference_delta[active] = reference_delta[active]
         self._previous_reference_d2[active] = reference_d2[active]
+        self._previous_target_increment[active] = target_increment[active]
         self._has_previous_action_delta[active] = True
         self._has_previous_action_d2[active] = had_action_delta[active]
         self._has_previous_reference_delta[active] = True
         self._has_previous_reference_d2[active] = had_reference_delta[active]
+        self._has_previous_target_increment[active] = True
+        self._episode_steps[active] += 1
 
     def metrics(self, prefix: str = "validation") -> dict[str, float]:
         metrics: dict[str, float] = {}

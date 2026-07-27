@@ -378,6 +378,32 @@ class G1MimicEnv(
             )
         return rate, acceleration
 
+    def _reference_command_target(
+        self,
+        reference_action: torch.Tensor,
+        reference_rate: torch.Tensor,
+        reference_acceleration: torch.Tensor,
+    ) -> torch.Tensor:
+        """Initialize the held target consistently from the causal C2 state."""
+
+        omega = float(self.command_position_servo_omega)
+        target = (
+            reference_action
+            + 3.0 * reference_rate / omega
+            + 3.0 * reference_acceleration / omega**2
+        )
+        midpoint = 0.5 * (
+            self._policy_action_low + self._policy_action_high
+        )
+        half_range = 0.5 * (
+            self._policy_action_high - self._policy_action_low
+        )
+        normalized = ((target - midpoint) / half_range).clamp(
+            min=-1.0 + 1.0e-6,
+            max=1.0 - 1.0e-6,
+        )
+        return midpoint + half_range * normalized
+
     def _reset_env_state(
         self,
         env_ids: torch.Tensor,
@@ -424,6 +450,11 @@ class G1MimicEnv(
             phase_indices,
             reference["joint_vel"],
         )
+        reference_target = self._reference_command_target(
+            reference_action,
+            reference_rate,
+            reference_acceleration,
+        )
         root_pos = reference["root_pos_w"].clone()
         root_quat = reference["root_quat_w"].clone()
         root_lin_vel = reference["root_lin_vel_w"].clone()
@@ -448,6 +479,7 @@ class G1MimicEnv(
         self.last_action[env_ids] = reference_action
         self.command_rate[env_ids] = reference_rate
         self.command_acceleration[env_ids] = reference_acceleration
+        self.command_target_action[env_ids] = reference_target
         self.scene.update(self.physics_dt)
 
     def begin_reset_phase_diagnostics(self) -> None:
