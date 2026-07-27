@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from engine.checkpoint import Checkpointer
+from engine.checkpoint import Checkpointer, _resume_signature
 
 
 class _FakeSampler:
@@ -29,6 +29,24 @@ class _FakeAlgo:
 
     def load_extra_checkpoint_state(self, payload: dict, reset_optimizer: bool = False) -> None:
         self.extra_load_args = (payload, reset_optimizer)
+
+
+def test_resume_signature_contains_the_complete_physical_decoder() -> None:
+    environment = {
+        "policy_action_bound": 5.0,
+        "command_rate_limit": [80.0, 40.0],
+        "rate_half_life_seconds": 0.08,
+    }
+    signature = _resume_signature(
+        {
+            "method": "fcamp",
+            "environment": environment,
+            "parameters": {},
+        }
+    )
+
+    for name, expected in environment.items():
+        assert signature["environment"][name] == expected
 
 
 def test_reset_sampler_on_resume_skips_compatible_checkpoint_state(tmp_path) -> None:

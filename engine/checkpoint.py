@@ -10,6 +10,77 @@ import shutil
 import torch
 
 
+FCAMP_CHECKPOINT_CONTRACT = {
+    "fcamp_schema_version": 16,
+    "action_contract": "environment_carried_target_rate_v1",
+    "reset_contract": "causal_reference_rate_v1",
+    "validation_contract": "raw_target_rate_single_decoder_v1",
+    "actor_mean_contract": "initial_cps_standardized_flow_v1",
+    "cps_metric_contract": "finite_h_carried_rate_response_v1",
+    "ppo_contract": "final_raw_target_rate_atomic_exact_kl_v1",
+}
+
+
+def validate_static_fcamp_checkpoint_contract(state: dict) -> None:
+    """Validate the FCAMP schema without importing or constructing Isaac."""
+    if not isinstance(state, dict):
+        raise ValueError(
+            "FCAMP checkpoint is missing its algorithm contract; start a fresh run."
+        )
+    for name, expected in FCAMP_CHECKPOINT_CONTRACT.items():
+        saved = state.get(name)
+        if type(saved) is not type(expected) or saved != expected:
+            raise ValueError(
+                f"FCAMP checkpoint {name}={saved!r} differs from "
+                f"the required contract {expected!r}; start a fresh run."
+            )
+    if bool(state.get("discriminator_policy_conditioning", True)):
+        raise ValueError(
+            "FCAMP checkpoints with discriminator-conditioned policies "
+            "cannot be resumed."
+        )
+
+
+def preflight_static_checkpoint_payload(
+    payload: dict,
+    *,
+    expected_method: str | None = None,
+) -> None:
+    """Reject malformed or obsolete payloads before any runtime is created."""
+    if not isinstance(payload, dict):
+        raise TypeError("Checkpoint payload must be a dictionary.")
+    if not isinstance(payload.get("policy"), dict):
+        raise KeyError("Checkpoint must contain a 'policy' state dict.")
+
+    config = payload.get("config")
+    configured_method = None
+    if isinstance(config, dict):
+        configured_method = config.get(
+            "method",
+            config.get("algorithm", config.get("algo_name")),
+        )
+    method = expected_method if expected_method is not None else configured_method
+    if (
+        expected_method is not None
+        and configured_method is not None
+        and configured_method != expected_method
+    ):
+        raise ValueError(
+            f"Checkpoint method {configured_method!r} differs from "
+            f"the required method {expected_method!r}."
+        )
+    if method == "fcamp":
+        validate_static_fcamp_checkpoint_contract(payload.get("algo_state"))
+
+
+def preflight_checkpoint_payload(algo, payload: dict) -> None:
+    """Validate deployment/training contracts before mutating model state."""
+    preflight_static_checkpoint_payload(payload)
+    validator = getattr(algo, "validate_checkpoint_payload", None)
+    if callable(validator):
+        validator(payload)
+
+
 _RESUME_ENV_KEYS = (
     "platform_profile",
     "task",
@@ -39,6 +110,9 @@ _RESUME_ENV_KEYS = (
     "policy_observation_mode",
     "motion_end_behavior",
     "action_rate_weight",
+    "policy_action_bound",
+    "command_rate_limit",
+    "rate_half_life_seconds",
     "physics_material_combine_mode",
     "contact_sensor_update_period",
 )
@@ -154,6 +228,10 @@ class Checkpointer:
         # Load through CPU so a large discriminator replay sidecar does not
         # transiently consume GPU memory before being copied back to its CPU ring.
         payload = torch.load(checkpoint_path, map_location="cpu")
+        # Method/schema and decoder contracts are more fundamental than a
+        # resume-config comparison.  Reject an obsolete actor before inspecting
+        # any secondary training metadata or mutating any state.
+        preflight_checkpoint_payload(t.algo, payload)
         saved_config = payload.get("config")
         if saved_config is not None:
             current_signature = _resume_signature(asdict(t.cfg))
@@ -174,9 +252,6 @@ class Checkpointer:
                 "[CHECKPOINT] WARN: legacy checkpoint has no dataset/robot/action-schema hashes.",
                 flush=True,
             )
-        preflight = getattr(t.algo, "validate_checkpoint_payload", None)
-        if callable(preflight):
-            preflight(payload)
         t.algo.policy.load_state_dict(payload["policy"])
         reset_optimizer = bool(t.train_cfg.reset_optimizer_on_resume)
         if reset_optimizer:

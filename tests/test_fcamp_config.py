@@ -19,10 +19,8 @@ def test_fcamp_config_is_h4_w16_flow_cps() -> None:
     assert cfg.parameters.rollout_env_steps == 24
     assert cfg.parameters.rollout_env_steps % cfg.parameters.horizon == 0
     assert cfg.parameters.flow_steps == 4
-    assert cfg.parameters.action_squash_scale == 5.0
-    assert cfg.parameters.cps_noise_level == 0.8
+    assert cfg.parameters.cps_physical_rms == 0.05
     assert cfg.parameters.cps_trainable is True
-    assert cfg.parameters.cps_cov_rank == 8
     assert cfg.parameters.desired_kl == 0.01
     assert cfg.parameters.policy_lr == 0.0003
     assert cfg.parameters.value_lr == 0.0003

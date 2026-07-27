@@ -146,11 +146,14 @@ def mimic_env_type(monkeypatch):
 class _Motion:
     def __init__(self, joint_positions: torch.Tensor) -> None:
         self.joint_positions = joint_positions
+        self.fps = 50.0
+        self.queries: list[torch.Tensor] = []
 
     def clamp_time_steps(self, phases: torch.Tensor) -> torch.Tensor:
         return phases.clamp(0, self.joint_positions.shape[0] - 1)
 
     def get_frame(self, phases: torch.Tensor) -> dict[str, torch.Tensor]:
+        self.queries.append(phases.detach().clone())
         joint_pos = self.joint_positions.index_select(0, phases.long())
         count = phases.numel()
         return {
@@ -191,6 +194,7 @@ def _make_env(
     env.num_envs = 4
     env.device = torch.device("cpu")
     env.physics_dt = 0.005
+    env.dt = 0.02
     env.motion = _Motion(reference_joint_pos)
     env.phase_steps = torch.full((4,), -1.0)
     env.episode_steps = torch.full((4,), 17, dtype=torch.long)
@@ -198,6 +202,9 @@ def _make_env(
     env._next_episode_id = 10
     env._failure_recorded = torch.ones(4, dtype=torch.bool)
     env.last_action = torch.full((4, 2), -99.0)
+    env.command_rate = torch.full((4, 2), -77.0)
+    env.command_rate_limit = torch.full((2,), 1000.0)
+    env.action_dim = 2
     env.default_action_joint_pos = torch.tensor(
         [
             [0.00, 0.00],
@@ -276,9 +283,24 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
 
     torch.testing.assert_close(observation, expected)
     torch.testing.assert_close(env.last_action.index_select(0, env_ids), expected)
+    expected_rate = torch.tensor(
+        [
+            [0.0, 0.0],
+            [45.0, 80.0],
+            [-80.0, 130.0],
+        ]
+    )
+    torch.testing.assert_close(
+        env.command_rate.index_select(0, env_ids),
+        expected_rate,
+    )
     torch.testing.assert_close(
         env.last_action[0],
         torch.full((2,), -99.0),
+    )
+    torch.testing.assert_close(
+        env.command_rate[0],
+        torch.full((2,), -77.0),
     )
     torch.testing.assert_close(env.validated_actions[0], expected)
     torch.testing.assert_close(
@@ -290,6 +312,46 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
         expected,
     )
     assert env.scene.events == ["reset", "update"]
+
+
+def test_reset_rate_queries_only_absolute_past_for_nonzero_phases(
+    mimic_env_type,
+) -> None:
+    references = torch.tensor(
+        [
+            [0.0, 0.0],
+            [0.2, -0.1],
+            [0.5, 0.3],
+            [0.9, 0.7],
+        ]
+    )
+    env = _make_env(
+        mimic_env_type,
+        reference_joint_pos=references,
+        strict=True,
+        reset_noise=False,
+    )
+    env_ids = torch.tensor([2, 0, 3])
+    phases = torch.tensor([0, 1, 3])
+
+    env.reset_envs(env_ids, phase_indices=phases)
+
+    # First query is the requested reset pose. The rate constructor then asks
+    # only for strict past phases of the nonzero rows; phase zero is omitted.
+    assert len(env.motion.queries) == 2
+    torch.testing.assert_close(env.motion.queries[0], phases)
+    torch.testing.assert_close(env.motion.queries[1], torch.tensor([0.0, 2.0]))
+    assert bool(
+        (
+            env.motion.queries[1]
+            < phases[phases > 0].to(dtype=torch.float32)
+        ).all()
+    )
+    torch.testing.assert_close(
+        env.command_rate[env_ids[0]],
+        torch.zeros(2),
+    )
+    assert bool((env.command_rate[env_ids[1:]].abs().sum(dim=-1) > 0.0).all())
 
 
 def test_pre_contract_reset_is_finite_and_does_not_clamp(
@@ -318,4 +380,3 @@ def test_pre_contract_reset_is_finite_and_does_not_clamp(
     env.action_scale[0, 0] = 0.0
     with pytest.raises(RuntimeError, match="non-finite reset policy command"):
         env.reset_envs(env_ids, phase_indices=torch.tensor([0]))
-

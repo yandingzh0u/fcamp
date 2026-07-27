@@ -24,6 +24,10 @@ from .contracts import (
     resolve_root_velocity_frame,
     validate_actions_in_bounds,
 )
+from .action_rate import (
+    command_rate_decay,
+    decode_raw_target_rate as decode_raw_target_rate_command,
+)
 from engine.config import EnvironmentConfig
 
 
@@ -122,12 +126,41 @@ class G1Env:
             dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)
-        # FCAMP explicitly installs its algorithmic command domain after the
-        # policy is built.  Joint-position metadata never defines that domain:
-        # normalized actions are PD target commands, not physical joint poses.
-        self._strict_action_contract = False
-        self._policy_action_low: torch.Tensor | None = None
-        self._policy_action_high: torch.Tensor | None = None
+        action_bound = float(cfg.policy_action_bound)
+        self._policy_action_low = torch.full(
+            (self.action_dim,), -action_bound, device=self.device
+        )
+        self._policy_action_high = torch.full(
+            (self.action_dim,), action_bound, device=self.device
+        )
+        rate_limit = torch.tensor(
+            cfg.command_rate_limit,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        if rate_limit.shape != (self.action_dim,):
+            raise ValueError(
+                "environment.command_rate_limit must follow "
+                f"G1_29DOF_ACTION_NAMES and have shape {(self.action_dim,)}, "
+                f"got {tuple(rate_limit.shape)}"
+            )
+        if not bool(torch.isfinite(rate_limit).all()) or bool(
+            (rate_limit <= 0.0).any()
+        ):
+            raise ValueError(
+                "environment.command_rate_limit must be finite and positive"
+            )
+        self.command_rate_limit = rate_limit
+        self.rate_half_life_seconds = float(cfg.rate_half_life_seconds)
+        self.command_rate_decay = command_rate_decay(
+            self.dt,
+            self.rate_half_life_seconds,
+        )
+        self.last_action = torch.zeros(
+            self.num_envs, self.action_dim, device=self.device
+        )
+        self.command_rate = torch.zeros_like(self.last_action)
+        self._strict_action_contract = True
         self._action_space = self._build_action_space()
         self._push_interval_step_range = PUSH_INTERVAL_STEP_RANGE
         min_push, max_push = self._push_interval_step_range
@@ -166,6 +199,18 @@ class G1Env:
         return int(self.action_joint_ids.numel())
 
     @property
+    def action_low(self) -> torch.Tensor:
+        """Return a copy of the immutable normalized-command lower bound."""
+
+        return self._policy_action_low.clone()
+
+    @property
+    def action_high(self) -> torch.Tensor:
+        """Return a copy of the immutable normalized-command upper bound."""
+
+        return self._policy_action_high.clone()
+
+    @property
     def observation_dim(self) -> int:
         return int(self.action_dim * 2)
 
@@ -173,47 +218,9 @@ class G1Env:
         return self._action_space
 
     def _build_action_space(self) -> spaces.Box:
-        joint_limits = self.robot.data.joint_pos_limits[0].index_select(
-            0, self.action_joint_ids
-        )
-        target_bound = 1.4 * torch.maximum(
-            joint_limits[:, 0].abs(), joint_limits[:, 1].abs()
-        )
-        default = self.default_action_joint_pos[0]
-        scale = self.action_scale[0]
-        low = (
-            (-target_bound - default) / scale
-        ).detach().cpu().numpy().astype(np.float32)
-        high = (
-            (target_bound - default) / scale
-        ).detach().cpu().numpy().astype(np.float32)
+        low = self._policy_action_low.detach().cpu().numpy().astype(np.float32)
+        high = self._policy_action_high.detach().cpu().numpy().astype(np.float32)
         return spaces.Box(low=low, high=high, dtype=np.float32)
-
-    def enable_strict_action_contract(
-        self,
-        low: torch.Tensor,
-        high: torch.Tensor,
-    ) -> None:
-        """Install the policy-owned command domain used by FCAMP.
-
-        This domain is deliberately independent of URDF joint-position limits.
-        The simulator writer maps the command to a PD target without projection.
-        """
-
-        low = torch.as_tensor(low, device=self.device, dtype=torch.float32)
-        high = torch.as_tensor(high, device=self.device, dtype=torch.float32)
-        if low.shape != (self.action_dim,) or high.shape != (self.action_dim,):
-            raise ValueError(
-                f"Policy action bounds must have shape {(self.action_dim,)}"
-            )
-        validate_actions_in_bounds(
-            torch.stack((low, high)), low, high, tolerance=0.0
-        )
-        if bool((low >= high).any()):
-            raise ValueError("Every policy action lower bound must be below its upper bound")
-        self._policy_action_low = low.detach().clone()
-        self._policy_action_high = high.detach().clone()
-        self._strict_action_contract = True
 
     def validate_policy_actions(
         self,
@@ -232,6 +239,48 @@ class G1Env:
             self._policy_action_low,
             self._policy_action_high,
             tolerance=float(tolerance),
+        )
+
+    def decode_raw_target_rate(
+        self,
+        raw_target_rate: torch.Tensor,
+        *,
+        active_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Decode one raw policy frame without mutating command state."""
+
+        return decode_raw_target_rate_command(
+            raw_target_rate,
+            self.last_action,
+            self.command_rate,
+            self.command_rate_limit,
+            self._policy_action_low,
+            self._policy_action_high,
+            control_dt=self.dt,
+            decay=self.command_rate_decay,
+            active_mask=active_mask,
+        )
+
+    def step_raw_target_rate(
+        self,
+        raw_target_rate: torch.Tensor,
+        *,
+        active_mask: torch.Tensor | None = None,
+        auto_reset: bool = False,
+        reset_horizon: int = 1,
+        reference_dt: torch.Tensor | float | None = None,
+    ):
+        """Decode and execute exactly one physical policy frame."""
+
+        requested_action = self.decode_raw_target_rate(
+            raw_target_rate,
+            active_mask=active_mask,
+        )
+        return self.step(
+            requested_action,
+            auto_reset=auto_reset,
+            reset_horizon=reset_horizon,
+            reference_dt=reference_dt,
         )
 
     def get_action_joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:

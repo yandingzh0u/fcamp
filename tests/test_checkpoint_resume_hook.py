@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 
@@ -39,6 +40,49 @@ class _ResumeAwareAlgorithm:
         assert self.events == ["algorithm", "sampler"]
         self.events.append("reset_after_resume")
         return self.resumed_observation
+
+
+class _SchemaRejectingAlgorithm:
+    def __init__(self) -> None:
+        self.policy = nn.Linear(1, 1)
+        self.optimizer = torch.optim.SGD(self.policy.parameters(), lr=0.1)
+
+    def validate_checkpoint_payload(self, _payload: dict) -> None:
+        raise ValueError("schema-first rejection")
+
+
+def test_resume_rejects_schema_before_comparing_config_or_loading_policy(
+    tmp_path,
+) -> None:
+    algo = _SchemaRejectingAlgorithm()
+    initial_weight = algo.policy.weight.detach().clone()
+    incompatible_weight = {
+        name: torch.full_like(value, 99.0)
+        for name, value in algo.policy.state_dict().items()
+    }
+    trainer = SimpleNamespace(
+        algo=algo,
+        # Deliberately not a dataclass: reaching asdict() would prove the
+        # config comparison ran before the method/schema preflight.
+        cfg=object(),
+        env=SimpleNamespace(device="cpu"),
+        train_cfg=SimpleNamespace(),
+    )
+    checkpoint = tmp_path / "old_schema.pt"
+    torch.save(
+        {
+            "config": {"method": "fcamp"},
+            "policy": incompatible_weight,
+            "algo_state": {
+                "fcamp_schema_version": 15,
+            },
+        },
+        checkpoint,
+    )
+
+    with pytest.raises(ValueError, match="fcamp_schema_version"):
+        Checkpointer(trainer).load(checkpoint)
+    torch.testing.assert_close(algo.policy.weight, initial_weight)
 
 
 def test_resume_hook_runs_after_sampler_and_rng_restore(tmp_path) -> None:

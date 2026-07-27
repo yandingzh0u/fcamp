@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from components.rollout.flow_cps_base import FlowCPSBase
+from envs.action_rate import decode_raw_target_rate
 from models.flow_cps_policy import FlowMatchingPolicy
 
 
@@ -38,6 +39,9 @@ class _NegativeRewardEnv:
         self.device = torch.device("cpu")
         self.max_episode_steps = 20
         self.dt = 0.02
+        self.command_rate_decay = 2.0 ** (-self.dt / 0.08)
+        self.command_rate_limit = torch.full((action_dim,), 5.0)
+        self.last_action = torch.zeros(num_envs, action_dim)
         self.phase_steps = torch.zeros(num_envs, dtype=torch.long)
         self.config = SimpleNamespace(action_rate_weight=0.1)
         self._gen = torch.Generator().manual_seed(7)
@@ -90,12 +94,22 @@ class _NegativeRewardEnv:
         self.phase_steps += 1
         return self._obs(), reward, done, info
 
+    def step_raw_target_rate(self, raw_target_rate, *, active_mask, auto_reset=False):
+        applied = torch.where(
+            active_mask.unsqueeze(-1),
+            raw_target_rate,
+            self.last_action,
+        )
+        self.last_action.copy_(applied)
+        obs, reward, done, info = self.step(applied, auto_reset=auto_reset)
+        info["applied_action"] = applied.clone()
+        return obs, reward, done, info
+
 
 def _build_algo(env, **overrides):
     base = dict(
         horizon=4, rollout_env_steps=8, flow_steps=2,
-        cps_noise_level=0.8, cps_trainable=True, cps_cov_rank=2,
-        action_squash_scale=5.0,
+        cps_physical_rms=0.05, cps_trainable=True,
         actor_hidden_dims=(16, 16), critic_hidden_dims=(16, 16), activation="elu",
         discount_gamma=0.99, gae_lambda=0.95,
         clip_range=0.2, desired_kl=0.01, policy_epochs=2,
@@ -174,18 +188,17 @@ def test_flow_cps_collect_and_update_end_to_end() -> None:
     for key in ("flow_cps/policy_loss", "flow_cps/value_loss", "flow_cps/loss"):
         assert math.isfinite(metrics[key]), f"{key}={metrics[key]}"
     # update actually moved the policy
-    assert metrics["policy/action_delta"] >= 0.0
+    assert metrics["policy/raw_z_mean_delta"] >= 0.0
     # actor + critic both have grad norms
     assert metrics["flow_cps/grad_norm"] >= 0.0
     assert metrics["flow_cps/grad_norm_critic"] >= 0.0
 
 
-def test_flow_cps_action_cps_density_collect_and_update() -> None:
+def test_flow_cps_uses_one_final_dense_cholesky_and_exact_recompute() -> None:
     torch.manual_seed(0)
     env = _NegativeRewardEnv(num_envs=4, reward=0.05)
     algo = _build_algo(
         env,
-        cps_noise_level=0.4,
         cps_trainable=True,
         num_mini_batches=2,
         micro_batch_size=8,
@@ -194,72 +207,309 @@ def test_flow_cps_action_cps_density_collect_and_update() -> None:
     rollout = algo.collect(obs)
 
     assert torch.isfinite(rollout["old_log_probs"]).all()
-    assert rollout["old_cps_noise_coeff"].gt(0.0).any()
-    assert "cps_condition" not in rollout
+    assert rollout["old_log_probs"].shape == (2, 4, 4)
+    assert rollout["raw_z"].shape == (2, 4, 4 * 3)
+    assert rollout.get("old_mean_z") is None
+    assert "latents" not in rollout
+    assert "old_cps_noise_coeff" not in rollout
     flat_dim = 4 * 3
-    rank = 2
-    expected_params = 2 * (flat_dim + flat_dim * rank)
-    assert algo._policy.cps_diag_raw.shape == (2, flat_dim)
-    assert algo._policy.cps_lowrank_raw.shape == (2, flat_dim, rank)
-    assert algo._policy.cps_diag_raw.numel() + algo._policy.cps_lowrank_raw.numel() == expected_params
-    _, _, cov, _, _, trace_normalized = algo._cps_covariance_factors(
-        0,
-        device=algo._policy.cps_diag_raw.device,
-        dtype=algo._policy.cps_diag_raw.dtype,
+    expected_params = flat_dim * (flat_dim + 1) // 2
+    assert algo._policy.cps_cholesky_raw.shape == (expected_params,)
+    assert not hasattr(algo._policy, "cps_diag_raw")
+    assert not hasattr(algo._policy, "cps_lowrank_raw")
+
+    actor_obs = rollout["actor_obs"].reshape(-1, env.observation_dim)
+    sampled = rollout["raw_z"].reshape(-1, flat_dim)
+    recomputed = algo._recompute_final_cps_log_prob(actor_obs, sampled)
+    torch.testing.assert_close(
+        recomputed,
+        rollout["old_log_probs"].reshape(-1, 4),
+        atol=2.0e-5,
+        rtol=2.0e-5,
     )
-    assert torch.allclose(cov, torch.eye(flat_dim), atol=1e-3)
-    assert abs(float(trace_normalized.item()) - 1.0) < 1e-6
     assert torch.allclose(rollout["failure_cost_return"], torch.zeros_like(rollout["failure_cost_return"]))
 
     metrics = algo.update(rollout, collect_time=0.1)
     assert math.isfinite(metrics["flow_cps/policy_loss"])
     assert math.isfinite(metrics["flow_cps/kl_raw"])
-    assert metrics["policy/cps_base_eta"] > 0.0
-    assert abs(metrics["policy/cps_eta_mean"] - 0.4) < 1e-3
-    assert abs(metrics["policy/cps_cov_trace_mean"] - 1.0) < 1e-5
-    assert metrics["policy/cps_cov_rank"] == float(rank)
+    assert abs(metrics["policy/cps_physical_rms_target"] - 0.05) < 1e-6
+    assert abs(metrics["policy/cps_physical_rms_achieved"] - 0.05) < 1e-5
     assert metrics["policy/cps_params"] == float(expected_params)
 
 
-def test_flow_cps_rank_zero_is_diagonal_gaussian_cps_baseline() -> None:
+def test_final_cps_conditional_log_probs_sum_to_joint_density() -> None:
     torch.manual_seed(1)
-    env = _NegativeRewardEnv(num_envs=4, reward=0.05)
-    algo = _build_algo(
-        env,
-        flow_steps=2,
-        cps_cov_rank=0,
-        rollout_env_steps=8,
-        policy_epochs=1,
-        cps_noise_level=0.4,
-        num_mini_batches=2,
-        micro_batch_size=8,
+    env = _NegativeRewardEnv(num_envs=5, reward=0.05)
+    algo = _build_algo(env)
+    with torch.no_grad():
+        offdiagonal = (~algo._policy._cps_diagonal_mask).nonzero(
+            as_tuple=False
+        ).squeeze(-1)
+        algo._policy.cps_cholesky_raw[offdiagonal[:8]] = torch.linspace(
+            -0.25,
+            0.25,
+            8,
+        )
+    actor_obs = torch.randn(5, env.observation_dim)
+    raw_z, mean_z, conditional = algo._sample_final_cps(actor_obs)
+    chol, _ = algo._effective_cps_cholesky(device=raw_z.device, dtype=raw_z.dtype)
+    covariance = chol @ chol.transpose(0, 1)
+    offdiag_covariance = covariance - torch.diag_embed(
+        torch.diagonal(covariance)
     )
-    obs = algo.initial_reset()
-    rollout = algo.collect(obs)
+    assert float(offdiag_covariance.abs().max().item()) > 0.0
+    joint = torch.distributions.MultivariateNormal(
+        loc=mean_z,
+        scale_tril=chol,
+    ).log_prob(raw_z)
+    torch.testing.assert_close(conditional.sum(dim=-1), joint, atol=2.0e-5, rtol=2.0e-5)
 
-    flat_dim = 4 * 3
-    expected_params = 2 * flat_dim
-    assert algo._policy.cps_diag_raw.shape == (2, flat_dim)
-    assert algo._policy.cps_lowrank_raw.shape == (2, flat_dim, 0)
-    assert algo._policy.cps_diag_raw.numel() + algo._policy.cps_lowrank_raw.numel() == expected_params
 
-    _, lowrank, cov, _, _, trace_normalized = algo._cps_covariance_factors(
-        0,
-        device=algo._policy.cps_diag_raw.device,
-        dtype=algo._policy.cps_diag_raw.dtype,
+def test_exact_conditional_kl_is_nonnegative_and_sums_to_joint_kl() -> None:
+    torch.manual_seed(17)
+    env = _NegativeRewardEnv(num_envs=3, reward=0.05)
+    algo = _build_algo(env)
+    dim = algo.chunk_dim
+    old_mean = torch.randn(3, dim) * 0.1
+    new_mean = torch.randn(3, dim) * 0.1
+    old_raw = torch.randn(dim, dim).tril() * 0.015
+    new_raw = torch.randn(dim, dim).tril() * 0.015
+    old_chol = torch.eye(dim) + old_raw
+    new_chol = torch.eye(dim) + new_raw
+    old_chol.diagonal().clamp_(min=0.5)
+    new_chol.diagonal().clamp_(min=0.5)
+
+    frame_kl = algo._final_cps_expected_conditional_kl(
+        old_mean,
+        new_mean,
+        old_chol,
+        new_chol,
     )
-    offdiag = cov - torch.diag_embed(torch.diagonal(cov))
-    assert lowrank.numel() == 0
-    assert torch.allclose(offdiag, torch.zeros_like(offdiag), atol=1e-7)
-    assert abs(float(trace_normalized.item()) - 1.0) < 1e-6
-    assert torch.isfinite(rollout["old_log_probs"]).all()
+    assert frame_kl.shape == (3, algo.horizon_h)
+    assert bool((frame_kl >= 0.0).all())
 
-    metrics = algo.update(rollout, collect_time=0.1)
-    assert math.isfinite(metrics["flow_cps/policy_loss"])
-    assert metrics["policy/cps_cov_rank"] == 0.0
-    assert metrics["policy/cps_params"] == float(expected_params)
-    assert abs(metrics["policy/cps_cov_offdiag_abs"]) < 1e-7
-    assert abs(metrics["policy/cps_cov_lowrank_energy"]) < 1e-7
+    covariance_whitened = torch.linalg.solve_triangular(
+        new_chol.double(),
+        old_chol.double(),
+        upper=False,
+    )
+    mean_whitened = torch.linalg.solve_triangular(
+        new_chol.double(),
+        (old_mean - new_mean).double().transpose(0, 1),
+        upper=False,
+    ).transpose(0, 1)
+    joint_kl = 0.5 * (
+        covariance_whitened.square().sum()
+        + mean_whitened.square().sum(dim=-1)
+        - float(dim)
+        + 2.0
+        * (
+            torch.log(torch.diagonal(new_chol.double())).sum()
+            - torch.log(torch.diagonal(old_chol.double())).sum()
+        )
+    )
+    torch.testing.assert_close(
+        frame_kl.double().sum(dim=-1),
+        joint_kl,
+        atol=2.0e-6,
+        rtol=2.0e-6,
+    )
+
+
+def test_exact_conditional_kl_is_zero_for_identical_policy() -> None:
+    env = _NegativeRewardEnv(num_envs=3, reward=0.05)
+    algo = _build_algo(env)
+    mean = torch.randn(3, algo.chunk_dim)
+    chol, _ = algo._effective_cps_cholesky(
+        device=env.device,
+        dtype=torch.float32,
+    )
+    frame_kl = algo._final_cps_expected_conditional_kl(
+        mean,
+        mean,
+        chol,
+        chol,
+    )
+    torch.testing.assert_close(frame_kl, torch.zeros_like(frame_kl))
+
+
+def test_final_cps_uses_one_aggregate_physical_scale() -> None:
+    env = _NegativeRewardEnv(num_envs=2, reward=0.05)
+    algo = _build_algo(env, cps_physical_rms=0.037)
+    chol, _ = algo._effective_cps_cholesky(device=env.device, dtype=torch.float32)
+    response = algo._policy.cps_physical_response
+    achieved = torch.sqrt((response @ chol).square().sum() / float(3 * env.action_dim))
+    torch.testing.assert_close(achieved, torch.tensor(0.037), atol=1.0e-6, rtol=1.0e-6)
+
+    # The covariance is global/state-independent and flow_steps affects only
+    # the deterministic ODE mean.
+    first = chol.detach().clone()
+    other_obs = torch.randn(7, env.observation_dim)
+    algo._flow_mean_raw(other_obs)
+    second, _ = algo._effective_cps_cholesky(device=env.device, dtype=torch.float32)
+    torch.testing.assert_close(first, second)
+
+
+def test_flow_mean_uses_fixed_initial_likelihood_scale() -> None:
+    torch.manual_seed(4)
+    env = _NegativeRewardEnv(num_envs=2, reward=0.05)
+    algo = _build_algo(env)
+    actor_obs = torch.randn(2, env.observation_dim)
+    scale = algo._policy.flow_mean_raw_scale.detach().clone()
+
+    original = algo._policy.velocity_field
+
+    def unit_velocity(observation, flow_state, time):
+        del observation, time
+        return torch.ones_like(flow_state)
+
+    algo._policy.velocity_field = unit_velocity
+    try:
+        mean = algo._flow_mean_raw(actor_obs)
+    finally:
+        algo._policy.velocity_field = original
+
+    torch.testing.assert_close(
+        mean,
+        torch.full_like(mean, -float(scale.item())),
+    )
+    initial_chol, _ = algo._effective_cps_cholesky(
+        device=env.device,
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(
+        torch.diagonal(initial_chol),
+        torch.full((algo.chunk_dim,), float(scale.item())),
+    )
+
+
+def test_cps_covariance_shape_has_hard_condition_bound() -> None:
+    env = _NegativeRewardEnv(num_envs=2, reward=0.05)
+    algo = _build_algo(env)
+    with torch.no_grad():
+        algo._policy.cps_cholesky_raw.normal_(mean=0.0, std=10.0)
+    shape = algo._raw_cps_cholesky(device=env.device, dtype=torch.float32)
+    singular_values = torch.linalg.svdvals(shape)
+    radius = algo._policy.CPS_CHOLESKY_SHAPE_RADIUS
+    assert float(singular_values.min().item()) >= 1.0 - radius - 1.0e-5
+    assert float(singular_values.max().item()) <= 1.0 + radius + 1.0e-5
+    covariance_condition = (
+        float(singular_values.max().item())
+        / float(singular_values.min().item())
+    ) ** 2
+    assert covariance_condition <= ((1.0 + radius) / (1.0 - radius)) ** 2 + 1.0e-4
+
+
+def test_cps_physical_response_matches_rate_decoder_jacobian() -> None:
+    env = _NegativeRewardEnv(num_envs=2, reward=0.05)
+    algo = _build_algo(env)
+    h, action_dim = algo.horizon_h, env.action_dim
+    dt = env.dt
+    rho = env.command_rate_decay
+    rate_limit = env.command_rate_limit
+
+    def physical_features(flat_raw_z: torch.Tensor) -> torch.Tensor:
+        raw_z = flat_raw_z.view(h, action_dim)
+        rate = torch.zeros(action_dim)
+        previous_delta = torch.zeros(action_dim)
+        deltas = []
+        d2 = []
+        for frame in range(h):
+            desired_rate = rate_limit * torch.tanh(raw_z[frame])
+            rate = rho * rate + (1.0 - rho) * desired_rate
+            delta = dt * rate
+            deltas.append(delta)
+            d2.append(delta - previous_delta)
+            previous_delta = delta
+        tail = torch.stack(
+            [
+                dt * (rho ** (frame + 1)) * rate
+                for frame in range(h)
+            ]
+        )
+        return torch.cat(
+            [
+                torch.stack(deltas).reshape(-1) / math.sqrt(float(h)),
+                torch.stack(d2).reshape(-1) / math.sqrt(float(h)),
+                tail.reshape(-1) / math.sqrt(float(h)),
+            ]
+        )
+
+    jacobian = torch.func.jacrev(physical_features)(
+        torch.zeros(h * action_dim)
+    )
+    torch.testing.assert_close(
+        algo._policy.cps_physical_response,
+        jacobian,
+        atol=1.0e-6,
+        rtol=1.0e-6,
+    )
+
+
+def test_true_nonlinear_decoder_noise_respects_physical_rms_budget() -> None:
+    torch.manual_seed(23)
+    env = _NegativeRewardEnv(num_envs=2, reward=0.05, action_dim=3)
+    env.command_rate_limit = torch.tensor([80.0, 100.0, 120.0])
+    algo = _build_algo(env, cps_physical_rms=0.05)
+    chol, _ = algo._effective_cps_cholesky(
+        device=env.device,
+        dtype=torch.float32,
+    )
+    samples = 32768
+    raw_z = (
+        torch.randn(samples, algo.chunk_dim) @ chol.transpose(0, 1)
+    ).view(samples, algo.horizon_h, env.action_dim)
+    action = torch.zeros(samples, env.action_dim)
+    rate = torch.zeros_like(action)
+    previous_delta = torch.zeros_like(action)
+    low = torch.full((env.action_dim,), -5.0)
+    high = torch.full((env.action_dim,), 5.0)
+    deltas = []
+    d2 = []
+    for frame in range(algo.horizon_h):
+        next_action = decode_raw_target_rate(
+            raw_z[:, frame],
+            action,
+            rate,
+            env.command_rate_limit,
+            low,
+            high,
+            control_dt=env.dt,
+            decay=env.command_rate_decay,
+        )
+        delta = next_action - action
+        rate = delta / env.dt
+        action = next_action
+        deltas.append(delta)
+        d2.append(delta - previous_delta)
+        previous_delta = delta
+
+    tail = []
+    for _ in range(algo.horizon_h):
+        next_action = decode_raw_target_rate(
+            torch.zeros_like(action),
+            action,
+            rate,
+            env.command_rate_limit,
+            low,
+            high,
+            control_dt=env.dt,
+            decay=env.command_rate_decay,
+        )
+        delta = next_action - action
+        rate = delta / env.dt
+        action = next_action
+        tail.append(delta)
+
+    group_rms_sq = [
+        torch.stack(group, dim=1).square().mean()
+        for group in (deltas, d2, tail)
+    ]
+    nonlinear_rms = torch.sqrt(sum(group_rms_sq) / 3.0)
+    # tanh and projection may only contract the zero-point linear response.
+    # At the configured exploration scale the contraction should remain small.
+    assert float(nonlinear_rms.item()) <= 0.0505
+    assert float(nonlinear_rms.item()) >= 0.0475
 
 
 # --------------------------------------------------------------------------- #
@@ -319,8 +569,13 @@ def test_actor_advantage_is_chunk_gae() -> None:
 # --------------------------------------------------------------------------- #
 # CAUSAL HARD TESTS: a_k must NOT depend on future latents j>k.
 # --------------------------------------------------------------------------- #
-def _causal_action_grad_leak(policy, frame_k: int, horizon: int = 4, action_dim: int = 3) -> float:
-    """Return max |grad| of a_k w.r.t. future noise frames j>k."""
+def _causal_raw_target_grad_leak(
+    policy,
+    frame_k: int,
+    horizon: int = 4,
+    action_dim: int = 3,
+) -> float:
+    """Return max |grad| of raw target z_k w.r.t. future Flow tokens."""
     torch.manual_seed(0)
     from models.flow_sampling import flow_ode_mean
     obs = torch.randn(2, policy.obs_dim)
@@ -331,24 +586,22 @@ def _causal_action_grad_leak(policy, frame_k: int, horizon: int = 4, action_dim:
     model_out = policy.velocity_field(obs, latent, t_batch)
     new_latent = flow_ode_mean(model_out, latent, sigma_schedule, 0)
     noise.grad = None
-    actions = policy._action_transform(new_latent[0], prev_action=torch.zeros(action_dim))
-    actions = actions.view(horizon, action_dim)
-    actions[frame_k].sum().backward(retain_graph=True)
+    raw_targets = policy.reshape_raw_targets(new_latent[0])
+    raw_targets[frame_k].sum().backward(retain_graph=True)
     g = noise.grad[0]
     # future frames = cols [(k+1)*A : ]
     future = g[(frame_k + 1) * action_dim:]
     return float(future.abs().max().item()) if future.numel() > 0 else 0.0
 
 
-def test_causal_action_no_future_gradient_leak() -> None:
-    """∂a_k / ∂z_j = 0 for j > k (direct-delta is causal by construction)."""
+def test_causal_raw_target_no_future_gradient_leak() -> None:
+    """The deterministic Flow mean remains ordered and frame-causal."""
     from models.flow_cps_policy import FlowMatchingPolicy
     pol = FlowMatchingPolicy(obs_dim=5, action_dim=3, horizon=4, hidden_dims=(16, 16),
-                             activation="elu", action_squash_scale=5.0, causal_velocity=True)
-    pol.set_action_max_delta(0.5)
+                             activation="elu", causal_velocity=True)
     for k in range(3):
-        leak = _causal_action_grad_leak(pol, k)
-        assert leak <= 1e-6, f"causal action frame {k} leaks future grad: {leak}"
+        leak = _causal_raw_target_grad_leak(pol, k)
+        assert leak <= 1e-6, f"causal raw target frame {k} leaks future grad: {leak}"
 
 
 def test_causal_velocity_is_order_sensitive_after_swapped_prefix() -> None:
@@ -417,90 +670,21 @@ def test_causal_velocity_future_token_does_not_change_earlier_frames() -> None:
     )
 
 
-def test_causal_action_no_future_gradient_leak_absolute() -> None:
-    """v5 absolute transform: a_k = scale*tanh(raw_k/scale) depends only on
-    z_k, so per-frame causality (and thus per-frame clipped-ratio legality) is
-    preserved WITHOUT the hard delta cap. This is the v5 guarantee -- the
-    chunk policy keeps a legal per-frame ratio after removing direct-delta."""
-    from models.flow_cps_policy import FlowMatchingPolicy
-    pol = FlowMatchingPolicy(obs_dim=5, action_dim=3, horizon=4, hidden_dims=(16, 16),
-                             activation="elu", action_squash_scale=5.0, causal_velocity=True)
-    pol.set_action_max_delta(None)  # v5 absolute mode
-    assert pol.action_max_delta is None
-    for k in range(3):
-        leak = _causal_action_grad_leak(pol, k)
-        assert leak <= 1e-6, f"absolute action frame {k} leaks future grad: {leak}"
-
-
-def test_causal_action_no_future_gradient_leak_residual() -> None:
-    """v6 residual_absolute transform: a_k = scale*tanh((u_prev + sum_{i<=k}
-    raw_i)/scale) depends only on z_0..z_k, so per-frame causality (and thus
-    per-frame clipped-ratio legality) is preserved. This is the v6 guarantee --
-    prev-action-anchored full-support residuals keep a legal per-frame ratio
-    while granting single-step recovery authority (unlike v4's hard delta cap)."""
-    from models.flow_cps_policy import FlowMatchingPolicy
-    pol = FlowMatchingPolicy(obs_dim=5, action_dim=3, horizon=4, hidden_dims=(16, 16),
-                             activation="elu", action_squash_scale=5.0, causal_velocity=True)
-    pol.action_transform = "residual_absolute"
-    pol.set_action_max_delta(None)  # residual mode does not use a delta cap
-    assert pol.action_transform == "residual_absolute"
-    for k in range(3):
-        leak = _causal_action_grad_leak(pol, k)
-        assert leak <= 1e-6, f"residual action frame {k} leaks future grad: {leak}"
-
-
-def test_residual_absolute_anchors_on_prev_action() -> None:
-    """v6 residual_absolute: zero residual chunk => executed chunk holds the
-    previous action exactly (a_k = prev for all k). This is the 'zero output =
-    hold current action' property that pure absolute lacks (and which v5
-    collapsed without)."""
-    from models.flow_cps_policy import FlowMatchingPolicy
-    torch.manual_seed(0)
-    pol = FlowMatchingPolicy(obs_dim=5, action_dim=3, horizon=4, hidden_dims=(16, 16),
-                             activation="elu", action_squash_scale=5.0, causal_velocity=True)
-    pol.action_transform = "residual_absolute"
-    prev = torch.tensor([[0.3, -0.7, 1.2]])
-    zero_chunk = torch.zeros(1, pol.chunk_dim)
-    actions = pol._action_transform(zero_chunk, prev_action=prev).view(pol.horizon, pol.action_dim)
-    assert torch.allclose(actions, prev.expand(pol.horizon, -1), atol=1e-5), (
-        f"zero residual must hold prev_action, got {actions}"
-    )
-
-
-def test_residual_absolute_uses_configured_symmetric_command_domain() -> None:
-    from models.flow_cps_policy import FlowMatchingPolicy
-
+def test_policy_exposes_only_frame_major_raw_target_rate() -> None:
     pol = FlowMatchingPolicy(
         obs_dim=5,
         action_dim=3,
         horizon=4,
         hidden_dims=(16, 16),
         activation="elu",
-        action_squash_scale=5.0,
         causal_velocity=True,
     )
-    pol.action_transform = "residual_absolute"
-    prev = torch.tensor([[0.4, -1.7, 2.1]])
-
-    held = pol._action_transform(
-        torch.zeros(1, pol.chunk_dim), prev_action=prev
-    ).view(pol.horizon, pol.action_dim)
-    torch.testing.assert_close(held, prev.expand_as(held), atol=2.0e-6, rtol=0.0)
-
-    extreme = torch.tensor(
-        [[100.0, -100.0, 100.0] * pol.horizon], dtype=torch.float32
-    )
-    actions = pol._action_transform(extreme, prev_action=prev).view(
-        pol.horizon, pol.action_dim
-    )
-    assert bool((actions >= -5.0).all())
-    assert bool((actions <= 5.0).all())
-    torch.testing.assert_close(
-        actions[-1],
-        torch.tensor([5.0, -5.0, 5.0]),
-        atol=1.0e-6,
-        rtol=0.0,
-    )
+    raw = torch.arange(24, dtype=torch.float32).view(2, 12)
+    shaped = pol.reshape_raw_targets(raw)
+    assert shaped.shape == (2, 4, 3)
+    torch.testing.assert_close(shaped.reshape_as(raw), raw)
+    assert not hasattr(pol, "_action_transform")
+    assert not hasattr(pol, "action_transform")
 
 
 # --------------------------------------------------------------------------- #

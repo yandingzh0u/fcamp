@@ -17,6 +17,7 @@ def snapshot_env_state(env) -> dict[str, torch.Tensor]:
             int(env._next_episode_id), dtype=torch.long, device=env.device
         ),
         "last_action": env.last_action.clone(),
+        "command_rate": env.command_rate.clone(),
         "next_push_step": env.next_push_step.clone(),
         "push_time_left": env.push_time_left.clone(),
         "first_push_step": env.first_push_step.clone(),
@@ -68,6 +69,7 @@ def restore_env_state(env, snapshot: dict[str, torch.Tensor]) -> None:
         env.episode_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
         env._next_episode_id = int(env.num_envs)
     env.last_action.copy_(snapshot["last_action"])
+    env.command_rate.copy_(snapshot["command_rate"])
     env.next_push_step.copy_(snapshot["next_push_step"])
     env.push_time_left.copy_(snapshot["push_time_left"])
     env.first_push_step.copy_(snapshot["first_push_step"])

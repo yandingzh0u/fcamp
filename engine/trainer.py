@@ -13,7 +13,10 @@ from .metrics_logger import MetricsLogger
 from envs.g1_mimic import G1MimicEnv
 
 
-VALIDATION_PROTOCOL_VERSION = 5.0
+# Protocol 6 evaluates the cached raw policy coordinates through the same
+# per-frame stateful decoder used by training/playback and records applied
+# commands rather than pre-decoded policy payloads.
+VALIDATION_PROTOCOL_VERSION = 6.0
 
 
 class CoreTrainer:
