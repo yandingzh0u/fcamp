@@ -253,6 +253,12 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError("environment.rsi_keyframe_count must be positive")
     if env.root_velocity_mode not in {"com", "link"}:
         raise ValueError("environment.root_velocity_mode must be com or link")
+    if env.root_velocity_mode != "link":
+        raise ValueError(
+            "FCAMP requires environment.root_velocity_mode=link so reset, "
+            "policy, expert, validation, snapshot, and push velocities share "
+            "one root-link world-frame contract"
+        )
     if env.platform_profile == "g1_largebox_50hz":
         if env.task != "largebox_plane":
             raise ValueError("g1_largebox_50hz requires environment.task=largebox_plane")

@@ -265,9 +265,20 @@ class MimicMotionReference:
             action_joint_names,
         )
 
-        joint_pos, joint_vel, body_pos_w, body_quat_w, body_lin_vel_w, body_ang_vel_w = frame
+        (
+            joint_pos,
+            joint_vel,
+            root_link_vel_w,
+            body_pos_w,
+            body_quat_w,
+            body_lin_vel_w,
+            body_ang_vel_w,
+        ) = frame
         self.joint_pos = torch.tensor(joint_pos, dtype=torch.float32, device=device)
         self.joint_vel = torch.tensor(joint_vel, dtype=torch.float32, device=device)
+        self.root_link_vel_w = torch.tensor(
+            root_link_vel_w, dtype=torch.float32, device=device
+        )
         self.body_pos_full_w = torch.tensor(body_pos_w, dtype=torch.float32, device=device)
         self.body_quat_full_w = torch.tensor(body_quat_w, dtype=torch.float32, device=device)
         self.body_lin_vel_full_w = torch.tensor(body_lin_vel_w, dtype=torch.float32, device=device)
@@ -312,6 +323,19 @@ class MimicMotionReference:
         joint_pos_raw = np.asarray(data["joint_pos"], dtype=np.float32)
         joint_vel_raw = np.asarray(data["joint_vel"], dtype=np.float32)
         num_joints = len(motion_joint_names)
+        if joint_pos_raw.shape[1] != 7 + num_joints:
+            raise ValueError(
+                "Holosoma joint_pos must contain root pose plus named joints"
+            )
+        if joint_vel_raw.shape[1] != 6 + num_joints:
+            raise ValueError(
+                "Holosoma joint_vel must contain root velocity plus named joints"
+            )
+        # The exporter computes these six values directly from the root-link
+        # pose in world axes.  Its per-body fields are COM velocities, and its
+        # root angular body velocity has passed through MuJoCo's local qvel
+        # convention, so those fields are not the runtime root-link contract.
+        root_link_vel_w = joint_vel_raw[:, :6]
         joint_pos_joints = joint_pos_raw[:, joint_pos_raw.shape[1] - num_joints:]
         joint_vel_joints = joint_vel_raw[:, joint_vel_raw.shape[1] - num_joints:]
         j_idx = [motion_joint_names.index(n) for n in action_joint_names]
@@ -361,7 +385,15 @@ class MimicMotionReference:
             available_motion_bodies.add(child_name)
 
         return (
-            (joint_pos, joint_vel, body_pos, body_quat, body_lin, body_ang),
+            (
+                joint_pos,
+                joint_vel,
+                root_link_vel_w,
+                body_pos,
+                body_quat,
+                body_lin,
+                body_ang,
+            ),
             available_motion_bodies,
         )
 
@@ -416,10 +448,8 @@ class MimicMotionReference:
         return F.normalize(torch.where(sin_theta > 1.0e-6, slerp, linear), dim=-1)
 
     def _root_link_velocity(self, time_steps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return (
-            self._interpolate(self.body_lin_vel_full_w[:, self.root_body_id], time_steps),
-            self._interpolate(self.body_ang_vel_full_w[:, self.root_body_id], time_steps),
-        )
+        velocity = self._interpolate(self.root_link_vel_w, time_steps)
+        return velocity[:, :3], velocity[:, 3:]
 
     def get_frame(self, time_steps: torch.Tensor) -> dict[str, torch.Tensor]:
         time_steps = self.clamp_time_steps(time_steps.to(device=self.device))
@@ -518,17 +548,7 @@ class MimicMotionReference:
             self.body_quat_full_w[:, self.root_body_id], phases
         )
         joint_pos = self._interpolate(self.joint_pos, phases)
-        root_link_velocity = torch.cat(
-            (
-                self._interpolate(
-                    self.body_lin_vel_full_w[:, self.root_body_id], phases
-                ),
-                self._interpolate(
-                    self.body_ang_vel_full_w[:, self.root_body_id], phases
-                ),
-            ),
-            dim=-1,
-        )
+        root_link_velocity = self._interpolate(self.root_link_vel_w, phases)
         frame = self.build_fcamp_frame_from_robot_state(
             root_pos=root_pos,
             root_quat=root_quat,
@@ -583,11 +603,7 @@ class MimicMotionReference:
         return self.get_fcamp_demo_history(end_indices, window_size)
 
     def get_imitation_frame_at_times(self, time_steps: torch.Tensor) -> torch.Tensor:
-        """Return evaluator-only frames at exact fractional motion phases.
-
-        This method always uses the dataset's raw root-link body velocities and
-        joint velocities plus one shortest-path quaternion interpolation rule.
-        """
+        """Return evaluator frames in the exact FCAMP expert feature domain."""
 
         if not torch.is_tensor(time_steps):
             raise TypeError("time_steps must be a torch.Tensor")
@@ -598,22 +614,4 @@ class MimicMotionReference:
             raise ValueError("time_steps contain non-finite values")
         if bool((phases < 0).any()) or bool((phases > self.num_frames - 1).any()):
             raise ValueError(f"imitation frame times must lie in [0, {self.num_frames - 1}]")
-        phases = phases.to(dtype=torch.float32)
-        root_pos = self._interpolate(self.body_pos_full_w[:, self.root_body_id], phases)
-        return build_g1_imitation_frame(
-            root_pos=root_pos,
-            root_quat_wxyz=self._interpolate_quat_shortest(
-                self.body_quat_full_w[:, self.root_body_id], phases
-            ),
-            joint_pos=self._interpolate(self.joint_pos, phases),
-            key_body_pos=self._interpolate(
-                self.body_pos_full_w[:, self.imitation_key_body_ids], phases
-            ),
-            root_lin_vel=self._interpolate(
-                self.body_lin_vel_full_w[:, self.root_body_id], phases
-            ),
-            root_ang_vel=self._interpolate(
-                self.body_ang_vel_full_w[:, self.root_body_id], phases
-            ),
-            joint_vel=self._interpolate(self.joint_vel, phases),
-        )
+        return self.get_fcamp_expert_frame_at_times(phases.to(dtype=torch.float32))

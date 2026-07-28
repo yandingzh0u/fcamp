@@ -12,14 +12,14 @@ environment:
   motion_start_phase: 0
   motion_end_phase: -1
   reset_noise: true
-  interval_pushes: true
+  interval_pushes: false
   reset_phase_sampling: adaptive
   rsi_keyframe_count: 21
   adaptive_num_bins: 0
   adaptive_alpha: 0.001
   adaptive_predecessor_ratio: 0.8
   adaptive_predecessor_lookback_bins: 1
-  root_velocity_mode: com
+  root_velocity_mode: link
 
 parameters:
   # Causal Flow-CPS chunk actor (kept aligned with the Flow-CPS actor).

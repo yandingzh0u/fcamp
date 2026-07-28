@@ -4,6 +4,7 @@ import ast
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -100,6 +101,17 @@ def _fake_motion(num_frames: int = 24) -> MimicMotionReference:
     motion.joint_pos = torch.arange(num_frames, dtype=torch.float32)[:, None].repeat(1, 29)
     motion.joint_vel = torch.ones(num_frames, 29)
     frame = torch.arange(num_frames, dtype=torch.float32)
+    motion.root_link_vel_w = torch.stack(
+        (
+            frame,
+            frame + 1.0,
+            frame + 2.0,
+            frame + 3.0,
+            frame + 4.0,
+            frame + 5.0,
+        ),
+        dim=-1,
+    )
     root_trajectory = torch.stack((frame, 3.0 - 2.0 * frame, 0.70 + 0.01 * frame), dim=-1)
     motion.body_pos_full_w = root_trajectory[:, None, :].repeat(1, 6, 1)
     motion.body_pos_full_w[:, 1:, 0] += 1.0
@@ -139,6 +151,14 @@ def test_motion_reference_interpolates_fractional_frames() -> None:
     torch.testing.assert_close(frame["root_pos_w"][0, 0], torch.tensor(1.5))
     torch.testing.assert_close(frame["root_pos_w"][1, 0], torch.tensor(3.25))
     torch.testing.assert_close(
+        frame["root_lin_vel_w"],
+        torch.tensor([[1.5, 2.5, 3.5], [3.25, 4.25, 5.25]]),
+    )
+    torch.testing.assert_close(
+        frame["root_ang_vel_w"],
+        torch.tensor([[4.5, 5.5, 6.5], [6.25, 7.25, 8.25]]),
+    )
+    torch.testing.assert_close(
         torch.linalg.norm(frame["root_quat_w"], dim=-1),
         torch.ones(2),
     )
@@ -146,6 +166,7 @@ def test_motion_reference_interpolates_fractional_frames() -> None:
 
 def test_imitation_reference_interpolates_exact_fractional_phases() -> None:
     motion = _fake_motion(num_frames=5)
+    motion._fk_model = _StateDependentFK()
     frame = motion.get_imitation_frame_at_times(torch.tensor([1.5, 3.25]))
 
     assert frame.shape == (2, G1_IMITATION_FRAME_DIM)
@@ -182,27 +203,20 @@ def test_fcamp_expert_frame_uses_fk_at_the_same_dataset_state_and_time() -> None
         root_quat_wxyz=root_quat,
         joint_pos=joint_pos,
         key_body_pos=fk_body_pos.index_select(1, motion.imitation_key_body_ids),
-        root_lin_vel=motion._interpolate(
-            motion.body_lin_vel_full_w[:, motion.root_body_id], flat_times
-        ),
-        root_ang_vel=motion._interpolate(
-            motion.body_ang_vel_full_w[:, motion.root_body_id], flat_times
-        ),
+        root_lin_vel=motion._interpolate(motion.root_link_vel_w, flat_times)[
+            :, :3
+        ],
+        root_ang_vel=motion._interpolate(motion.root_link_vel_w, flat_times)[
+            :, 3:
+        ],
         joint_vel=motion._interpolate(motion.joint_vel, flat_times),
     ).reshape(2, 2, G1_IMITATION_FRAME_DIM)
 
     assert actual.shape == (2, 2, G1_IMITATION_FRAME_DIM)
     torch.testing.assert_close(actual, expected)
 
-    # The method-independent evaluator intentionally remains dataset-body based.
-    dataset_frame = motion.get_imitation_frame_at_times(flat_times).reshape_as(actual)
-    key_start = 3 + 6 + 6 * G1_IMITATION_NUM_JOINTS
-    key_end = key_start + 5 * 3
-    torch.testing.assert_close(actual[..., :key_start], dataset_frame[..., :key_start])
-    torch.testing.assert_close(actual[..., key_end:], dataset_frame[..., key_end:])
-    assert not torch.allclose(
-        actual[..., key_start:key_end], dataset_frame[..., key_start:key_end]
-    )
+    evaluator_frame = motion.get_imitation_frame_at_times(flat_times).reshape_as(actual)
+    torch.testing.assert_close(actual, evaluator_frame)
 
 
 def test_fcamp_history_and_endpoint_windows_share_fk_and_left_boundary() -> None:
@@ -224,3 +238,27 @@ def test_fcamp_history_and_endpoint_windows_share_fk_and_left_boundary() -> None
     torch.testing.assert_close(specified, history)
     with pytest.raises(ValueError, match="integer phases"):
         motion.get_fcamp_demo_history(torch.tensor([1.5]), 4)
+
+
+def test_holosoma_loader_preserves_exported_root_link_world_velocity() -> None:
+    motion = object.__new__(MimicMotionReference)
+    root_velocity = np.arange(18, dtype=np.float32).reshape(3, 6)
+    data = {
+        "joint_names": np.array(["joint"]),
+        "body_names": np.array(["pelvis"]),
+        "joint_pos": np.zeros((3, 8), dtype=np.float32),
+        "joint_vel": np.concatenate(
+            (root_velocity, np.ones((3, 1), dtype=np.float32)), axis=1
+        ),
+        "body_pos_w": np.zeros((3, 1, 3), dtype=np.float32),
+        "body_quat_w": np.tile(
+            np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            (3, 1, 1),
+        ),
+        "body_lin_vel_w": np.full((3, 1, 3), 100.0, dtype=np.float32),
+        "body_ang_vel_w": np.full((3, 1, 3), 200.0, dtype=np.float32),
+    }
+
+    frame, _ = motion._load_holosoma(data, ["pelvis"], ["joint"])
+
+    np.testing.assert_array_equal(frame[2], root_velocity)

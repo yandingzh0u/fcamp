@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_fcamp_config_is_h4_w16_flow_cps() -> None:
     cfg = load_config(ROOT / "configs" / "fcamp_largebox.yaml")
     assert cfg.method == "fcamp"
+    assert not cfg.environment.interval_pushes
+    assert cfg.environment.root_velocity_mode == "link"
     assert isinstance(cfg.parameters, FCAMPConfig)
     assert cfg.parameters.horizon == 4
     assert cfg.parameters.rollout_env_steps == 24
@@ -34,6 +36,17 @@ def test_fcamp_config_is_h4_w16_flow_cps() -> None:
     assert not hasattr(cfg.parameters, "credit")
     assert not hasattr(cfg.parameters.critic, "task_loss_weight")
     assert cfg.training.max_updates == 500
+
+
+def test_fcamp_rejects_com_root_velocity_contract() -> None:
+    with pytest.raises(
+        ValueError,
+        match="root_velocity_mode=link",
+    ):
+        load_config(
+            ROOT / "configs" / "fcamp_largebox.yaml",
+            ["environment.root_velocity_mode=com"],
+        )
 
 
 def test_fcamp_discriminator_batch_must_realize_both_streams() -> None:

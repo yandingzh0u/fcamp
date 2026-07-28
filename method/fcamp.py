@@ -1044,7 +1044,10 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                 0, 2, 1, *range(3, 3 + len(tail))
             )
 
-        rewards_time = chronological(rollout["amp_reward"])
+        rollout["amp_reward_credit"] = (
+            rollout["amp_reward"] * float(self.env.dt)
+        )
+        rewards_time = chronological(rollout["amp_reward_credit"])
         values_time = chronological(rollout["values"])
         next_values_time = chronological(rollout["next_values"])
         bootstrap_time = chronological(rollout["bootstrap_mask"])
@@ -1467,7 +1470,7 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
         micro_batch_size = self._policy_micro_batch_size(
             self._policy_mini_batch_size(int(valid_idx.numel()))
         )
-        totals = {"loss": 0.0, "grad": 0.0}
+        totals = {"loss": 0.0, "grad": 0.0, "grad_clipped": 0.0}
         stream_totals = {name: 0.0 for name, _, _, _ in stream_specs}
         stream_steps = {name: 0 for name, _, _, _ in stream_specs}
         steps = 0
@@ -1524,13 +1527,18 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                     self.critic.parameters(), float(self.cfg.max_grad_norm)
                 )
                 self.critic_optimizer.step()
+                grad_value = float(grad)
                 totals["loss"] += combined_loss
-                totals["grad"] += float(grad)
+                totals["grad"] += grad_value
+                totals["grad_clipped"] += float(
+                    grad_value > float(self.cfg.max_grad_norm)
+                )
                 steps += 1
         denom = max(steps, 1)
         metrics = {
             "critic/flow_loss": totals["loss"] / denom,
             "critic/grad_norm": totals["grad"] / denom,
+            "critic/grad_clip_fraction": totals["grad_clipped"] / denom,
             "critic/lr": float(self.critic_learning_rate),
             "critic/optimizer_steps": float(steps),
             "critic/valid_count": float(valid.sum().item()),

@@ -67,11 +67,8 @@ class MimicObservationMixin:
     ) -> torch.Tensor:
         """Return the method-independent policy frame used only by validation.
 
-        Training imitation features intentionally preserve each paper's native
-        root-velocity convention. Cross-method evaluation must not: it always
-        uses the physical root-link pose/velocity exposed by Isaac Lab, so ADD's
-        link convention and the other methods' COM convention cannot change the
-        external metric for an identical simulator state.
+        Evaluation uses the same physical root-link pose/velocity exposed by
+        Isaac Lab as the policy-side discriminator frame.
         """
 
         if env_ids is None:

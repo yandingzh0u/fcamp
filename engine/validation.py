@@ -64,10 +64,8 @@ def _reset_alignment_metrics(env, prefix: str) -> dict[str, float]:
     body_pos_top_idx = int(torch.argmax(body_pos_err_mean_by_body).item())
     body_ori_top_idx = int(torch.argmax(body_ori_deg_mean_by_body).item())
     joint_pos, joint_vel = env.get_action_joint_state()
-    # FCAMP writes and discriminates root-link velocity even though the shared
-    # task configuration retains COM semantics for its ordinary observations.
-    # Read the same frame here so the reset diagnostic is not a COM-vs-link
-    # comparison artifact.
+    # FCAMP writes and discriminates root-link velocity. Read the same frame so
+    # the reset diagnostic cannot become a COM-vs-link comparison artifact.
     root_velocity = env.get_mimic_root_velocity_w(velocity_frame="link")
     root_ori_deg = (
         quat_error_magnitude(reference["root_quat_w"], env.robot.data.root_quat_w)

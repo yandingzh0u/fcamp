@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 
 from components.credit.temporal_credit import (
@@ -7,6 +9,8 @@ from components.credit.temporal_credit import (
     normalize_amp_advantage,
     resolve_terminal_masks,
 )
+from components.rollout.training_streams import CURRICULUM_STREAM, PHASE0_STREAM
+from method.fcamp import FCAMP
 from models.flow_critic import FlowCritic
 
 
@@ -47,6 +51,46 @@ def test_amp_credit_is_causal_and_crosses_chunk_boundaries() -> None:
     torch.testing.assert_close(
         changed.advantages[1:],
         credit.advantages[1:],
+    )
+
+
+def test_fcamp_gae_consumes_dt_scaled_reward_not_raw_reward() -> None:
+    algo = object.__new__(FCAMP)
+    stream_ids = torch.tensor(
+        [PHASE0_STREAM, CURRICULUM_STREAM],
+        dtype=torch.int8,
+    )
+    algo.cfg = SimpleNamespace(
+        discount_gamma=0.0,
+        gae_lambda=0.0,
+        streams=SimpleNamespace(phase0_fraction=0.5),
+    )
+    algo.env = SimpleNamespace(dt=0.02)
+    algo.training_streams = SimpleNamespace(stream_ids=stream_ids)
+    rollout = {
+        "valid": torch.ones(1, 2, 2, dtype=torch.bool),
+        "amp_valid": torch.ones(1, 2, 2, dtype=torch.bool),
+        "amp_reward": torch.ones(1, 2, 2),
+        "values": torch.zeros(1, 2, 2),
+        "next_values": torch.zeros(1, 2, 2),
+        "bootstrap_mask": torch.ones(1, 2, 2, dtype=torch.bool),
+        "trace_mask": torch.ones(1, 2, 2, dtype=torch.bool),
+        "stream_ids": stream_ids,
+    }
+
+    algo._assign_credit(rollout)
+
+    torch.testing.assert_close(
+        rollout["amp_reward_credit"],
+        torch.full((1, 2, 2), 0.02),
+    )
+    torch.testing.assert_close(
+        rollout["amp_advantages"],
+        rollout["amp_reward_credit"],
+    )
+    torch.testing.assert_close(
+        rollout["value_targets"],
+        rollout["amp_reward_credit"],
     )
 
 

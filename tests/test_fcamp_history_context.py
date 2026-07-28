@@ -239,7 +239,7 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
         with pytest.raises(ValueError, match=name):
             algo.validate_checkpoint_payload({"algo_state": mismatched})
 
-    for historical_schema in (8, 9, 11, 13, 14):
+    for historical_schema in (8, 9, 11, 13, 14, 16, 17):
         historical = dict(valid_state)
         historical["fcamp_schema_version"] = historical_schema
         with pytest.raises(ValueError, match="fcamp_schema_version"):
