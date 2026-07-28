@@ -161,7 +161,7 @@ class FCAMPDiagnosticsMixin:
                     rollout["amp_logits"][stream_amp_valid].mean().item()
                 )
                 metrics[f"{prefix}/amp_reward_mean"] = float(
-                    rollout["amp_reward_raw"][
+                    rollout["amp_reward"][
                         stream_amp_valid
                     ].mean().item()
                 )
@@ -186,7 +186,7 @@ class FCAMPDiagnosticsMixin:
 
         valid = rollout["valid"]
         amp_valid = rollout["amp_valid"]
-        channel_valid = rollout["channel_valid"]
+        credit_valid = rollout["credit_valid"]
         metrics: dict[str, float] = {}
         metrics.update(actor_metrics)
         metrics.update(critic_metrics)
@@ -194,108 +194,40 @@ class FCAMPDiagnosticsMixin:
         metrics.update(reward_metrics)
         metrics.update(self._stream_rollout_metrics(rollout))
         metrics.update(self.phase0_attempts.metrics())
-        metrics.update(_masked_stats("reward/task", rollout["task_reward"], valid))
-        metrics.update(_masked_stats("reward/amp_raw", rollout["amp_reward_raw"], amp_valid))
-        metrics.update(_masked_stats("reward/amp_credit", rollout["amp_reward_credit"], amp_valid))
-        metrics.update(_masked_stats("reward/mixed", rollout["mixed_reward"], valid))
-        metrics.update(_masked_stats("credit/task_adv", rollout["channel_advantages"][..., 0], valid))
+        metrics.update(_masked_stats("reward/amp", rollout["amp_reward"], amp_valid))
         metrics.update(
-            _masked_stats(
-                "credit/amp_adv",
-                rollout["channel_advantages"][..., 1],
-                channel_valid[..., 1],
-            )
-        )
-        weighted_channel_advantage = (
-            float(self.cfg.credit.task_weight)
-            * rollout["channel_advantages"][..., 0]
-            + float(self.cfg.credit.amp_weight)
-            * rollout["channel_advantages"][..., 1]
-        )
-        mixed_identity_error = (
-            weighted_channel_advantage - rollout["mixed_advantage"]
-        ).abs()
-        metrics["credit/mixed_identity_abs_max"] = float(
-            mixed_identity_error[valid].max().item()
-            if bool(valid.any())
-            else 0.0
+            _masked_stats("credit/amp_adv", rollout["amp_advantages"], credit_valid)
         )
         metrics.update(
-            _masked_stats(
-                "credit/mixed_adv",
-                rollout["mixed_advantage"],
-                valid,
-            )
+            _masked_stats("credit/actor_adv", rollout["advantages"], credit_valid)
         )
+        metrics.update(_masked_stats("critic/value", rollout["values"], credit_valid))
         metrics.update(
-            _masked_stats(
-                "credit/task_actor_component",
-                rollout["actor_advantage_components"][..., 0],
-                valid,
-            )
-        )
-        metrics.update(
-            _masked_stats(
-                "credit/amp_actor_component",
-                rollout["actor_advantage_components"][..., 1],
-                channel_valid[..., 1],
-            )
-        )
-        metrics.update(_masked_stats("credit/actor_adv", rollout["advantages"], valid))
-        metrics.update(_masked_stats("critic/task_value", rollout["values"][..., 0], valid))
-        metrics.update(
-            _masked_stats(
-                "critic/amp_value",
-                rollout["values"][..., 1],
-                channel_valid[..., 1],
-            )
-        )
-        metrics.update(_masked_stats("critic/task_target", rollout["value_targets"][..., 0], valid))
-        metrics.update(
-            _masked_stats(
-                "critic/amp_target",
-                rollout["value_targets"][..., 1],
-                channel_valid[..., 1],
-            )
+            _masked_stats("critic/target", rollout["value_targets"], credit_valid)
         )
         metrics.update(
             style_reward_statistics(
                 rollout["amp_logits"][amp_valid],
-                rollout["amp_reward_raw"][amp_valid],
+                rollout["amp_reward"][amp_valid],
                 scale=float(self.cfg.style_prior.reward_scale),
                 minimum_one_minus_prob=float(self.cfg.style_prior.reward_epsilon),
                 prefix="amp_reward",
             )
         )
         for frame_idx in range(self.horizon_h):
-            frame_valid = valid[..., frame_idx]
-            frame_amp_valid = channel_valid[..., frame_idx, 1]
-            metrics.update(
-                _masked_stats(
-                    f"credit/frame_{frame_idx}_task_adv",
-                    rollout["channel_advantages"][..., frame_idx, 0],
-                    frame_valid,
-                )
-            )
+            frame_valid = credit_valid[..., frame_idx]
             metrics.update(
                 _masked_stats(
                     f"credit/frame_{frame_idx}_amp_adv",
-                    rollout["channel_advantages"][..., frame_idx, 1],
-                    frame_amp_valid,
-                )
-            )
-            metrics.update(
-                _masked_stats(
-                    f"credit/frame_{frame_idx}_task_actor_component",
-                    rollout["actor_advantage_components"][..., frame_idx, 0],
+                    rollout["amp_advantages"][..., frame_idx],
                     frame_valid,
                 )
             )
             metrics.update(
                 _masked_stats(
-                    f"credit/frame_{frame_idx}_amp_actor_component",
-                    rollout["actor_advantage_components"][..., frame_idx, 1],
-                    frame_amp_valid,
+                    f"credit/frame_{frame_idx}_actor_adv",
+                    rollout["advantages"][..., frame_idx],
+                    frame_valid,
                 )
             )
         metrics.update(self.disc_normalizer.statistics())
@@ -303,6 +235,7 @@ class FCAMPDiagnosticsMixin:
         metrics.update(
             {
                 "rollout/valid_fraction": float(valid.float().mean().item()),
+                "rollout/amp_valid_fraction": float(amp_valid.float().mean().item()),
                 "rollout/done_fraction": float(rollout["done"].float().mean().item()),
                 "rollout/failure_fraction": float(rollout["failure"].float().mean().item()),
                 "rollout/timeout_fraction": float(rollout["timeout"].float().mean().item()),
@@ -336,17 +269,6 @@ class FCAMPDiagnosticsMixin:
                 ),
                 "intervention/edge_count": float(
                     rollout["intervention_edge"].sum().item()
-                ),
-                "intervention/amp_bootstrap_cut_count": float(
-                    (
-                        rollout["bootstrap_mask"]
-                        & ~rollout["amp_bootstrap_mask"]
-                    ).sum().item()
-                ),
-                "intervention/amp_trace_cut_count": float(
-                    (
-                        rollout["trace_mask"] & ~rollout["amp_trace_mask"]
-                    ).sum().item()
                 ),
                 "disc_window/policy_latest_root_xy_abs_max": float(
                     rollout["window_latest_root_xy_abs_max"]
@@ -396,9 +318,7 @@ class FCAMPDiagnosticsMixin:
     def log(self, update_idx: int, max_updates: int, metrics: dict) -> None:
         print(
             f"[UPDATE] {update_idx}/{max_updates} "
-            f"task={metrics.get('reward/task/mean', float('nan')):.5f} "
-            f"amp={metrics.get('reward/amp_raw/mean', float('nan')):.5f} "
-            f"mixed={metrics.get('reward/mixed/mean', float('nan')):.5f} "
+            f"amp={metrics.get('reward/amp/mean', float('nan')):.5f} "
             f"done={metrics.get('rollout/done_fraction', float('nan')):.5f} "
             f"ep_len={metrics.get('train/mean_episode_length', float('nan')):.2f}",
             flush=True,
@@ -440,19 +360,15 @@ class FCAMPDiagnosticsMixin:
             flush=True,
         )
         print(
-            f"[FCAMP_CREDIT] "
-            f"task_raw_std={metrics.get('credit/task_adv/std', float('nan')):.5f} "
+            f"[AMP_CREDIT] "
             f"amp_raw_std={metrics.get('credit/amp_adv/std', float('nan')):.5f} "
-            f"task_actor_std={metrics.get('credit/task_actor_component/std', float('nan')):.5f} "
-            f"amp_actor_std={metrics.get('credit/amp_actor_component/std', float('nan')):.5f} "
-            f"mixed_identity_err={metrics.get('credit/mixed_identity_abs_max', float('nan')):.3e}",
+            f"actor_std={metrics.get('credit/actor_adv/std', float('nan')):.5f}",
             flush=True,
         )
         print(
-            f"[DUAL_CRITIC] task_loss={metrics.get('critic/task_flow_loss', float('nan')):.5f} "
-            f"amp_loss={metrics.get('critic/amp_flow_loss', float('nan')):.5f} "
-            f"task_V={metrics.get('critic/task_value/mean', float('nan')):.4f} "
-            f"amp_V={metrics.get('critic/amp_value/mean', float('nan')):.4f} "
+            f"[CRITIC] loss={metrics.get('critic/flow_loss', float('nan')):.5f} "
+            f"V={metrics.get('critic/value/mean', float('nan')):.4f} "
+            f"target={metrics.get('critic/target/mean', float('nan')):.4f} "
             f"grad={metrics.get('critic/grad_norm', float('nan')):.4f}",
             flush=True,
         )
@@ -473,7 +389,6 @@ class FCAMPDiagnosticsMixin:
             f"dirty_excluded={metrics.get('disc_contract/dirty_window_excluded_count', 0.0):.0f} "
             f"replay_dirty={metrics.get('disc_contract/replay_dirty_insert_count', -1.0):.0f} "
             f"push_edges={metrics.get('intervention/edge_count', 0.0):.0f} "
-            f"amp_trace_cuts={metrics.get('intervention/amp_trace_cut_count', 0.0):.0f} "
             f"replay_phase0={metrics.get('disc_replay/stream_0_size', 0.0):.0f}/"
             f"{metrics.get('disc_replay/stream_0_capacity', 0.0):.0f} "
             f"replay_curr={metrics.get('disc_replay/stream_1_size', 0.0):.0f}/"
@@ -492,22 +407,21 @@ class FCAMPDiagnosticsMixin:
     def log_banner(self) -> None:
         print(
             "[METHOD] name=fcamp actor=causal_flow_cps prior=temporal_discriminator "
-            "credit=causal_frame critic=shared_dual_flow",
+            "reward=pure_amp credit=causal_frame critic=scalar_flow",
             flush=True,
         )
         print(
             f"[ARCH] task={self.env.task.name} actor_obs={self.actor_obs_dim} "
-            f"env_actor_obs={self.actor_obs_dim} discriminator_in_actor=False "
+            f"actor_input=self_state,last_action phase=False target=False "
+            f"discriminator_in_actor=False "
             f"prefix_context={self.prefix_context_dim} action_dim={self.num_act} "
             f"H={self.horizon_h} W_D={self.imitation_history_steps} "
             f"imitation_frame={self.imitation_frame_dim} imitation_window={self.imitation_window_dim}",
             flush=True,
         )
         print(
-            f"[CREDIT] critic_sharing=encoder heads=task,amp "
-            f"credit=causal_frame advantage_norm=global ratio_mode=joint_path "
-            f"task_weight={self.cfg.credit.task_weight} amp_weight={self.cfg.credit.amp_weight} "
-            f"amp_dt=True",
+            "[CREDIT] head=amp credit=causal_frame advantage_norm=global "
+            "ratio_mode=joint_path task_weight=0 disc_weight=1 amp_dt=False",
             flush=True,
         )
         print(
@@ -517,6 +431,9 @@ class FCAMPDiagnosticsMixin:
             f"replay_mode=complete_window_stratified "
             f"fcamp_schema={FCAMP_CHECKPOINT_CONTRACT['fcamp_schema_version']} "
             f"action_contract={FCAMP_CHECKPOINT_CONTRACT['action_contract']} "
+            f"actor_observation_contract={FCAMP_CHECKPOINT_CONTRACT['actor_observation_contract']} "
+            f"reward_contract={FCAMP_CHECKPOINT_CONTRACT['reward_contract']} "
+            f"critic_contract={FCAMP_CHECKPOINT_CONTRACT['critic_contract']} "
             f"reset_contract={FCAMP_CHECKPOINT_CONTRACT['reset_contract']} "
             f"validation_contract={FCAMP_CHECKPOINT_CONTRACT['validation_contract']} "
             f"ppo_contract={FCAMP_CHECKPOINT_CONTRACT['ppo_contract']} "

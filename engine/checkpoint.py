@@ -26,13 +26,11 @@ _RESUME_ENV_KEYS = (
     "startup_randomization",
     "reset_noise",
     "interval_pushes",
-    "observation_noise",
     "adaptive_num_bins",
     "adaptive_alpha",
     "adaptive_predecessor_ratio",
     "adaptive_predecessor_lookback_bins",
     "root_velocity_mode",
-    "action_rate_weight",
 )
 
 def _resume_signature(config: dict) -> dict:

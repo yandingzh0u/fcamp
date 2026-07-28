@@ -21,9 +21,6 @@ def mimic_env_type(monkeypatch):
     class _Observation:
         pass
 
-    class _Reward:
-        pass
-
     class _Robot:
         pass
 
@@ -74,11 +71,9 @@ def mimic_env_type(monkeypatch):
             RESET_JOINT_POSITION_RANGE=(0.0, 0.0),
             RESET_ROOT_POSE_RANGE=((0.0, 0.0),) * 6,
             VELOCITY_RANGE=((0.0, 0.0),) * 6,
-            CONTACT_ALLOWED_SUBSTRINGS=(),
             MIMIC_ANCHOR_BODY_NAME="anchor",
             MIMIC_BODY_NAMES=(),
             MIMIC_EE_BODY_NAMES=(),
-            MIMIC_FOOT_BODY_NAMES=(),
             MIMIC_TERMINATION_BODY_NAMES=(),
         ),
     )
@@ -97,11 +92,6 @@ def mimic_env_type(monkeypatch):
         sys.modules,
         "envs.observation",
         _module("envs.observation", MimicObservationMixin=_Observation),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "envs.reward",
-        _module("envs.reward", MimicRewardMixin=_Reward),
     )
     monkeypatch.setitem(
         sys.modules,

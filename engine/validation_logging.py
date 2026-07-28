@@ -20,7 +20,6 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
         f"steps_p95={metrics.get(f'{prefix}/steps_p95', float('nan')):.0f} "
         f"steps_max={metrics.get(f'{prefix}/steps_max', float('nan')):.0f} "
         f"fail_phase_mean={metrics.get(f'{prefix}/fail_phase_mean', float('nan')):.1f} "
-        f"return={metrics[f'{prefix}/return_mean']:.5f} "
         f"done={metrics.get(f'{prefix}/done_frac', float('nan')):.5f}",
         flush=True,
     )

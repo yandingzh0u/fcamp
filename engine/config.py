@@ -22,14 +22,12 @@ class EnvironmentConfig:
     motion_end_phase: int
     reset_noise: bool
     interval_pushes: bool
-    observation_noise: bool
     reset_phase_sampling: str
     rsi_keyframe_count: int
     adaptive_num_bins: int
     adaptive_alpha: float
     adaptive_predecessor_ratio: float
     adaptive_predecessor_lookback_bins: int
-    action_rate_weight: float
     root_velocity_mode: str
 
 
@@ -84,17 +82,9 @@ class StylePriorConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class FCAMPCreditConfig:
-    task_weight: float
-    amp_weight: float
-
-
-@dataclass(frozen=True, slots=True)
-class FCAMPCriticConfig:
+class FlowCriticConfig:
     encoder_hidden_dims: tuple[int, ...]
     head_hidden_dims: tuple[int, ...]
-    task_loss_weight: float
-    amp_loss_weight: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +99,7 @@ class FCAMPConfig(FlowCPSConfig):
     """Full causal Flow-CPS + temporal discriminator training path."""
 
     style_prior: StylePriorConfig
-    credit: FCAMPCreditConfig
-    critics: FCAMPCriticConfig
+    critic: FlowCriticConfig
     streams: FCAMPStreamsConfig
 
 
@@ -163,8 +152,7 @@ def _construct_fcamp(values: dict[str, Any]) -> FCAMPConfig:
     try:
         style_prior = dict(nested["style_prior"])
         nested["style_prior"] = _construct(StylePriorConfig, style_prior)
-        nested["credit"] = _construct(FCAMPCreditConfig, dict(nested["credit"]))
-        nested["critics"] = _construct(FCAMPCriticConfig, dict(nested["critics"]))
+        nested["critic"] = _construct(FlowCriticConfig, dict(nested["critic"]))
         nested["streams"] = _construct(FCAMPStreamsConfig, dict(nested["streams"]))
     except KeyError as exc:
         raise KeyError(f"FCAMPConfig missing nested section: {exc.args[0]}") from exc
@@ -226,112 +214,7 @@ def config_from_checkpoint_dict(
     tree: dict[str, Any],
     source: str | Path = ".",
 ) -> ExperimentConfig:
-    """Load the active FCAMP fields from an a833-compatible checkpoint."""
-
-    def require_removed(
-        section: str,
-        values: dict[str, Any],
-        expected: dict[str, Any],
-    ) -> None:
-        for name, required in expected.items():
-            if name not in values:
-                continue
-            actual = values[name]
-            if isinstance(required, tuple):
-                actual = tuple(actual)
-            if type(actual) is not type(required) or actual != required:
-                raise ValueError(
-                    f"checkpoint {section}.{name}={values[name]!r} is incompatible "
-                    f"with the fixed FCAMP value {required!r}"
-                )
-
-    def select(cls, values: dict[str, Any]) -> dict[str, Any]:
-        return {field.name: values[field.name] for field in fields(cls)}
-
-    environment_raw = dict(tree["environment"])
-    parameters_raw = dict(tree["parameters"])
-    style_raw = dict(parameters_raw["style_prior"])
-    credit_raw = dict(parameters_raw["credit"])
-    critics_raw = dict(parameters_raw["critics"])
-    training_raw = dict(tree["training"])
-    require_removed(
-        "environment",
-        environment_raw,
-        {
-            "adaptive_motion_sampling": environment_raw["reset_phase_sampling"]
-            == "adaptive",
-            "motion_reference_mode": "frame",
-            "policy_observation_mode": "tracking",
-            "physics_material_combine_mode": "average",
-            "contact_sensor_update_period": "control",
-        },
-    )
-    require_removed(
-        "parameters",
-        parameters_raw,
-        {
-            "critic_hidden_dims": (512, 256, 128),
-            "cps_trainable": True,
-            "value_loss_coef": 1.0,
-            "empirical_normalization": True,
-            "advantage_normalization": "global",
-        },
-    )
-    require_removed(
-        "parameters.style_prior",
-        style_raw,
-        {
-            "enabled": True,
-            "optimizer": "sgd",
-            "replay_dtype": "float32",
-            "replay_device": "cpu",
-            "discriminator_warmup_rollouts": 1,
-        },
-    )
-    require_removed(
-        "parameters.credit",
-        credit_raw,
-        {
-            "mode": "causal_frame",
-            "integrate_amp_reward_dt": True,
-            "advantage_normalization": "global",
-            "ratio_mode": "joint_path",
-        },
-    )
-    require_removed(
-        "parameters.critics",
-        critics_raw,
-        {"sharing": "encoder"},
-    )
-    require_removed(
-        "training",
-        training_raw,
-        {"official_reset_every": 0},
-    )
-    parameters = select(FCAMPConfig, parameters_raw)
-    parameters["style_prior"] = select(
-        StylePriorConfig,
-        style_raw,
-    )
-    parameters["credit"] = select(
-        FCAMPCreditConfig,
-        credit_raw,
-    )
-    parameters["critics"] = select(
-        FCAMPCriticConfig,
-        critics_raw,
-    )
-    parameters["streams"] = select(
-        FCAMPStreamsConfig,
-        dict(parameters_raw["streams"]),
-    )
-    active = {
-        "method": tree["method"],
-        "environment": select(EnvironmentConfig, environment_raw),
-        "parameters": parameters,
-        "training": select(TrainingConfig, training_raw),
-    }
-    return config_from_dict(active, source)
+    return config_from_dict(tree, source)
 
 
 def load_config(config_path: str | Path, overrides: list[str] | None = None) -> ExperimentConfig:
@@ -407,8 +290,7 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError("Flow-CPS requires parameters.value_lr > 0")
 
     style = params.style_prior
-    credit = params.credit
-    critics = params.critics
+    critic = params.critic
     streams = params.streams
     if not (0.0 < streams.phase0_fraction < 1.0):
         raise ValueError("FCAMP streams.phase0_fraction must be in (0, 1)")
@@ -449,14 +331,10 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError(
             "FCAMP replay size/replacement quotas cannot realize both streams"
         )
-    if credit.task_weight < 0.0 or credit.amp_weight < 0.0:
-        raise ValueError("FCstyle reward weights must be non-negative")
-    if credit.task_weight == 0.0 and credit.amp_weight == 0.0:
-        raise ValueError("FCAMP requires at least one non-zero reward weight")
     if (
-        not critics.encoder_hidden_dims
-        or not critics.head_hidden_dims
-        or any(width < 1 for width in critics.encoder_hidden_dims)
-        or any(width < 1 for width in critics.head_hidden_dims)
+        not critic.encoder_hidden_dims
+        or not critic.head_hidden_dims
+        or any(width < 1 for width in critic.encoder_hidden_dims)
+        or any(width < 1 for width in critic.head_hidden_dims)
     ):
         raise ValueError("FCAMP critic encoder/head dimensions must be positive")

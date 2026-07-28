@@ -82,7 +82,6 @@ class MetricsLogger:
             "validation/reference_progress_mean",
             "validation/reference_progress_p50",
             "validation/reference_progress_p95",
-            "validation/return_mean",
             "validation/done_frac",
             "validation/motion_complete_frac",
             "validation/failure_frac",

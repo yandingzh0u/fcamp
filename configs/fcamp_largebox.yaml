@@ -13,14 +13,12 @@ environment:
   motion_end_phase: -1
   reset_noise: true
   interval_pushes: true
-  observation_noise: true
   reset_phase_sampling: adaptive
   rsi_keyframe_count: 21
   adaptive_num_bins: 0
   adaptive_alpha: 0.001
   adaptive_predecessor_ratio: 0.8
   adaptive_predecessor_lookback_bins: 1
-  action_rate_weight: 0.1
   root_velocity_mode: com
 
 parameters:
@@ -67,15 +65,9 @@ parameters:
     normalizer_clip: 10.0
     reward_eval_batch_size: 4096
     max_updates_per_iteration: 32
-  credit:
-    task_weight: 1.0
-    amp_weight: 1.0
-
-  critics:
+  critic:
     encoder_hidden_dims: [512, 256, 128]
     head_hidden_dims: [128, 64]
-    task_loss_weight: 1.0
-    amp_loss_weight: 1.0
 
   # Ten percent of the interaction/optimizer budget persistently attempts full
   # episodes from phase 0.  A trajectory is counted complete only when the

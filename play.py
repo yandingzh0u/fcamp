@@ -26,7 +26,6 @@ parser.add_argument("--render_every", type=int, default=1, help="Render every N 
 parser.add_argument("--real_time", action="store_true", default=False, help="Throttle to wall-clock. GUI enables this automatically.")
 parser.add_argument("--no_real_time", action="store_true", default=False, help="Disable automatic wall-clock throttle in GUI.")
 parser.add_argument("--fix_root_link", action="store_true", default=False, help="Lock the robot base in place.")
-parser.add_argument("--observation_noise", action=argparse.BooleanOptionalAction, default=False, help="Actor observation noise. Default off for clean deterministic playback.")
 parser.add_argument("--interval_pushes", action=argparse.BooleanOptionalAction, default=None, help="Override interval pushes. Default keeps checkpoint setting.")
 parser.add_argument("--reset_noise", action=argparse.BooleanOptionalAction, default=None, help="Override reset pose/velocity noise. Default keeps checkpoint setting.")
 parser.add_argument("--startup_randomization", action=argparse.BooleanOptionalAction, default=None, help="Override startup randomization. Default keeps checkpoint setting.")
@@ -60,7 +59,6 @@ def main() -> None:
         device=args_cli.device,
         num_envs=args_cli.num_envs,
         fix_root_link=args_cli.fix_root_link or cfg.environment.fix_root_link,
-        observation_noise=bool(args_cli.observation_noise),
         max_episode_steps=int(1.0e9),
         motion_start_phase=(args_cli.start_phase if args_cli.start_phase >= 0 else cfg.environment.motion_start_phase),
         interval_pushes=(cfg.environment.interval_pushes if args_cli.interval_pushes is None else args_cli.interval_pushes),
@@ -105,7 +103,7 @@ def main() -> None:
     )
     print(
         f"[INFO] horizon={horizon} action_dim={env.action_dim} "
-        f"observation_noise={environment.observation_noise} interval_pushes={environment.interval_pushes} "
+        f"interval_pushes={environment.interval_pushes} "
         f"reset_noise={environment.reset_noise}",
         flush=True,
     )
@@ -117,7 +115,7 @@ def main() -> None:
             chunk_index = 0
         action = cached_chunk[:, chunk_index, :]
         chunk_index += 1
-        current_obs, reward, done, info = algo.evaluation_step(action)
+        current_obs, done, info = algo.evaluation_step(action)
         total_steps += 1
 
         if use_real_time:
@@ -137,7 +135,6 @@ def main() -> None:
                 f"reference_dt={float(env.dt):.5f} "
                 f"frame_delta={frame_delta_mean:.3f} "
                 f"action_abs={float(action.abs().mean().item()):.5f} "
-                f"reward={float(reward.mean().item()):.5f} "
                 f"done={float(done.float().mean().item()):.5f} "
                 f"height={float(info['debug_terms']['robot_anchor_height'].mean().item()):.5f} "
                 f"tilt={float(info['debug_terms']['robot_anchor_tilt'].mean().item()):.5f} "

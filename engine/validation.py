@@ -124,8 +124,6 @@ def run_validation_rollout(
     env_device = torch.device(env.device)
     cpu_rng_state = torch.random.get_rng_state()
     cuda_rng_state = None
-    original_obs_noise = env.observation_noise
-    env.observation_noise = False
     original_reset_noise = env.reset_noise
     original_interval_pushes = env.interval_pushes
     env.reset_noise = False
@@ -183,7 +181,6 @@ def run_validation_rollout(
 
 
     death_phase_record = torch.zeros(num_envs, dtype=torch.float32, device=env.device)
-    cumulative_reward = torch.zeros(num_envs, device=env.device)
     done_term_names = [
         "time_out",
         "motion_complete",
@@ -221,17 +218,6 @@ def run_validation_rollout(
     action_ref_next_joint_count = torch.zeros((), device=env.device)
     done_action_ref_next_joint_record = torch.zeros(num_envs, env.action_dim, device=env.device)
     action_ref_steps = torch.zeros(num_envs, device=env.device)
-    diag_keys = [
-        "diag_torso_ori_deg", "diag_left_wrist_ori_deg", "diag_right_wrist_ori_deg",
-        "diag_left_elbow_ori_deg", "diag_right_elbow_ori_deg",
-        "diag_left_shoulder_ori_deg", "diag_right_shoulder_ori_deg",
-        "diag_torso_ang_vel", "diag_left_wrist_ang_vel", "diag_right_wrist_ang_vel",
-        "diag_left_elbow_ang_vel", "diag_right_elbow_ang_vel",
-        "diag_left_shoulder_ang_vel", "diag_right_shoulder_ang_vel",
-    ]
-    diag_accum = {key: torch.zeros(num_envs, device=env.device) for key in diag_keys}
-    diag_steps = torch.zeros(num_envs, device=env.device)
-
     try:
         rollout_t0 = time.perf_counter()
         with torch.no_grad():
@@ -249,7 +235,7 @@ def run_validation_rollout(
                 active_mask = ~done
                 action_target = env.default_action_joint_pos + env.action_scale * torch.clamp(action, -100.0, 100.0)
 
-                current_obs, reward, step_done, info = algo.evaluation_step(action)
+                current_obs, step_done, info = algo.evaluation_step(action)
                 reference_post = env.motion.get_frame(info["reference_phase_steps"])
                 robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
                 robot_root_ang_vel = env.get_mimic_root_velocity_w()[:, 3:]
@@ -353,12 +339,6 @@ def run_validation_rollout(
                     done_body_pos_err_record[new_done] = body_pos_err[new_done]
                     done_body_z_err_record[new_done] = body_z_err[new_done]
                 survived_steps += active_mask.to(dtype=torch.long)
-                cumulative_reward += active_mask.float() * reward
-                reward_terms = info["reward_terms"]
-                for key in diag_keys:
-                    if key in reward_terms:
-                        diag_accum[key] += active_f * reward_terms[key]
-                diag_steps += active_f
                 done |= step_done
                 done_frac = done.float().mean().item()
                 if step_idx == 0 or (step_idx + 1) % 50 == 0 or step_idx + 1 == max_steps or bool(done.all()):
@@ -373,7 +353,6 @@ def run_validation_rollout(
         validation_first_push_step = env.first_push_step.clone()
         final_phase_record = torch.where(done, death_phase_record, latest_phase_steps)
     finally:
-        env.observation_noise = original_obs_noise
         env.reset_noise = original_reset_noise
         env.interval_pushes = original_interval_pushes
         env.record_motion_failures = original_record_failures
@@ -399,7 +378,6 @@ def run_validation_rollout(
         "validation/steps_p50": float(torch.quantile(survived_steps.float(), 0.50).item()),
         "validation/steps_p95": float(torch.quantile(survived_steps.float(), 0.95).item()),
         "validation/steps_max": float(survived_steps.max().item()),
-        "validation/return_mean": float(cumulative_reward.mean().item()),
         "validation/done_frac": float(done.float().mean().item()),
         "validation/survival_seconds_mean": float(survived_steps.float().mean().item() * env.dt),
         "validation/survival_seconds_p50": float(
@@ -526,8 +504,4 @@ def run_validation_rollout(
             sname = short_body_name(body_name)
             metrics[f"validation/ee_{sname}_bad_frac"] = float(done_ee_bad_record[failure, index].float().mean().item())
             metrics[f"validation/ee_{sname}_z_error"] = float(done_ee_z_error_record[failure, index].mean().item())
-
-    safe_steps = diag_steps.clamp(min=1.0)
-    for key in diag_keys:
-        metrics[f"validation/{key}"] = float((diag_accum[key] / safe_steps).mean().item())
     return metrics

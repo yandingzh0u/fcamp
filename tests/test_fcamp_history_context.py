@@ -85,6 +85,7 @@ def test_fcamp_actor_adapts_lr_from_masked_joint_path_kl_before_step() -> None:
         "old_log_probs": torch.zeros(1, 2, 2, 2),
         "advantages": torch.ones(1, 2, 2),
         "valid": valid,
+        "credit_valid": valid,
         "stream_ids": torch.full(
             (2,),
             PHASE0_STREAM,
@@ -320,6 +321,7 @@ def test_rollout_snapshot_optimizes_actor_and_critic_before_discriminator() -> N
         "disc_version_used": 7,
         "disc_normalizer_count_used": 12.0,
         "amp_valid": torch.tensor([[[False, True]]]),
+        "credit_valid": torch.tensor([[[False, True]]]),
         "imitation_window_age": torch.tensor([[[-1, 16]]]),
         "valid": torch.ones(1, 1, 2, dtype=torch.bool),
         "stream_ids": torch.tensor([PHASE0_STREAM], dtype=torch.int8),
@@ -357,6 +359,7 @@ def test_no_current_disc_window_does_not_skip_actor_or_critic() -> None:
         "disc_version_used": 2,
         "disc_normalizer_count_used": 0.0,
         "amp_valid": torch.zeros(1, 1, 2, dtype=torch.bool),
+        "credit_valid": torch.zeros(1, 1, 2, dtype=torch.bool),
         "imitation_window_age": torch.full((1, 1, 2), -1, dtype=torch.long),
         "valid": torch.ones(1, 1, 2, dtype=torch.bool),
         "stream_ids": torch.tensor([PHASE0_STREAM], dtype=torch.int8),

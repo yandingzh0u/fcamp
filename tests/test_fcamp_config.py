@@ -2,14 +2,11 @@ from dataclasses import fields
 from pathlib import Path
 
 import pytest
-import yaml
 
 from engine.config import (
     FCAMPConfig,
     FlowCPSConfig,
     TrainingConfig,
-    config_from_checkpoint_dict,
-    config_from_dict,
     load_config,
 )
 from envs.tasks import TASKS
@@ -34,6 +31,8 @@ def test_fcamp_config_is_h4_w16_flow_cps() -> None:
     assert cfg.parameters.value_lr == 0.0003
     assert cfg.parameters.style_prior.obs_steps == 16
     assert cfg.parameters.streams.phase0_fraction == 0.10
+    assert not hasattr(cfg.parameters, "credit")
+    assert not hasattr(cfg.parameters.critic, "task_loss_weight")
     assert cfg.training.max_updates == 500
 
 
@@ -92,63 +91,13 @@ def test_override_cannot_create_a_second_config_entry() -> None:
         load_config(ROOT / "configs" / "fcamp_largebox.yaml", ["environment.terrain=plane"])
 
 
-def test_checkpoint_loader_ignores_only_removed_noop_fields() -> None:
-    tree = yaml.safe_load(
-        (ROOT / "configs" / "fcamp_largebox.yaml").read_text(encoding="utf-8")
-    )
-    tree["environment"]["motion_reference_mode"] = "frame"
-    tree["parameters"]["critic_hidden_dims"] = [512, 256, 128]
-    tree["parameters"]["style_prior"]["enabled"] = True
-    tree["parameters"]["credit"]["mode"] = "causal_frame"
-    tree["parameters"]["critics"]["sharing"] = "encoder"
-    tree["training"]["official_reset_every"] = 0
-
-    with pytest.raises(KeyError, match="unknown keys"):
-        config_from_dict(tree)
-
-    cfg = config_from_checkpoint_dict(tree)
-    assert cfg.method == "fcamp"
-    assert cfg.parameters.horizon == 4
-
-
-@pytest.mark.parametrize(
-    ("path", "value"),
-    [
-        ("environment.adaptive_motion_sampling", False),
-        ("environment.physics_material_combine_mode", "multiply"),
-        ("environment.contact_sensor_update_period", "physics"),
-        ("parameters.cps_trainable", False),
-        ("parameters.style_prior.optimizer", "adam"),
-        ("parameters.style_prior.discriminator_warmup_rollouts", 0),
-        ("parameters.credit.mode", "chunk_shared"),
-        ("parameters.critics.sharing", "separate"),
-        ("training.official_reset_every", 10),
-    ],
-)
-def test_checkpoint_loader_rejects_removed_semantic_changes(
-    path: str,
-    value,
-) -> None:
-    tree = yaml.safe_load(
-        (ROOT / "configs" / "fcamp_largebox.yaml").read_text(encoding="utf-8")
-    )
-    node = tree
-    keys = path.split(".")
-    for key in keys[:-1]:
-        node = node[key]
-    node[keys[-1]] = value
-
-    with pytest.raises(ValueError, match="fixed FCAMP value"):
-        config_from_checkpoint_dict(tree)
-
-
 @pytest.mark.parametrize(
     "override",
     [
         "parameters.policy_lr=0.0",
         "parameters.value_lr=0.0",
-        "parameters.critics.encoder_hidden_dims=[512,0]",
-        "parameters.critics.head_hidden_dims=[0]",
+        "parameters.critic.encoder_hidden_dims=[512,0]",
+        "parameters.critic.head_hidden_dims=[0]",
     ],
 )
 def test_fcamp_rejects_degenerate_optimizers_and_critics(override: str) -> None:

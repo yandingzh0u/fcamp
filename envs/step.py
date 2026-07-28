@@ -9,8 +9,7 @@ class MimicStepMixin:
     def step(
         self,
         actions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
-        previous_action = self.last_action.clone()
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         applied_actions = self._apply_action_targets(actions)
         for _ in range(self.decimation):
             self.scene.write_data_to_sim()
@@ -38,9 +37,6 @@ class MimicStepMixin:
         self.phase_steps = reference_phase_steps
 
         termination_phase_steps = reference_phase_steps.clone()
-        reward, reward_terms = self.compute_reward(
-            applied_actions, previous_action
-        )
         done, done_terms, debug_terms = self.compute_termination()
         self.last_action.copy_(applied_actions)
         imitation_frame = self.get_imitation_policy_frame()
@@ -57,7 +53,6 @@ class MimicStepMixin:
         )
         observation = self.get_observation()
         info = {
-            "reward_terms": reward_terms,
             "done_terms": done_terms,
             "debug_terms": debug_terms,
             "phase_start_steps": phase_start_steps,
@@ -69,7 +64,7 @@ class MimicStepMixin:
             "intervention_edge_mask": intervention_edge_mask,
             "imitation_frame": imitation_frame,
         }
-        return observation, reward, done, info
+        return observation, done, info
 
     def _apply_interval_pushes(
         self,

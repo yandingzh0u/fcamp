@@ -9,6 +9,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
+from .imitation_data import G1_IMITATION_FRAME_DIM
 from .robots.g1 import G1_29DOF_ACTION_NAMES, G1_BASE_CFG, make_g1_cfg
 
 
@@ -47,21 +48,14 @@ MIMIC_TERMINATION_BODY_NAMES = (
     "left_wrist_yaw_link",
     "right_wrist_yaw_link",
 )
-MIMIC_FOOT_BODY_NAMES = (
-    "left_ankle_roll_link",
-    "right_ankle_roll_link",
-)
 MIMIC_ANCHOR_BODY_NAME = "torso_link"
 
-CONTACT_ALLOWED_SUBSTRINGS = (
-    "ankle_roll_link",
-    "wrist_yaw_link",
-    "foot_contact_point",
-    "sphere_hand_link",
+OBS_DIM = (
+    G1_IMITATION_FRAME_DIM
+    - 2  # discard global root x/y
+    + len(G1_29DOF_ACTION_NAMES)  # chunk continuation anchor
 )
-OBS_DIM = 171
 CRITIC_OBS_DIM = 286
-UNDESIRED_CONTACT_THRESHOLD = 1.0
 
 
 ANCHOR_Z_TERMINATION_THRESHOLD = 0.5

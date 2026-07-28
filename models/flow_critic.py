@@ -6,9 +6,6 @@ import torch
 from torch import nn
 
 
-CHANNELS = ("task", "amp")
-
-
 def _activation(name: str) -> nn.Module:
     activations = {
         "elu": nn.ELU,
@@ -36,8 +33,8 @@ def _mlp(
     return nn.Sequential(*layers)
 
 
-class DualFlowCritic(nn.Module):
-    """Shared context encoder with independent task/style flow-value heads."""
+class FlowCritic(nn.Module):
+    """Conditional flow model for the scalar AMP return."""
 
     def __init__(
         self,
@@ -51,16 +48,23 @@ class DualFlowCritic(nn.Module):
     ) -> None:
         super().__init__()
         encoder_dims = tuple(int(dim) for dim in encoder_hidden_dims)
+        if not encoder_dims:
+            raise ValueError("encoder_hidden_dims cannot be empty")
+        if flow_steps < 1 or eval_samples < 1:
+            raise ValueError("flow_steps and eval_samples must be positive")
+
         embedding_dim = encoder_dims[-1]
         self.encoder = _mlp(
-            context_dim, encoder_dims[:-1], embedding_dim, activation
+            context_dim,
+            encoder_dims[:-1],
+            embedding_dim,
+            activation,
         )
-        head_input_dim = embedding_dim + 2
-        self.task_head = _mlp(
-            head_input_dim, head_hidden_dims, 1, activation
-        )
-        self.amp_head = _mlp(
-            head_input_dim, head_hidden_dims, 1, activation
+        self.head = _mlp(
+            embedding_dim + 2,
+            head_hidden_dims,
+            1,
+            activation,
         )
         self.context_dim = int(context_dim)
         self.flow_steps = int(flow_steps)
@@ -91,14 +95,12 @@ class DualFlowCritic(nn.Module):
         embedding: torch.Tensor,
         value: torch.Tensor,
         time: torch.Tensor,
-        channel: str,
     ) -> torch.Tensor:
         inputs = torch.cat(
             (embedding, value.reshape(-1, 1), time.reshape(-1, 1)),
             dim=-1,
         )
-        head = self.task_head if channel == "task" else self.amp_head
-        return head(inputs).squeeze(-1)
+        return self.head(inputs).squeeze(-1)
 
     def _base_points(
         self,
@@ -107,7 +109,9 @@ class DualFlowCritic(nn.Module):
     ) -> torch.Tensor:
         if num_samples == 1:
             return torch.zeros(
-                1, device=reference.device, dtype=reference.dtype
+                1,
+                device=reference.device,
+                dtype=reference.dtype,
             )
         probabilities = (
             torch.arange(
@@ -122,11 +126,8 @@ class DualFlowCritic(nn.Module):
             * self.noise_std
         )
 
-    def _sample_encoded(
-        self,
-        embedding: torch.Tensor,
-        channel: str,
-    ) -> torch.Tensor:
+    def evaluate(self, context: torch.Tensor) -> torch.Tensor:
+        embedding = self.encode(context)
         batch_size = embedding.shape[0]
         value = self._base_points(
             self.eval_samples,
@@ -136,31 +137,27 @@ class DualFlowCritic(nn.Module):
         dt = 1.0 / float(self.flow_steps)
         for step in range(self.flow_steps):
             time = torch.full_like(value, float(step) * dt)
-            value = value + dt * self._velocity(
-                condition, value, time, channel
-            )
-        return value.view(batch_size, self.eval_samples)
+            value = value + dt * self._velocity(condition, value, time)
+        return value.view(batch_size, self.eval_samples).mean(dim=1)
 
-    def evaluate(self, context: torch.Tensor) -> torch.Tensor:
-        embedding = self.encode(context)
-        samples = [
-            self._sample_encoded(embedding, channel)
-            for channel in CHANNELS
-        ]
-        return torch.stack(samples, dim=-1).mean(dim=1)
-
-    def _flow_matching_loss_encoded(
+    def flow_matching_loss(
         self,
-        embedding: torch.Tensor,
-        target_return: torch.Tensor,
-        channel: str,
-        fm_samples: int,
+        context: torch.Tensor,
+        target_returns: torch.Tensor,
+        *,
+        fm_samples: int = 1,
     ) -> torch.Tensor:
-        target_return = target_return.reshape(-1)
+        if fm_samples < 1:
+            raise ValueError("fm_samples must be positive")
+        embedding = self.encode(context)
+        target_returns = target_returns.reshape(-1)
+        if target_returns.shape[0] != embedding.shape[0]:
+            raise ValueError("target_returns must contain one value per context")
+
         batch_size = embedding.shape[0]
         condition = self._expand_embedding(embedding, fm_samples)
         target = (
-            target_return.unsqueeze(1)
+            target_returns.unsqueeze(1)
             .expand(-1, fm_samples)
             .reshape(-1)
         )
@@ -173,7 +170,9 @@ class DualFlowCritic(nn.Module):
         interpolated = (1.0 - time) * epsilon + time * target
         target_velocity = target - epsilon
         predicted_velocity = self._velocity(
-            condition, interpolated, time, channel
+            condition,
+            interpolated,
+            time,
         )
         return (
             (predicted_velocity - target_velocity)
@@ -181,22 +180,3 @@ class DualFlowCritic(nn.Module):
             .view(batch_size, fm_samples)
             .mean(dim=1)
         )
-
-    def flow_matching_loss(
-        self,
-        context: torch.Tensor,
-        target_returns: torch.Tensor,
-        *,
-        fm_samples: int = 1,
-    ) -> torch.Tensor:
-        embedding = self.encode(context)
-        losses = [
-            self._flow_matching_loss_encoded(
-                embedding,
-                target_returns[:, index],
-                channel,
-                fm_samples,
-            )
-            for index, channel in enumerate(CHANNELS)
-        ]
-        return torch.stack(losses, dim=-1)

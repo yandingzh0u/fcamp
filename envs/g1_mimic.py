@@ -17,11 +17,9 @@ from .spec import (
     RESET_JOINT_POSITION_RANGE,
     RESET_ROOT_POSE_RANGE,
     VELOCITY_RANGE,
-    CONTACT_ALLOWED_SUBSTRINGS,
     MIMIC_ANCHOR_BODY_NAME,
     MIMIC_BODY_NAMES,
     MIMIC_EE_BODY_NAMES,
-    MIMIC_FOOT_BODY_NAMES,
     MIMIC_TERMINATION_BODY_NAMES,
 )
 from .motion import (
@@ -30,7 +28,6 @@ from .motion import (
     mimickit_full_motion_steps,
 )
 from .observation import MimicObservationMixin
-from .reward import MimicRewardMixin
 from .robot import G1Env, RootVelocityFrame
 from .robots.g1 import G1_29DOF_ACTION_NAMES
 from .step import MimicStepMixin
@@ -41,7 +38,6 @@ from .tasks import resolve_task
 class G1MimicEnv(
     MimicStepMixin,
     MimicTerminationMixin,
-    MimicRewardMixin,
     MimicObservationMixin,
     G1Env,
 ):
@@ -55,7 +51,6 @@ class G1MimicEnv(
     ):
         self.config = cfg
         self.task = resolve_task(cfg.task)
-        self.observation_noise = cfg.observation_noise
         super().__init__(
             cfg,
             self.task,
@@ -88,33 +83,6 @@ class G1MimicEnv(
                 raise RuntimeError(
                     f"Ground-filter contact matrix shape mismatch: expected {expected_shape}, got {actual_shape}"
                 )
-        def _contact_allowed(body_name: str) -> bool:
-            return any(token in body_name for token in CONTACT_ALLOWED_SUBSTRINGS)
-
-        self.undesired_contact_body_ids = torch.tensor(
-            [
-                self.contact_sensor.body_names.index(body_name)
-                for body_name in self.contact_sensor.body_names
-                if not _contact_allowed(body_name)
-            ],
-            dtype=torch.long,
-            device=self.device,
-        )
-        self.foot_contact_body_ids = torch.tensor(
-            [
-                self.contact_sensor.body_names.index(name)
-                for name in MIMIC_FOOT_BODY_NAMES
-            ],
-            dtype=torch.long,
-            device=self.device,
-        )
-
-
-        self.termination_contact_body_ids = torch.tensor(
-            [self.contact_sensor.body_names.index(name) for name in termination_names],
-            dtype=torch.long,
-            device=self.device,
-        )
         self.motion = MimicMotionReference(
             str(self.task.motion_file),
             self.track_body_ids,

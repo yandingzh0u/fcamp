@@ -177,55 +177,9 @@ class MimicObservationMixin:
         return self.build_critic_observation()
 
     def build_observation(self) -> torch.Tensor:
-        context = self.get_tracking_context()
-        reference = context["reference"]
-        reference_joint_state = torch.cat([reference["joint_pos"], reference["joint_vel"]], dim=-1)
-        motion_anchor_pos_b, motion_anchor_ori_b = self._motion_anchor_observation_terms(
-            context["robot_anchor_pos_w"],
-            context["robot_anchor_quat_w"],
-            reference,
-        )
-        anchor_z_err = (reference["anchor_pos_w"][:, 2] - context["robot_anchor_pos_w"][:, 2]).unsqueeze(-1)
-
-
-        termination_z_err = (
-            context["body_pos_relative_w"][:, self.termination_body_indices, 2]
-            - context["robot_body_pos_w"][:, self.termination_body_indices, 2]
-        )
-        net_contact_forces = self.contact_sensor.data.net_forces_w_history
-        foot_contact = (
-            torch.max(torch.norm(net_contact_forces[:, :, self.foot_contact_body_ids], dim=-1), dim=1)[0]
-            > 1.0
-        ).to(dtype=motion_anchor_ori_b.dtype)
-
-
-        termination_contact = (
-            torch.max(torch.norm(net_contact_forces[:, :, self.termination_contact_body_ids], dim=-1), dim=1)[0]
-            > 1.0
-        ).to(dtype=motion_anchor_ori_b.dtype)
-        joint_pos_rel = context["robot_joint_pos"] - self.default_action_joint_pos
-        joint_vel_rel = context["robot_joint_vel"] - self.default_action_joint_vel
-        motion_anchor_pos_b = self._add_uniform_noise(motion_anchor_pos_b, -0.02, 0.02)
-        motion_anchor_ori_b = self._add_uniform_noise(motion_anchor_ori_b, -0.05, 0.05)
-        anchor_z_err = self._add_uniform_noise(anchor_z_err, -0.01, 0.01)
-        termination_z_err = self._add_uniform_noise(termination_z_err, -0.01, 0.01)
-        root_lin_vel_b = self._add_uniform_noise(self.robot.data.root_lin_vel_b, -0.1, 0.1)
-        base_ang_vel = self._add_uniform_noise(self.robot.data.root_ang_vel_b, -0.2, 0.2)
-        joint_pos_rel = self._add_uniform_noise(joint_pos_rel, -0.01, 0.01)
-        joint_vel_rel = self._add_uniform_noise(joint_vel_rel, -0.5, 0.5)
         observation = torch.cat(
             [
-                reference_joint_state,
-                motion_anchor_pos_b,
-                motion_anchor_ori_b,
-                anchor_z_err,
-                termination_z_err,
-                root_lin_vel_b,
-                foot_contact,
-                termination_contact,
-                base_ang_vel,
-                joint_pos_rel,
-                joint_vel_rel,
+                self.get_imitation_policy_frame()[..., 2:],
                 self.last_action,
             ],
             dim=-1,
@@ -273,8 +227,3 @@ class MimicObservationMixin:
         if observation.shape[-1] != CRITIC_OBS_DIM:
             raise RuntimeError(f"Expected critic observation dim {CRITIC_OBS_DIM}, got {observation.shape[-1]}")
         return observation
-
-    def _add_uniform_noise(self, value: torch.Tensor, n_min: float, n_max: float) -> torch.Tensor:
-        if not self.observation_noise:
-            return value
-        return value + torch.empty_like(value).uniform_(n_min, n_max)
