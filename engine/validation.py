@@ -11,9 +11,25 @@ from components.evaluation import (
     sanitize_reference_phases,
 )
 from envs.spec import EE_Z_TERMINATION_THRESHOLD
-from method.base import classify_mimickit_done_terms
 from .env_state import restore_env_state, snapshot_env_state
 from .validation_metrics import ChunkBoundaryDiagnostics, terminal_phase_metrics
+
+
+def classify_mimickit_done_terms(
+    done: torch.Tensor,
+    done_terms: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Apply MimicKit's TIME -> SUCC -> FAIL overwrite precedence."""
+
+    done = done.bool()
+    failure = done & (
+        done_terms["anchor_pos_bad"].bool()
+        | done_terms["anchor_ori_bad"].bool()
+        | done_terms["ee_body_bad"].bool()
+    )
+    motion_complete = done & done_terms["motion_complete"].bool() & ~failure
+    timeout = done & done_terms["time_out"].bool() & ~motion_complete & ~failure
+    return timeout, motion_complete, failure
 
 
 def short_body_name(body_name: str) -> str:
@@ -34,61 +50,6 @@ def validation_max_steps(train_cfg, env) -> int:
     return max(1, steps)
 
 
-def _deployment_action_chunk(algo, obs: torch.Tensor) -> torch.Tensor:
-    payload = algo.deployment_actions(obs)
-    if payload.dim() == 2:
-        return payload.unsqueeze(1)
-    if payload.dim() == 3:
-        return payload
-    raise ValueError(f"deployment_actions must return [N,D] or [N,H,D], got shape={tuple(payload.shape)}")
-
-
-def _split_reference_action(algo, env, payload: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if not bool(getattr(algo, "uses_reference_dt", False)):
-        return payload, None
-    expected_dim = int(env.action_dim) + 1
-    if payload.shape[-1] != expected_dim:
-        raise ValueError(
-            f"{algo.__class__.__name__} uses reference_dt but returned action dim "
-            f"{payload.shape[-1]}, expected {expected_dim}"
-        )
-    return payload[..., : env.action_dim], payload[..., -1]
-
-
-def _add_disc_component_abs(
-    diff_abs: torch.Tensor,
-    *,
-    algo,
-    env,
-) -> dict[str, torch.Tensor]:
-    body_count = int(getattr(algo, "add_disc_body_count", len(getattr(env, "add_disc_body_names", ()))))
-    joint_dim = int(
-        getattr(
-            algo,
-            "add_disc_joint_rot_dim",
-            diff_abs.shape[-1] - (3 + 6 + 3 * body_count + 3 + 3 + int(env.action_dim)),
-        )
-    )
-    body_dim = 3 * body_count
-    layout = (
-        ("root_pos", 3),
-        ("root_rot", 6),
-        ("joint_pos", joint_dim),
-        ("body_pos", body_dim),
-        ("root_lin_vel", 3),
-        ("root_ang_vel", 3),
-        ("joint_vel", int(env.action_dim)),
-    )
-    out: dict[str, torch.Tensor] = {}
-    offset = 0
-    for name, width in layout:
-        if width <= 0 or offset + width > diff_abs.shape[-1]:
-            return {}
-        out[name] = diff_abs[:, offset : offset + width].mean(dim=-1)
-        offset += width
-    return out
-
-
 def _reset_alignment_metrics(env, prefix: str) -> dict[str, float]:
     reference = env.get_reference_state()
     robot_body_pos = env.robot.data.body_pos_w[:, env.track_body_ids]
@@ -107,13 +68,7 @@ def _reset_alignment_metrics(env, prefix: str) -> dict[str, float]:
     # task configuration retains COM semantics for its ordinary observations.
     # Read the same frame here so the reset diagnostic is not a COM-vs-link
     # comparison artifact.
-    root_velocity = env.get_mimic_root_velocity_w(
-        velocity_frame=(
-            "link"
-            if bool(getattr(env, "_strict_action_contract", False))
-            else None
-        )
-    )
+    root_velocity = env.get_mimic_root_velocity_w(velocity_frame="link")
     root_ori_deg = (
         quat_error_magnitude(reference["root_quat_w"], env.robot.data.root_quat_w)
         * (180.0 / 3.141592653589793)
@@ -179,16 +134,9 @@ def run_validation_rollout(
     original_record_failures = env.record_motion_failures
     env.record_motion_failures = False
 
-    original_terminate_on_motion_end = env.terminate_on_motion_end
-    env.terminate_on_motion_end = True
-
     original_max_episode_steps = env.max_episode_steps
     max_steps = validation_max_steps(tcfg, env)
-    env.max_episode_steps = (
-        max_steps + 1
-        if bool(getattr(algo, "uses_reference_dt", False))
-        else env.full_motion_control_steps() + 1
-    )
+    env.max_episode_steps = env.full_motion_control_steps() + 1
     if torch.cuda.is_available() and env_device.type == "cuda":
         cuda_rng_state = torch.cuda.get_rng_state(env_device)
     if fixed_seed is not None:
@@ -273,18 +221,6 @@ def run_validation_rollout(
     action_ref_next_joint_count = torch.zeros((), device=env.device)
     done_action_ref_next_joint_record = torch.zeros(num_envs, env.action_dim, device=env.device)
     action_ref_steps = torch.zeros(num_envs, device=env.device)
-    add_diff_keys = [
-        "root_pos",
-        "root_rot",
-        "joint_pos",
-        "body_pos",
-        "root_lin_vel",
-        "root_ang_vel",
-        "joint_vel",
-    ]
-    add_diff_accum = {key: torch.zeros(num_envs, device=env.device) for key in add_diff_keys}
-    done_add_diff_record = {key: torch.zeros(num_envs, device=env.device) for key in add_diff_keys}
-    add_diff_steps = torch.zeros(num_envs, device=env.device)
     diag_keys = [
         "diag_torso_ori_deg", "diag_left_wrist_ori_deg", "diag_right_wrist_ori_deg",
         "diag_left_elbow_ori_deg", "diag_right_elbow_ori_deg",
@@ -303,23 +239,17 @@ def run_validation_rollout(
                 if not trainer.simulation_app.is_running():
                     break
                 if cached_chunk is None or chunk_index >= cached_chunk.shape[1]:
-                    cached_chunk = _deployment_action_chunk(algo, current_obs)
+                    cached_chunk = algo.deterministic_actions(current_obs)
                     chunk_index = 0
                 primitive_offset = step_idx % horizon
-                action_payload = cached_chunk[:, chunk_index, :]
-                action, reference_dt = _split_reference_action(algo, env, action_payload)
+                action = cached_chunk[:, chunk_index, :]
                 if bool(done.any()):
                     action = torch.where(done.unsqueeze(-1), torch.zeros_like(action), action)
-                    if reference_dt is not None:
-                        reference_dt = torch.where(done, torch.full_like(reference_dt, float(env.dt)), reference_dt)
                 chunk_index += 1
                 active_mask = ~done
                 action_target = env.default_action_joint_pos + env.action_scale * torch.clamp(action, -100.0, 100.0)
 
-                current_obs, reward, step_done, info = algo.evaluation_step(
-                    action,
-                    reference_dt,
-                )
+                current_obs, reward, step_done, info = algo.evaluation_step(action)
                 reference_post = env.motion.get_frame(info["reference_phase_steps"])
                 robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
                 robot_root_ang_vel = env.get_mimic_root_velocity_w()[:, 3:]
@@ -346,9 +276,6 @@ def run_validation_rollout(
                     num_frames=env.motion.num_frames,
                 )
                 demo_imitation_frame = env.motion.get_imitation_frame_at_times(metric_phases)
-                motion_resample_mask = info.get("motion_resample_mask")
-                if torch.is_tensor(motion_resample_mask):
-                    phase_valid &= ~motion_resample_mask.index_select(0, metric_env_ids).bool()
                 # Terminal post-action states are excluded. Every legal window
                 # therefore contains W consecutive states that remained alive,
                 # in range, and on the same unwrapped motion trajectory.
@@ -372,19 +299,6 @@ def run_validation_rollout(
                     action_ref_next_joint_accum += action_ref_next_by_joint[active_mask].sum(dim=0)
                     action_ref_next_joint_count += active_mask.float().sum()
                 action_ref_steps += active_f
-                policy_disc = info.get("add_policy_disc_frame")
-                demo_disc = info.get("add_demo_disc_frame")
-                add_diff_components = {}
-                if torch.is_tensor(policy_disc) and torch.is_tensor(demo_disc):
-                    add_diff_components = _add_disc_component_abs(
-                        torch.abs(demo_disc - policy_disc),
-                        algo=algo,
-                        env=env,
-                    )
-                    if add_diff_components:
-                        for name, values in add_diff_components.items():
-                            add_diff_accum[name] += active_f * values
-                        add_diff_steps += active_f
                 new_done = active_mask & step_done
                 if bool(new_done.any()):
                     done_terms = info["done_terms"]
@@ -401,7 +315,6 @@ def run_validation_rollout(
                     reference = env.get_reference_state()
                     robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
                     robot_body_pos = env.robot.data.body_pos_w[:, env.track_body_ids]
-                    robot_body_quat = env.robot.data.body_quat_w[:, env.track_body_ids]
                     root_ori_deg = (
                         quat_error_magnitude(reference["root_quat_w"], env.robot.data.root_quat_w)
                         * (180.0 / 3.141592653589793)
@@ -420,8 +333,6 @@ def run_validation_rollout(
                     done_action_ref_now_record[new_done] = action_ref_now[new_done]
                     done_action_ref_next_record[new_done] = action_ref_next[new_done]
                     done_action_ref_next_joint_record[new_done] = action_ref_next_by_joint[new_done]
-                    for name, values in add_diff_components.items():
-                        done_add_diff_record[name][new_done] = values[new_done]
                     done_root_pos_err_record[new_done] = torch.linalg.norm(
                         env.robot.data.root_pos_w[new_done] - reference["root_pos_w"][new_done],
                         dim=-1,
@@ -443,7 +354,7 @@ def run_validation_rollout(
                     done_body_z_err_record[new_done] = body_z_err[new_done]
                 survived_steps += active_mask.to(dtype=torch.long)
                 cumulative_reward += active_mask.float() * reward
-                reward_terms = info.get("reward_terms", {})
+                reward_terms = info["reward_terms"]
                 for key in diag_keys:
                     if key in reward_terms:
                         diag_accum[key] += active_f * reward_terms[key]
@@ -466,7 +377,6 @@ def run_validation_rollout(
         env.reset_noise = original_reset_noise
         env.interval_pushes = original_interval_pushes
         env.record_motion_failures = original_record_failures
-        env.terminate_on_motion_end = original_terminate_on_motion_end
         env.max_episode_steps = original_max_episode_steps
         restore_env_state(env, training_snapshot)
         algo.restore_runtime_state(algorithm_snapshot)
@@ -570,10 +480,6 @@ def run_validation_rollout(
                 metrics[f"validation/action_target_ref_next_top{rank}_joint_err"] = float(
                     action_joint_mean[idx].item()
                 )
-    if bool((add_diff_steps > 0).any()):
-        safe_add_steps = add_diff_steps.clamp(min=1.0)
-        for key in add_diff_keys:
-            metrics[f"validation/add_diff_{key}_abs"] = float((add_diff_accum[key] / safe_add_steps).mean().item())
 
 
     if bool(failure.any()):
@@ -608,9 +514,6 @@ def run_validation_rollout(
             metrics[f"validation/fail_action_target_ref_next_top{rank}_joint_err"] = float(
                 fail_action_joint_mean[idx].item()
             )
-        if bool((add_diff_steps > 0).any()):
-            for key in add_diff_keys:
-                metrics[f"validation/fail_add_diff_{key}_abs"] = float(done_add_diff_record[key][failure].mean().item())
         body_pos_mean = done_body_pos_err_record[failure].mean(dim=0)
         body_z_mean = done_body_z_err_record[failure].mean(dim=0)
         body_pos_top_idx = int(torch.argmax(body_pos_mean).item())

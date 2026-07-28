@@ -4,6 +4,20 @@ import torch
 from torch import nn
 
 
+def flow_ode_mean(
+    model_output: torch.Tensor,
+    latents: torch.Tensor,
+    sigmas: torch.Tensor,
+    index: int,
+) -> torch.Tensor:
+    """Advance one deterministic Flow ODE step."""
+
+    sigma = sigmas[index].to(device=model_output.device, dtype=model_output.dtype)
+    sigma_next = sigmas[index + 1].to(device=model_output.device, dtype=model_output.dtype)
+    dt = sigma_next - sigma
+    return latents + model_output * dt
+
+
 def _activation(name: str) -> nn.Module:
     normalized = name.lower()
     if normalized == "elu":
@@ -32,102 +46,41 @@ class FlowMatchingPolicy(nn.Module):
     def __init__(
         self,
         obs_dim: int,
-        action_dim: int = 29,
-        horizon: int = 1,
-        hidden_dims: tuple[int, ...] = (512, 256, 128),
-        activation: str = "elu",
-        action_squash_scale: float = 5.0,
-        causal_velocity: bool = False,
-        causal_arch: str = "prefix_cumsum",
+        action_dim: int,
+        horizon: int,
+        hidden_dims: tuple[int, ...],
+        activation: str,
+        action_squash_scale: float,
     ):
         super().__init__()
         self.action_dim = action_dim
         self.horizon = horizon
-
-
         self.chunk_dim = horizon * action_dim
-        self.action_chunk_dim = horizon * action_dim
         self.obs_dim = obs_dim
-        self.hidden_dims = tuple(hidden_dims)
-        if not self.hidden_dims:
+        if not hidden_dims:
             raise ValueError("hidden_dims must contain at least one layer")
-        self.causal_velocity = bool(causal_velocity)
-        requested_causal_arch = str(causal_arch)
-        if self.causal_velocity and requested_causal_arch not in {"causal_gru", "prefix_cumsum"}:
-            raise ValueError(f"Unsupported causal_arch: {requested_causal_arch}")
-        # ``prefix_cumsum`` is retained as a constructor compatibility alias.
-        # The old sum-based implementation was permutation-invariant inside a
-        # prefix, so it did not represent an ordered conditional trajectory.
-        self.causal_arch = "causal_gru" if self.causal_velocity else requested_causal_arch
-        if not self.causal_velocity:
-            # Full-chunk MLP: v_k depends on the whole z_0..z_{h-1} (non-causal).
-            layers: list[nn.Module] = []
-            in_dim = self.obs_dim + self.chunk_dim + 1
-            for hidden_dim in self.hidden_dims:
-                layers.append(nn.Linear(in_dim, hidden_dim))
-                layers.append(_activation(activation))
-                in_dim = hidden_dim
-            layers.append(nn.Linear(in_dim, self.chunk_dim))
-            self.velocity_net = nn.Sequential(*layers)
-        else:
-            # Ordered causal velocity: v_k depends only on z_0..z_k, while a
-            # GRU state preserves the order of that prefix. Token content and
-            # position are concatenated *before* nonlinear encoding so the
-            # association between z_i and its offset cannot be lost.
-            #
-            # This makes logp_k a genuine conditional density
-            # log pi(u_k | s, u_0..u_{k-1}), so per-frame clipped-ratio is valid.
-            #   obs_h    = obs_encoder([obs, time])
-            #   token_i  = token_encoder([z_i, frame_pos_i])
-            #   state_i  = GRUCell(token_i, state_{i-1}), state_-1 = obs_h
-            #   v_i      = vel_head([obs_h, state_i])
-            hidden = int(hidden_dims[-1])
-            self._causal_hidden = hidden
-            self.obs_encoder = _build_mlp(self.obs_dim + 1, tuple(hidden_dims), hidden, activation)
-            self.frame_pos_embed = nn.Parameter(torch.zeros(self.horizon, hidden))
-            nn.init.normal_(self.frame_pos_embed, std=0.02)
-            self.token_encoder = _build_mlp(
-                self.action_dim + hidden,
-                tuple(hidden_dims),
-                hidden,
-                activation,
-            )
-            self.causal_cell = nn.GRUCell(hidden, hidden)
-            self.vel_head = _build_mlp(hidden * 2, tuple(hidden_dims), self.action_dim, activation)
+
+        # Ordered causal velocity: v_k depends only on z_0..z_k. Keep module
+        # construction order stable because it is part of the seeded baseline.
+        hidden = int(hidden_dims[-1])
+        self.obs_encoder = _build_mlp(
+            self.obs_dim + 1, tuple(hidden_dims), hidden, activation
+        )
+        self.frame_pos_embed = nn.Parameter(torch.zeros(self.horizon, hidden))
+        nn.init.normal_(self.frame_pos_embed, std=0.02)
+        self.token_encoder = _build_mlp(
+            self.action_dim + hidden,
+            tuple(hidden_dims),
+            hidden,
+            activation,
+        )
+        self.causal_cell = nn.GRUCell(hidden, hidden)
+        self.vel_head = _build_mlp(
+            hidden * 2, tuple(hidden_dims), self.action_dim, activation
+        )
         if action_squash_scale <= 0.0:
             raise ValueError(f"action_squash_scale must be > 0, got {action_squash_scale}")
         self.action_squash_scale = float(action_squash_scale)
-        # Maximum per-frame action delta for the direct-delta smooth transform.
-        # When None, _action_transform falls back to the absolute squash
-        # (backward-compatible). When set (scalar or per-joint vector of shape
-        # [action_dim]), the executed chunk is a causal smooth trajectory whose
-        # per-frame step is bounded by max_delta, matching the environment's
-        # action-rate penalty contract.
-        self.action_max_delta: torch.Tensor | None = None
-        # Action transform selector. Flow-CPS sets "residual_absolute"; the
-        # absolute/delta branches remain for direct FlowMatchingPolicy tests.
-        self.action_transform: str = "absolute"
-
-    def set_action_max_delta(self, max_delta) -> None:
-        if max_delta is None:
-            self.action_max_delta = None
-            return
-        # Scalar: store as python float so it broadcasts to any device tensor in
-        # _action_transform without device-mismatch. Vector (per-joint): store
-        # as a tensor on the policy's current parameter device.
-        if isinstance(max_delta, (int, float)):
-            self.action_max_delta = float(max_delta)
-            return
-        t = torch.as_tensor(max_delta, dtype=torch.float32)
-        if t.ndim == 0:
-            self.action_max_delta = float(t.item())
-            return
-        if t.shape[-1] != self.action_dim and t.numel() != 1:
-            raise ValueError(
-                f"action_max_delta must be scalar or [action_dim={self.action_dim}], got shape {tuple(t.shape)}"
-            )
-        dev = next(self.parameters()).device if list(self.parameters()) else t.device
-        self.action_max_delta = t.to(dev)
 
     def _prepare_observation(self, observation: torch.Tensor) -> torch.Tensor:
         if observation.shape[-1] != self.obs_dim:
@@ -150,84 +103,36 @@ class FlowMatchingPolicy(nn.Module):
         observation = self._prepare_observation(observation)
         if time.ndim != 1 or time.shape[0] != observation.shape[0]:
             raise ValueError(f"time must have shape ({observation.shape[0]},), got {tuple(time.shape)}")
-        if not self.causal_velocity:
-            net_input = torch.cat([observation, noisy_actions, time.unsqueeze(-1)], dim=-1)
-            return self.velocity_net(net_input)
-        # Ordered causal-GRU velocity: v_k depends only on z_0..z_k.
-        # noisy_actions: [B, chunk_dim] -> [B, h, A]
         b = observation.shape[0]
         chunk = noisy_actions.view(b, self.horizon, self.action_dim)
-        obs_h = self.obs_encoder(torch.cat([observation, time.unsqueeze(-1)], dim=-1))  # [B, H]
+        obs_h = self.obs_encoder(torch.cat([observation, time.unsqueeze(-1)], dim=-1))
         frame_pos = self.frame_pos_embed.unsqueeze(0).expand(b, -1, -1)
-        token_h = self.token_encoder(torch.cat([chunk, frame_pos], dim=-1))  # [B, h, H]
+        token_h = self.token_encoder(torch.cat([chunk, frame_pos], dim=-1))
         state = obs_h
         velocity_frames: list[torch.Tensor] = []
         for frame_idx in range(self.horizon):
             state = self.causal_cell(token_h[:, frame_idx], state)
             velocity_frames.append(self.vel_head(torch.cat([obs_h, state], dim=-1)))
-        vel = torch.stack(velocity_frames, dim=1)  # [B, h, A]
-        return vel.reshape(b, self.chunk_dim)
+        return torch.stack(velocity_frames, dim=1).reshape(b, self.chunk_dim)
 
-    def _action_transform(self, action_value: torch.Tensor, prev_action: torch.Tensor | None = None) -> torch.Tensor:
-        """Squash raw flow latents into executable actions.
+    def _action_transform(
+        self,
+        action_value: torch.Tensor,
+        prev_action: torch.Tensor,
+    ) -> torch.Tensor:
+        """Convert causal residuals into bounded absolute PD commands."""
 
-        If ``prev_action is None`` or ``action_max_delta is None``: fall back to
-        the absolute squash ``scale * tanh(raw / scale)`` (backward-compatible).
-
-        Otherwise apply a **direct-delta** causal smooth transform: the flow
-        latent IS the bounded delta from the last executed action (not an
-        absolute target that then gets bounded). This is cleaner than
-        target-then-bound because the policy directly parameterizes the
-        quantity the environment penalizes (``a_i - a_{i-1}``):
-
-            delta_i = max_delta * tanh(raw_i)   # bounded per-frame step
-            a_i     = clamp(prev + delta_i, -scale, scale)  # absolute bound
-            prev    = a_i                          # causal update
-
-        The final clamp to ``[-scale, scale]`` guards against long-run drift:
-        bounded deltas alone do not prevent the action from random-walking
-        outside the joint limit over many chunks. ``max_delta`` may be a scalar
-        or a per-joint vector of shape ``[action_dim]``. ``prev_action`` is the
-        raw (un-normalized) last action ``[..., action_dim]``.
-        """
         scale = self.action_squash_scale
         leading_shape = action_value.shape[:-1]
         chunk = action_value.view(*leading_shape, self.horizon, self.action_dim)
-        if self.action_transform == "residual_absolute" and prev_action is not None:
-            # v6 residual-absolute: anchor on prev_action in latent space, add
-            # UNBOUNDED per-frame residuals, squash back. Zero residual = hold
-            # the current action; a large residual can swing a frame to +/-scale
-            # in one step (single-step recovery authority, what v4's hard delta cap
-            # starved during push recovery). Causal: a_k depends on z_0..z_k
-            # only, so the per-frame clipped-ratio stays legal.
-            prev = prev_action.reshape(*leading_shape, self.action_dim)  # [..., A]
-            eps = 1.0e-6
-            prev_normalized = torch.clamp(prev / scale, -1.0 + eps, 1.0 - eps)
-            u = scale * torch.atanh(prev_normalized)  # latent anchor [..., A]
-            actions = []
-            for i in range(self.horizon):
-                u = u + chunk[..., i, :]  # raw residual (unbounded), [..., A]
-                a_i = scale * torch.tanh(u / scale)  # [..., A]
-                actions.append(a_i)
-            out = torch.stack(actions, dim=-2)  # [..., h, A]
-            return out.reshape(*leading_shape, self.action_chunk_dim)
-        if prev_action is None or self.action_max_delta is None:
-            squashed = scale * torch.tanh(chunk / scale)
-            return squashed.reshape(*leading_shape, self.action_chunk_dim)
-        # direct-delta causal transform: latent -> bounded delta -> action.
-        # A final absolute clamp to [-scale, scale] guards against long-run
-        # drift: bounded deltas alone do not prevent the action from random-
-        # walking outside the joint limit over many chunks. The env's own clamp
-        # ([-100, 100]) is far too wide to act as an algorithmic safeguard.
-        max_delta = self.action_max_delta  # scalar or [action_dim]
-        scale = self.action_squash_scale
-        prev = prev_action.reshape(*leading_shape, 1, self.action_dim)  # [..., 1, A]
+        prev = prev_action.reshape(*leading_shape, self.action_dim)
+        eps = 1.0e-6
+        prev_normalized = torch.clamp(prev / scale, -1.0 + eps, 1.0 - eps)
+        latent_action = scale * torch.atanh(prev_normalized)
         actions = []
-        for i in range(self.horizon):
-            delta = max_delta * torch.tanh(chunk[..., i, :])
-            a_i = prev.squeeze(-2) + delta
-            a_i = torch.clamp(a_i, -scale, scale)
-            actions.append(a_i)
-            prev = a_i.unsqueeze(-2)
-        out = torch.stack(actions, dim=-2)  # [..., h, A]
-        return out.reshape(*leading_shape, self.action_chunk_dim)
+        for frame_idx in range(self.horizon):
+            latent_action = latent_action + chunk[..., frame_idx, :]
+            actions.append(scale * torch.tanh(latent_action / scale))
+        return torch.stack(actions, dim=-2).reshape(
+            *leading_shape, self.chunk_dim
+        )

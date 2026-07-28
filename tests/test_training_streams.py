@@ -51,7 +51,6 @@ def test_stream_partition_is_deterministic_and_exact_for_10_90() -> None:
     assert torch.equal(first.phase0_ids, torch.tensor([0]))
     assert torch.equal(first.curriculum_ids, torch.arange(1, 10))
     assert first.phase0_fraction == pytest.approx(0.10)
-    assert first.curriculum_fraction == pytest.approx(0.90)
 
 
 def test_production_8192_partition_assigns_819_phase0_attempts() -> None:
@@ -110,43 +109,6 @@ def test_reset_phases_do_not_call_curriculum_sampler_for_phase0_only() -> None:
 
     assert phases.tolist() == [0]
     assert reset_streams.tolist() == [PHASE0_STREAM]
-
-
-def test_balanced_sample_enforces_exact_stream_quota_when_available() -> None:
-    streams = _streams()
-    torch.manual_seed(7)
-
-    selected, selected_streams = streams.balanced_sample(
-        torch.arange(10),
-        total=10,
-    )
-
-    assert selected.numel() == 10
-    assert selected.unique().numel() == 10
-    assert int((selected_streams == PHASE0_STREAM).sum()) == 1
-    assert int((selected_streams == CURRICULUM_STREAM).sum()) == 9
-    assert torch.equal(
-        selected_streams,
-        streams.stream_ids.index_select(0, selected),
-    )
-
-
-def test_balanced_sample_never_backfills_a_missing_stream_quota() -> None:
-    streams = _streams()
-
-    curriculum_only, curriculum_labels = streams.balanced_sample(
-        streams.curriculum_ids,
-        total=10,
-    )
-    phase0_only, phase0_labels = streams.balanced_sample(
-        streams.phase0_ids,
-        total=10,
-    )
-
-    assert curriculum_only.numel() == 9
-    assert curriculum_labels.tolist() == [CURRICULUM_STREAM] * 9
-    assert phase0_only.numel() == 1
-    assert phase0_labels.tolist() == [PHASE0_STREAM]
 
 
 def test_phase0_attempt_tracker_persists_and_classifies_real_terminals() -> None:

@@ -79,8 +79,6 @@ class FCAMPWindowReplay:
         stream_capacities: Mapping[int, int],
         history_len: int,
         frame_dim: int,
-        *,
-        pin_memory: bool = True,
     ) -> None:
         if isinstance(history_len, bool) or int(history_len) <= 0:
             raise ValueError("history_len must be a positive integer")
@@ -105,7 +103,6 @@ class FCAMPWindowReplay:
         self.frame_dim = int(frame_dim)
         self.stream_capacities = dict(sorted(capacities.items()))
         self.capacity = int(sum(self.stream_capacities.values()))
-        self.pin_memory = bool(pin_memory and torch.cuda.is_available())
         self._partitions: dict[int, _Partition] = {}
         for stream_id, capacity in self.stream_capacities.items():
             self._partitions[stream_id] = _Partition(
@@ -114,7 +111,6 @@ class FCAMPWindowReplay:
                     (capacity, self.history_len, self.frame_dim),
                     dtype=torch.float32,
                     device="cpu",
-                    pin_memory=self.pin_memory,
                 ),
                 end_time=torch.full((capacity,), -1, dtype=torch.long),
                 insert_update=torch.full((capacity,), -1, dtype=torch.long),
@@ -125,19 +121,8 @@ class FCAMPWindowReplay:
     def __len__(self) -> int:
         return sum(partition.size for partition in self._partitions.values())
 
-    @property
-    def has_active_update(self) -> bool:
-        return self._active is not None
-
     def size(self, stream_id: int) -> int:
         return self._partition(stream_id).size
-
-    def remaining_capacity(self, stream_id: int) -> int:
-        partition = self._partition(stream_id)
-        return partition.capacity - partition.size
-
-    def is_full(self, stream_id: int) -> bool:
-        return self.remaining_capacity(stream_id) == 0
 
     @torch.no_grad()
     def clear(self) -> None:
@@ -204,7 +189,6 @@ class FCAMPWindowReplay:
                     (target, self.history_len, self.frame_dim),
                     dtype=torch.float32,
                     device="cpu",
-                    pin_memory=self.pin_memory,
                 )
                 stage_end_time = torch.empty((target,), dtype=torch.long)
             else:
@@ -275,8 +259,8 @@ class FCAMPWindowReplay:
         )
 
     @torch.no_grad()
-    def commit_update(self) -> dict[int, dict[str, int | str]]:
-        """Atomically commit all stream reservoirs and return exact counts."""
+    def commit_update(self) -> None:
+        """Atomically commit all stream reservoirs."""
 
         active = self._require_active()
         if active.poisoned:
@@ -290,7 +274,6 @@ class FCAMPWindowReplay:
                     f"but exact replacement quota {stage.target} is required"
                 )
 
-        report: dict[int, dict[str, int | str]] = {}
         for stream_id, stage in active.streams.items():
             partition = self._partitions[stream_id]
             partition.offered_count += stage.seen
@@ -301,10 +284,7 @@ class FCAMPWindowReplay:
                 partition.size = stop
                 partition.inserted_count += stage.count
                 partition.dropped_count += stage.seen - stage.count
-                inserted = stage.count
-                replaced = 0
             else:
-                inserted = 0
                 replaced = stage.target
                 if replaced:
                     victims = torch.randperm(
@@ -319,18 +299,9 @@ class FCAMPWindowReplay:
                     partition.insert_update[victims] = active.update
                 partition.replaced_count += replaced
                 partition.dropped_count += stage.seen - replaced
-            report[stream_id] = {
-                "mode": stage.mode,
-                "offered": stage.seen,
-                "inserted": inserted,
-                "replaced": replaced,
-                "size": partition.size,
-                "capacity": partition.capacity,
-            }
 
         self._latest_update = active.update
         self._active = None
-        return report
 
     @torch.no_grad()
     def abort_update(self) -> None:
@@ -380,16 +351,15 @@ class FCAMPWindowReplay:
         end_times = partition.end_time.index_select(0, indices)
         if device is not None:
             target = torch.device(device)
-            non_blocking = self.pin_memory and target.type == "cuda"
             windows = windows.to(
                 device=target,
                 dtype=torch.float32,
-                non_blocking=non_blocking,
+                non_blocking=False,
             )
             end_times = end_times.to(
                 device=target,
                 dtype=torch.long,
-                non_blocking=non_blocking,
+                non_blocking=False,
             )
         return windows, end_times
 
@@ -433,7 +403,7 @@ class FCAMPWindowReplay:
             "replay/dirty_insert_count": float(dirty_inserted),
             "replay/dirty_rejected_count": float(dirty_rejected),
             "replay/storage_gib": float(storage_bytes / (1024**3)),
-            "replay/pinned": float(self.pin_memory),
+            "replay/pinned": 0.0,
             "replay/latest_update": float(self._latest_update),
             "replay/update_active": float(self._active is not None),
         }
@@ -767,7 +737,3 @@ class FCAMPWindowReplay:
                 torch.quantile(values, 0.95).item()
             ),
         }
-
-
-# Descriptive alias for callers that prefer the explicit Buffer suffix.
-FCAMPWindowReplayBuffer = FCAMPWindowReplay

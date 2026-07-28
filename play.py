@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from dataclasses import fields, replace
+from dataclasses import replace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -38,63 +38,9 @@ simulation_app = app_launcher.app
 
 import torch
 
-from engine.config import (
-    EnvironmentConfig,
-    ExperimentConfig,
-    TrainingConfig,
-    config_from_dict,
-    METHOD_CONFIGS,
-)
+from engine.config import config_from_checkpoint_dict
 from envs.g1_mimic import G1MimicEnv
-from method import load_method_class
-
-
-def _deployment_action_chunk(algo, obs: torch.Tensor) -> torch.Tensor:
-    payload = algo.deployment_actions(obs)
-    if payload.dim() == 2:
-        return payload.unsqueeze(1)
-    if payload.dim() == 3:
-        return payload
-    raise ValueError(f"deployment_actions must return [N,D] or [N,H,D], got shape={tuple(payload.shape)}")
-
-
-def _split_reference_action(algo, env, payload: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if not bool(getattr(algo, "uses_reference_dt", False)):
-        return payload, None
-    expected_dim = int(env.action_dim) + 1
-    if payload.shape[-1] != expected_dim:
-        raise ValueError(
-            f"{algo.__class__.__name__} uses reference_dt but returned action dim "
-            f"{payload.shape[-1]}, expected {expected_dim}"
-        )
-    return payload[..., : env.action_dim], payload[..., -1]
-
-
-def _select(cls, values: dict) -> dict:
-    return {field.name: values[field.name] for field in fields(cls) if field.name in values}
-
-
-def _rebuild_config(payload: dict) -> ExperimentConfig:
-    raw = payload.get("config", {})
-    if "method" in raw or "algorithm" in raw:
-        return config_from_dict(raw)
-    if not {"algo_name", "env", "algo", "train"}.issubset(raw):
-        raise KeyError("Checkpoint has no supported configuration schema")
-    method = raw["algo_name"]
-    if method != "fcamp":
-        raise ValueError(f"Unsupported legacy checkpoint method {method!r}; available: {sorted(METHOD_CONFIGS)}")
-    legacy_env = raw["env"]
-    environment = _select(EnvironmentConfig, legacy_env)
-    environment["task"] = "largebox_plane" if legacy_env.get("terrain_type") == "plane" else "crawl_slope"
-    environment["decimation"] = 4
-    parameters = dict(raw["algo"])
-    tree = {
-        "method": method,
-        "environment": environment,
-        "parameters": parameters,
-        "training": _select(TrainingConfig, raw["train"]),
-    }
-    return config_from_dict(tree)
+from method.fcamp import FCAMP
 
 
 def main() -> None:
@@ -106,7 +52,7 @@ def main() -> None:
     payload = torch.load(checkpoint_path, map_location=load_device, weights_only=False)
     if "policy" not in payload:
         raise KeyError("Checkpoint must contain a 'policy' state dict.")
-    cfg = _rebuild_config(payload)
+    cfg = config_from_checkpoint_dict(payload["config"], checkpoint_path)
 
     environment = replace(
         cfg.environment,
@@ -131,11 +77,10 @@ def main() -> None:
 
     env = G1MimicEnv(
         environment,
-        1,
         render=not args_cli.headless,
         render_every=args_cli.render_every,
     )
-    algo = load_method_class(cfg.method)(cfg.parameters, env, simulation_app)
+    algo = FCAMP(cfg.parameters, env)
     algo.build()
     algo.policy.load_state_dict(payload["policy"])
     algo.policy.eval()
@@ -168,12 +113,11 @@ def main() -> None:
     while simulation_app.is_running():
         if cached_chunk is None or chunk_index >= cached_chunk.shape[1]:
             with torch.inference_mode():
-                cached_chunk = _deployment_action_chunk(algo, current_obs)
+                cached_chunk = algo.deterministic_actions(current_obs)
             chunk_index = 0
-        action_payload = cached_chunk[:, chunk_index, :]
-        action, reference_dt = _split_reference_action(algo, env, action_payload)
+        action = cached_chunk[:, chunk_index, :]
         chunk_index += 1
-        current_obs, reward, done, info = algo.evaluation_step(action, reference_dt)
+        current_obs, reward, done, info = algo.evaluation_step(action)
         total_steps += 1
 
         if use_real_time:
@@ -185,12 +129,12 @@ def main() -> None:
                 next_frame_time = time.perf_counter()
 
         if args_cli.log_every > 0 and total_steps % args_cli.log_every == 0:
-            frame_delta = info.get("reference_frame_delta")
-            frame_delta_mean = float(frame_delta.mean().item()) if torch.is_tensor(frame_delta) else 1.0
-            reference_dt_mean = float(reference_dt.mean().item()) if torch.is_tensor(reference_dt) else float(env.dt)
+            frame_delta_mean = float(
+                info["reference_frame_delta"].mean().item()
+            )
             print(
                 f"[PLAY] step={total_steps} phase={float(env.phase_steps[0].item()):.2f} "
-                f"reference_dt={reference_dt_mean:.5f} "
+                f"reference_dt={float(env.dt):.5f} "
                 f"frame_delta={frame_delta_mean:.3f} "
                 f"action_abs={float(action.abs().mean().item()):.5f} "
                 f"reward={float(reward.mean().item()):.5f} "

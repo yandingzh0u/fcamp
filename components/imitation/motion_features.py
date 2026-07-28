@@ -14,40 +14,21 @@ import torch
 
 @dataclass(frozen=True)
 class ImitationFeatureSchema:
-    """Description of one imitation state and its causal history window."""
+    """Description of one imitation state."""
 
     num_joints: int = 29
     num_key_bodies: int = 5
-    history_len: int = 16
-    key_positions_root_relative: bool = True
 
     def __post_init__(self) -> None:
         if self.num_joints <= 0:
             raise ValueError("num_joints must be positive")
         if self.num_key_bodies < 0:
             raise ValueError("num_key_bodies must be non-negative")
-        if self.history_len <= 0:
-            raise ValueError("history_len must be positive")
 
     @property
     def frame_dim(self) -> int:
         # root xyz + root rot6d + joint rot6d + key xyz + root v/w + dof v
         return 3 + 6 + 6 * self.num_joints + 3 * self.num_key_bodies + 3 + 3 + self.num_joints
-
-    @property
-    def window_dim(self) -> int:
-        return self.history_len * self.frame_dim
-
-    def metadata(self) -> dict[str, int | bool]:
-        return {
-            "num_joints": self.num_joints,
-            "num_key_bodies": self.num_key_bodies,
-            "history_len": self.history_len,
-            "frame_dim": self.frame_dim,
-            "window_dim": self.window_dim,
-            "key_positions_root_relative": self.key_positions_root_relative,
-        }
-
 
 def canonicalize_imitation_window(frames: torch.Tensor) -> torch.Tensor:
     """Apply MimicKit's G1 imitation root-translation convention to a window.
@@ -145,7 +126,6 @@ def build_imitation_frame(
     root_ang_vel: torch.Tensor,
     dof_vel: torch.Tensor,
     schema: ImitationFeatureSchema,
-    joint_rotation_format: str = "quat",
 ) -> torch.Tensor:
     """Build one or more imitation frames with a common policy/demo code path.
 
@@ -166,22 +146,12 @@ def build_imitation_frame(
             f"({schema.num_key_bodies}, 3), got {tuple(key_body_pos.shape)}"
         )
 
-    if joint_rotation_format == "quat":
-        if joint_rotation.shape[-2:] != (schema.num_joints, 4):
-            raise ValueError(
-                "joint_rotation quaternion input must end in "
-                f"({schema.num_joints}, 4), got {tuple(joint_rotation.shape)}"
-            )
-        joint_rot6d = quat_to_rot6d(joint_rotation)
-    elif joint_rotation_format == "rot6d":
-        if joint_rotation.shape[-2:] != (schema.num_joints, 6):
-            raise ValueError(
-                "joint_rotation rot6d input must end in "
-                f"({schema.num_joints}, 6), got {tuple(joint_rotation.shape)}"
-            )
-        joint_rot6d = joint_rotation
-    else:
-        raise ValueError("joint_rotation_format must be 'quat' or 'rot6d'")
+    if joint_rotation.shape[-2:] != (schema.num_joints, 4):
+        raise ValueError(
+            "joint_rotation quaternion input must end in "
+            f"({schema.num_joints}, 4), got {tuple(joint_rotation.shape)}"
+        )
+    joint_rot6d = quat_to_rot6d(joint_rotation)
 
     leading = root_pos.shape[:-1]
     named = {
@@ -196,8 +166,7 @@ def build_imitation_frame(
     if mismatched:
         raise ValueError(f"imitation feature leading dimensions must match {leading}; got {mismatched}")
 
-    if schema.key_positions_root_relative:
-        key_body_pos = key_body_pos - root_pos.unsqueeze(-2)
+    key_body_pos = key_body_pos - root_pos.unsqueeze(-2)
 
     pieces = (
         root_pos,

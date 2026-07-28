@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import numpy as np
 import torch
-from gymnasium import spaces
 from pxr import UsdPhysics
 
 import isaaclab.sim as sim_utils
@@ -53,7 +51,7 @@ class G1Env:
         )
 
 
-        combine_mode = str(cfg.physics_material_combine_mode)
+        combine_mode = "average"
         sim_cfg.physics_material = sim_utils.RigidBodyMaterialCfg(
             static_friction=1.0,
             dynamic_friction=1.0,
@@ -87,11 +85,7 @@ class G1Env:
                 ),
             )
         scene_cfg.robot = make_g1_cfg("{ENV_REGEX_NS}/Robot", fix_root_link=cfg.fix_root_link)
-        scene_cfg.contact_forces.update_period = (
-            self.physics_dt
-            if cfg.contact_sensor_update_period == "physics"
-            else cfg.sim_dt
-        )
+        scene_cfg.contact_forces.update_period = cfg.sim_dt
         scene_cfg.contact_forces.debug_vis = contact_debug_vis
         self.scene = InteractiveScene(scene_cfg)
         if use_ground_filter:
@@ -104,10 +98,8 @@ class G1Env:
 
         self.sim.set_camera_view((2.5, 2.5, 1.6), (0.0, 0.0, 0.8))
         self.sim.reset()
-        self.startup_randomization_applied = False
         if cfg.startup_randomization:
             self._apply_official_startup_events()
-            self.startup_randomization_applied = True
 
         action_joint_ids = self.robot.find_joints(G1_29DOF_ACTION_NAMES, preserve_order=True)[0]
         self.action_joint_ids = torch.tensor(action_joint_ids, dtype=torch.long, device=self.sim.device)
@@ -125,15 +117,10 @@ class G1Env:
         # FCAMP explicitly installs its algorithmic command domain after the
         # policy is built.  Joint-position metadata never defines that domain:
         # normalized actions are PD target commands, not physical joint poses.
-        self._strict_action_contract = False
         self._policy_action_low: torch.Tensor | None = None
         self._policy_action_high: torch.Tensor | None = None
-        self._action_space = self._build_action_space()
         self._push_interval_step_range = PUSH_INTERVAL_STEP_RANGE
         min_push, max_push = self._push_interval_step_range
-        self.push_time_left = torch.full(
-            (self.num_envs,), float("inf"), device=self.device
-        )
         self.next_push_step = torch.randint(
             min_push,
             max_push + 1,
@@ -165,30 +152,6 @@ class G1Env:
     def action_dim(self) -> int:
         return int(self.action_joint_ids.numel())
 
-    @property
-    def observation_dim(self) -> int:
-        return int(self.action_dim * 2)
-
-    def get_action_space(self) -> spaces.Box:
-        return self._action_space
-
-    def _build_action_space(self) -> spaces.Box:
-        joint_limits = self.robot.data.joint_pos_limits[0].index_select(
-            0, self.action_joint_ids
-        )
-        target_bound = 1.4 * torch.maximum(
-            joint_limits[:, 0].abs(), joint_limits[:, 1].abs()
-        )
-        default = self.default_action_joint_pos[0]
-        scale = self.action_scale[0]
-        low = (
-            (-target_bound - default) / scale
-        ).detach().cpu().numpy().astype(np.float32)
-        high = (
-            (target_bound - default) / scale
-        ).detach().cpu().numpy().astype(np.float32)
-        return spaces.Box(low=low, high=high, dtype=np.float32)
-
     def enable_strict_action_contract(
         self,
         low: torch.Tensor,
@@ -213,7 +176,6 @@ class G1Env:
             raise ValueError("Every policy action lower bound must be below its upper bound")
         self._policy_action_low = low.detach().clone()
         self._policy_action_high = high.detach().clone()
-        self._strict_action_contract = True
 
     def validate_policy_actions(
         self,
@@ -222,8 +184,7 @@ class G1Env:
         tolerance: float = 1.0e-6,
     ) -> None:
         if (
-            not self._strict_action_contract
-            or self._policy_action_low is None
+            self._policy_action_low is None
             or self._policy_action_high is None
         ):
             raise RuntimeError("No strict policy action contract is installed")

@@ -74,10 +74,6 @@ class Phase0CurriculumStreams:
     def curriculum_ids(self) -> torch.Tensor:
         return self.curriculum_mask.nonzero(as_tuple=False).squeeze(-1)
 
-    @property
-    def curriculum_fraction(self) -> float:
-        return 1.0 - self.phase0_fraction
-
     def reset_phases(
         self,
         reset_ids: torch.Tensor,
@@ -110,62 +106,6 @@ class Phase0CurriculumStreams:
                 )
             phases.index_copy_(0, curriculum_positions, sampled)
         return phases, reset_streams
-
-    def balanced_sample(
-        self,
-        candidates: torch.Tensor,
-        total: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sample each stream independently without filling a missing stream."""
-
-        candidates = candidates.to(
-            device=self.stream_ids.device,
-            dtype=torch.long,
-        )
-        total = max(0, int(total))
-        if total == 0:
-            return candidates[:0], self.stream_ids[:0]
-        candidate_streams = self.stream_ids.index_select(0, candidates)
-        phase0_candidates = candidates[candidate_streams == PHASE0_STREAM]
-        curriculum_candidates = candidates[
-            candidate_streams == CURRICULUM_STREAM
-        ]
-        phase0_quota = int(round(total * self.phase0_fraction))
-        curriculum_quota = total - phase0_quota
-
-        def take(values: torch.Tensor, count: int) -> torch.Tensor:
-            count = min(max(0, int(count)), int(values.numel()))
-            if count == 0:
-                return values[:0]
-            order = torch.randperm(values.numel(), device=values.device)
-            return values.index_select(0, order[:count])
-
-        selected_phase0 = take(phase0_candidates, phase0_quota)
-        selected_curriculum = take(curriculum_candidates, curriculum_quota)
-        selected = torch.cat((selected_phase0, selected_curriculum), dim=0)
-        selected_streams = torch.cat(
-            (
-                torch.full(
-                    (selected_phase0.numel(),),
-                    PHASE0_STREAM,
-                    dtype=torch.int8,
-                    device=selected.device,
-                ),
-                torch.full(
-                    (selected_curriculum.numel(),),
-                    CURRICULUM_STREAM,
-                    dtype=torch.int8,
-                    device=selected.device,
-                ),
-            ),
-            dim=0,
-        )
-        if selected.numel() > 1:
-            order = torch.randperm(selected.numel(), device=selected.device)
-            selected = selected.index_select(0, order)
-            selected_streams = selected_streams.index_select(0, order)
-        return selected, selected_streams
-
 
 class Phase0AttemptTracker:
     """Track complete phase-zero attempt lifecycles across rollout updates."""

@@ -39,9 +39,7 @@ class MimicTerminationMixin:
         ee_z_error_mean = ee_z_error.mean(dim=-1)
         time_out = self.episode_steps >= self.max_episode_steps
 
-        motion_complete = torch.zeros_like(time_out)
-        if self.terminate_on_motion_end:
-            motion_complete = self._motion_end_mask
+        motion_complete = self._motion_end_mask
         done = time_out | anchor_pos_bad | anchor_ori_bad | ee_body_bad | motion_complete
         return done, {
             "time_out": time_out,

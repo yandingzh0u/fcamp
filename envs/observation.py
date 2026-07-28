@@ -13,7 +13,6 @@ from isaaclab.utils.math import (
 
 from .spec import CRITIC_OBS_DIM, OBS_DIM
 from .imitation_data import build_g1_imitation_frame
-from .contracts import select_imitation_root_domain
 
 
 class MimicObservationMixin:
@@ -24,21 +23,7 @@ class MimicObservationMixin:
         if env_ids.ndim != 1:
             raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
         joint_pos, joint_vel = self.get_action_joint_state()
-        fcamp_contract = bool(
-            getattr(self, "_strict_action_contract", False)
-        )
-        root_pos_source, root_quat_source, root_velocity_source = (
-            select_imitation_root_domain(
-                strict_fcamp=fcamp_contract,
-                legacy_root_pos=self.robot.data.root_pos_w,
-                legacy_root_quat=self.robot.data.root_quat_w,
-                legacy_root_velocity=self.get_mimic_root_velocity_w(),
-                root_link_pos=self.robot.data.root_link_pos_w,
-                root_link_quat=self.robot.data.root_link_quat_w,
-                root_link_velocity=self.robot.data.root_link_vel_w,
-            )
-        )
-        root_pos = root_pos_source.index_select(0, env_ids)
+        root_pos = self.robot.data.root_link_pos_w.index_select(0, env_ids)
         env_origins = self.scene.env_origins.index_select(0, env_ids)
         key_body_pos = self.robot.data.body_pos_w.index_select(0, env_ids)[..., self.imitation_key_body_ids, :]
         # Scene origins are translations only.  Subtracting them from both root
@@ -46,12 +31,10 @@ class MimicObservationMixin:
         # the vectorized-environment grid from the discriminator input.
         root_pos_local = root_pos - env_origins
         key_body_pos_local = key_body_pos - env_origins.unsqueeze(-2)
-        # FCAMP expert data is explicitly reconstructed in the root-link
-        # domain. Other methods retain their exact 2db configured convention.
-        root_velocity = root_velocity_source.index_select(0, env_ids)
+        root_velocity = self.robot.data.root_link_vel_w.index_select(0, env_ids)
         return build_g1_imitation_frame(
             root_pos=root_pos_local,
-            root_quat_wxyz=root_quat_source.index_select(0, env_ids),
+            root_quat_wxyz=self.robot.data.root_link_quat_w.index_select(0, env_ids),
             joint_pos=joint_pos.index_select(0, env_ids),
             key_body_pos=key_body_pos_local,
             root_lin_vel=root_velocity[:, :3],
@@ -294,17 +277,4 @@ class MimicObservationMixin:
     def _add_uniform_noise(self, value: torch.Tensor, n_min: float, n_max: float) -> torch.Tensor:
         if not self.observation_noise:
             return value
-        generation_count = self.observation_group_size
-        if (
-            generation_count > 1
-            and value.shape[0] == self.num_envs
-            and self.num_envs % generation_count == 0
-        ):
-
-
-            group_count = self.num_envs // generation_count
-            group_shape = (group_count, *value.shape[1:])
-            group_noise = torch.empty(group_shape, dtype=value.dtype, device=value.device).uniform_(n_min, n_max)
-            noise = group_noise.repeat_interleave(generation_count, dim=0)
-            return value + noise
         return value + torch.empty_like(value).uniform_(n_min, n_max)

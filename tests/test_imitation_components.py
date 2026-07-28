@@ -19,9 +19,7 @@ from models.style_discriminator import StyleDiscriminator, compute_style_discrim
 
 def test_feature_schema_is_233_and_policy_demo_share_builder() -> None:
     schema = ImitationFeatureSchema()
-    assert schema.history_len == 16
     assert schema.frame_dim == 233
-    assert schema.window_dim == 3728
     batch = 3
     identity = torch.zeros(batch, 4)
     identity[:, 0] = 1.0
@@ -78,61 +76,21 @@ def test_imitation_window_canonicalization_uses_final_root_xy_and_preserves_heig
     torch.testing.assert_close(canonicalize_imitation_window(shifted), canonical)
 
 
-def test_history_order_push_and_subset_expert_reset() -> None:
-    history = TemporalFeatureHistory(2, history_len=4, feature_dim=1)
-    initial = torch.tensor([[[0.0], [1.0], [2.0], [3.0]], [[10.0], [11.0], [12.0], [13.0]]])
-    history.reset(initial[:, 0])
-    for frame_idx in range(1, 4):
-        history.push(initial[:, frame_idx])
-    history.push(torch.tensor([[4.0], [14.0]]))
-    assert history.flatten().tolist() == [[1.0, 2.0, 3.0, 4.0], [11.0, 12.0, 13.0, 14.0]]
-
-    env1 = torch.tensor([1])
-    env1_history = torch.tensor([[[19.0], [20.0], [21.0], [22.0], [23.0]]])
-    history.reset(env1_history[:, 0], env1)
-    for frame_idx in range(1, 5):
-        history.push(env1_history[:, frame_idx], env1)
-    assert history.flatten(env1).tolist() == [[20.0, 21.0, 22.0, 23.0]]
-    # Resetting env1 must not alter env0 or reset at a chunk boundary.
-    assert history.flatten(torch.tensor([0])).tolist() == [[1.0, 2.0, 3.0, 4.0]]
-
-
-def test_history_canonicalized_flatten_does_not_modify_raw_ring_frames() -> None:
-    history = TemporalFeatureHistory(1, history_len=3, feature_dim=5)
-    initial = torch.tensor(
-        [[[10.0, -4.0, 0.72, 1.0, 2.0], [12.0, -1.0, 0.76, 3.0, 4.0], [15.0, 3.0, 0.80, 5.0, 6.0]]]
-    )
-    history.reset(initial[:, 0])
-    history.push(initial[:, 1])
-    history.push(initial[:, 2])
-    history.push(torch.tensor([[19.0, 8.0, 0.84, 7.0, 8.0]]))
-    raw_window = torch.tensor(
-        [[[12.0, -1.0, 0.76, 3.0, 4.0], [15.0, 3.0, 0.80, 5.0, 6.0], [19.0, 8.0, 0.84, 7.0, 8.0]]]
-    )
-
-    torch.testing.assert_close(history.window(), raw_window)
-    canonical = history.flatten(canonicalize_root=True).reshape(1, 3, 5)
-    torch.testing.assert_close(canonical, canonicalize_imitation_window(raw_window))
-    torch.testing.assert_close(canonical[:, -1, :2], torch.zeros(1, 2))
-    torch.testing.assert_close(canonical[:, :, 2], raw_window[:, :, 2])
-    # Reading a canonicalized view must leave both window() and default flatten raw.
-    torch.testing.assert_close(history.window(), raw_window)
-    torch.testing.assert_close(history.flatten().reshape(1, 3, 5), raw_window)
-
-
 def test_demo_seeded_history_is_fixed_width_from_first_policy_step() -> None:
     history = TemporalFeatureHistory(1, history_len=4, feature_dim=1)
     seed = torch.tensor([[[0.0], [1.0], [2.0], [3.0]]], dtype=torch.float32)
     history.reset_seeded(seed)
 
-    assert history.seeded.tolist() == [True]
     assert history.ready.tolist() == [False]
-    history.push(torch.tensor([[4.0]], dtype=torch.float32))
+    history.push(
+        torch.tensor([[4.0]], dtype=torch.float32),
+        intervention_after=torch.tensor([False]),
+    )
 
     assert history.ready.tolist() == [True]
     assert history.causal_ready.tolist() == [True]
     assert history.window_ages().tolist() == [[-2, -1, 0, 1]]
-    assert history.flatten().tolist() == [[1.0, 2.0, 3.0, 4.0]]
+    assert history.window().squeeze(-1).tolist() == [[1.0, 2.0, 3.0, 4.0]]
 
 
 def test_intervention_after_excludes_exactly_next_w_minus_one_windows() -> None:
@@ -147,24 +105,33 @@ def test_intervention_after_excludes_exactly_next_w_minus_one_windows() -> None:
         intervention_after=torch.tensor([True]),
     )
     assert history.causal_ready.tolist() == [True]
-    assert history.flatten().tolist() == [[1.0, 2.0, 3.0, 4.0]]
+    assert history.window().squeeze(-1).tolist() == [[1.0, 2.0, 3.0, 4.0]]
 
     for value in (5.0, 6.0, 7.0):
-        history.push(torch.tensor([[value]], dtype=torch.float32))
+        history.push(
+            torch.tensor([[value]], dtype=torch.float32),
+            intervention_after=torch.tensor([False]),
+        )
         assert history.ready.tolist() == [True]
         assert history.causal_ready.tolist() == [False]
         with pytest.raises(RuntimeError, match="external intervention"):
             history.window()
 
-    history.push(torch.tensor([[8.0]], dtype=torch.float32))
+    history.push(
+        torch.tensor([[8.0]], dtype=torch.float32),
+        intervention_after=torch.tensor([False]),
+    )
     assert history.causal_ready.tolist() == [True]
-    assert history.flatten().tolist() == [[5.0, 6.0, 7.0, 8.0]]
+    assert history.window().squeeze(-1).tolist() == [[5.0, 6.0, 7.0, 8.0]]
 
 
 def test_history_rejects_uninitialized_push() -> None:
     history = TemporalFeatureHistory(1, history_len=4, feature_dim=2)
     with pytest.raises(RuntimeError, match="imitation history"):
-        history.push(torch.zeros(1, 2))
+        history.push(
+            torch.zeros(1, 2),
+            intervention_after=torch.tensor([False]),
+        )
 
 
 def test_imitation_reward_matches_definition_and_clamps() -> None:

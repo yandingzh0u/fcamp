@@ -104,7 +104,6 @@ def _trainer(*, resume: str = "") -> CoreTrainer:
         validation_every=0,
         save_every=0,
         target_validation_steps=0,
-        official_reset_every=0,
     )
     trainer.env_cfg = SimpleNamespace(num_envs=2, sim_dt=0.005)
     trainer.algo_cfg = SimpleNamespace(rollout_env_steps=4)
@@ -114,6 +113,7 @@ def _trainer(*, resume: str = "") -> CoreTrainer:
     trainer.start_update = 1
     trainer.env_transitions_total = 0
     trainer.train_wall_seconds_total = 0.0
+    trainer._pre_training_warmup_ran = False
     trainer.checkpoint_dir = SimpleNamespace(__str__=lambda self: "unused")
     trainer.metrics_logger = _MetricsLogger()
     trainer.checkpointer = _Checkpointer()

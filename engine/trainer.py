@@ -11,13 +11,14 @@ from .validation_logging import log_validation_metrics
 from .validation import run_validation_rollout, validation_max_steps
 from .metrics_logger import MetricsLogger
 from envs.g1_mimic import G1MimicEnv
+from method.fcamp import FCAMP
 
 
 VALIDATION_PROTOCOL_VERSION = 5.0
 
 
 class CoreTrainer:
-    def __init__(self, simulation_app, cfg: ExperimentConfig, algo_factory, checkpoint_dir: Path):
+    def __init__(self, simulation_app, cfg: ExperimentConfig, checkpoint_dir: Path):
         self.simulation_app = simulation_app
         self.cfg = cfg
         self.env_cfg = cfg.environment
@@ -32,12 +33,12 @@ class CoreTrainer:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(cfg.training.seed)
 
-        self.env = G1MimicEnv(cfg.environment, cfg.observation_group_size)
+        self.env = G1MimicEnv(cfg.environment)
         self.checkpoint_dir = checkpoint_dir.resolve()
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_logger = MetricsLogger(self.checkpoint_dir.parent / "logs")
 
-        self.algo = algo_factory(self.algo_cfg, self.env, simulation_app)
+        self.algo = FCAMP(self.algo_cfg, self.env)
         self.algo.build()
         self.checkpointer = Checkpointer(self)
 
@@ -168,30 +169,19 @@ class CoreTrainer:
                     flush=True,
                 )
                 break
-            if self._official_output_reset_due(update_idx):
-                self.current_observation = self.algo.initial_reset()
-                print(
-                    f"[OFFICIAL_RESET] update={update_idx} every={tcfg.official_reset_every}",
-                    flush=True,
-                )
-
         print("[INFO] Training finished.", flush=True)
         self.metrics_logger.close()
 
     def _run_pre_training_warmup(self) -> tuple[dict[str, float], int, float]:
         """Run the optional warm-up once on a fresh run and account its cost."""
         if (
-            bool(getattr(self, "_pre_training_warmup_ran", False))
+            self._pre_training_warmup_ran
             or self.start_update != 1
             or bool(self.train_cfg.resume)
         ):
             return {}, 0, 0.0
-        hook = getattr(self.algo, "pre_training_warmup", None)
-        if not callable(hook):
-            return {}, 0, 0.0
-
         started = time.perf_counter()
-        result = hook(self.current_observation)
+        result = self.algo.pre_training_warmup(self.current_observation)
         elapsed = time.perf_counter() - started
         if not isinstance(result, tuple) or len(result) != 3:
             raise TypeError(
@@ -225,12 +215,6 @@ class CoreTrainer:
             flush=True,
         )
         return metrics, transition_count, elapsed
-
-    def _official_output_reset_due(self, update_idx: int) -> bool:
-        every = int(self.train_cfg.official_reset_every)
-        if every <= 0:
-            return False
-        return update_idx >= 1 and (update_idx - 1) % every == 0
 
     def validate_only(self) -> None:
         fixed_seed = (

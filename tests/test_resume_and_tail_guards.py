@@ -30,6 +30,9 @@ class _FakeAlgo:
     def load_extra_checkpoint_state(self, payload: dict, reset_optimizer: bool = False) -> None:
         self.extra_load_args = (payload, reset_optimizer)
 
+    def reset_after_resume(self) -> torch.Tensor:
+        return torch.zeros(1, 1)
+
 
 def test_reset_sampler_on_resume_skips_compatible_checkpoint_state(tmp_path) -> None:
     algo = _FakeAlgo()

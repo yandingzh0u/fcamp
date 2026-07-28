@@ -7,17 +7,12 @@ __pycache__/
 
 # Training artifacts are local-only by default.
 runs/*
-# Whitelist every run's train.log (un-ignore parents layer by layer).
-!runs/*/
-runs/*/*
-!runs/*/logs/
-runs/*/logs/*
-!runs/*/logs/train.log
-# Keep the FCAMP baseline run: logs + config (no checkpoints / snapshot).
-!runs/fcamp_2_fix_bugs/
-!runs/fcamp_2_fix_bugs/**
-runs/fcamp_2_fix_bugs/checkpoints/
-runs/fcamp_2_fix_bugs/source_snapshot.tar.gz
+# Keep only the explicit FCAMP regression oracle named by the test protocol.
+!runs/fcamp_stageA_atomic_tracking_u500_s0_20260724_110839/
+runs/fcamp_stageA_atomic_tracking_u500_s0_20260724_110839/*
+!runs/fcamp_stageA_atomic_tracking_u500_s0_20260724_110839/logs/
+runs/fcamp_stageA_atomic_tracking_u500_s0_20260724_110839/logs/*
+!runs/fcamp_stageA_atomic_tracking_u500_s0_20260724_110839/logs/train.log
 
 .vscode/
 .idea/

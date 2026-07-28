@@ -87,7 +87,7 @@ def compute_style_discriminator_loss(
     *,
     expert_observations: torch.Tensor,
     policy_observations: torch.Tensor,
-    replay_observations: torch.Tensor | None = None,
+    replay_observations: torch.Tensor,
     gradient_penalty_weight: float = 10.0,
     logit_regularization_weight: float = 0.01,
 ) -> StyleDiscriminatorLossOutput:
@@ -101,10 +101,9 @@ def compute_style_discriminator_loss(
         raise ValueError("discriminator regularization weights must be non-negative")
     expert = expert_observations.detach().requires_grad_(gradient_penalty_weight > 0)
     current = policy_observations.detach()
-    fake_parts = [current]
-    if replay_observations is not None and replay_observations.numel() > 0:
-        fake_parts.append(replay_observations.detach())
-    fake = torch.cat(fake_parts, dim=0).requires_grad_(gradient_penalty_weight > 0)
+    fake = torch.cat((current, replay_observations.detach()), dim=0).requires_grad_(
+        gradient_penalty_weight > 0
+    )
 
     expert_logits = discriminator(expert)
     fake_logits = discriminator(fake)
@@ -146,9 +145,10 @@ def compute_style_discriminator_loss(
     }
     metrics.update(_distribution_metrics("expert", expert_logits))
     metrics.update(_distribution_metrics("current", current_logits))
-    if replay_logits.numel():
-        replay_bce = F.binary_cross_entropy_with_logits(replay_logits, torch.zeros_like(replay_logits))
-        metrics["disc/replay_bce"] = replay_bce.detach()
-        metrics["disc/replay_accuracy"] = (replay_logits.detach() < 0).float().mean()
-        metrics.update(_distribution_metrics("replay", replay_logits))
+    replay_bce = F.binary_cross_entropy_with_logits(
+        replay_logits, torch.zeros_like(replay_logits)
+    )
+    metrics["disc/replay_bce"] = replay_bce.detach()
+    metrics["disc/replay_accuracy"] = (replay_logits.detach() < 0).float().mean()
+    metrics.update(_distribution_metrics("replay", replay_logits))
     return StyleDiscriminatorLossOutput(loss=total, metrics=metrics)

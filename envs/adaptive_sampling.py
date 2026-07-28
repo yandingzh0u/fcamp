@@ -140,8 +140,7 @@ class AdaptiveTimestepsSampler:
             self.current_bin_failed_count.copy_(cbfc.to(self.current_bin_failed_count))
         return True
 
-    def stats(self, min_phase: int = 0, max_phase: int | None = None) -> dict[str, float]:
-        del min_phase, max_phase  # Kept in the API for checkpoint/config compatibility.
+    def stats(self) -> dict[str, float]:
         probabilities = self.sampling_probabilities
         top_prob, top_bin = probabilities.max(dim=0)
         entropy = -(probabilities * probabilities.clamp_min(1.0e-12).log()).sum()

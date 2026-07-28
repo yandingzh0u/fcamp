@@ -1,13 +1,6 @@
 from __future__ import annotations
 
-from components.optim.kl_scheduler import adaptive_lr_from_kl, normalized_kl
-
-
-def test_normalized_kl_divides_by_units() -> None:
-    assert normalized_kl(0.04, 4) == 0.01
-    assert normalized_kl(0.01, 1) == 0.01
-    # units clamped to >= 1
-    assert normalized_kl(0.01, 0) == 0.01
+from components.optim.kl_scheduler import adaptive_lr_from_kl
 
 
 def test_adaptive_lr_h4_raw_kl_in_band_does_not_drop_lr() -> None:

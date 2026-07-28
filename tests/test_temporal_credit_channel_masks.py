@@ -5,7 +5,6 @@ import torch
 from components.credit.temporal_credit import (
     compute_dual_channel_gae,
     normalize_actor_mixture,
-    with_chunk_shared_actor_credit,
 )
 
 
@@ -22,6 +21,7 @@ def _compute(
     shape = (time_steps, num_envs)
     values = torch.zeros_like(rewards) if values is None else values
     next_values = torch.zeros_like(rewards) if next_values is None else next_values
+    shared = torch.ones_like(rewards)
     return compute_dual_channel_gae(
         rewards,
         values,
@@ -31,12 +31,14 @@ def _compute(
         torch.ones(shape, dtype=torch.bool),
         gamma=1.0,
         gae_lambda=1.0,
-        chunk_horizon=2,
-        normalization="none",
         actor_weights=(1.0, 1.0),
-        channel_valid_mask=channel_valid,
-        channel_bootstrap_mask=channel_bootstrap,
-        channel_trace_mask=channel_trace,
+        channel_valid_mask=(
+            torch.ones_like(rewards, dtype=torch.bool)
+            if channel_valid is None
+            else channel_valid
+        ),
+        channel_bootstrap_mask=shared if channel_bootstrap is None else channel_bootstrap,
+        channel_trace_mask=shared if channel_trace is None else channel_trace,
     )
 
 
@@ -101,9 +103,9 @@ def test_amp_push_edge_cuts_channel_bootstrap_without_cutting_task() -> None:
         torch.ones(1, 1, dtype=torch.bool),
         gamma=0.5,
         gae_lambda=1.0,
-        chunk_horizon=1,
-        normalization="none",
+        channel_valid_mask=torch.ones_like(rewards, dtype=torch.bool),
         channel_bootstrap_mask=channel_bootstrap,
+        channel_trace_mask=torch.ones_like(rewards),
     )
     torch.testing.assert_close(result.advantages[0, 0], torch.tensor([1.5, 0.0]))
 
@@ -130,72 +132,3 @@ def test_weighted_normalizer_excludes_invalid_amp_samples() -> None:
         normalized.actor_advantage,
         normalized.actor_advantage_components.sum(dim=-1),
     )
-
-
-def test_chunk_shared_masks_invalid_amp_at_the_receiving_offset() -> None:
-    rewards = torch.tensor(
-        [[[1.0, 10.0]], [[2.0, 20.0]], [[3.0, 30.0]], [[4.0, 40.0]]]
-    )
-    channel_valid = torch.ones_like(rewards, dtype=torch.bool)
-    channel_valid[1, :, 1] = False
-    primitive = _compute(rewards, channel_valid=channel_valid)
-    valid = torch.ones(4, 1, dtype=torch.bool)
-    shared = with_chunk_shared_actor_credit(
-        primitive,
-        valid,
-        chunk_horizon=2,
-        normalization="none",
-    )
-
-    assert shared.actor_advantage_components[1, 0, 1].item() == 0.0
-    assert shared.actor_advantage_components[1, 0, 0].item() != 0.0
-    torch.testing.assert_close(
-        shared.mixed_advantage,
-        shared.actor_advantage_components.sum(dim=-1),
-    )
-
-
-def test_legacy_api_matches_explicit_shared_channel_masks() -> None:
-    torch.manual_seed(11)
-    rewards = torch.randn(4, 2, 2)
-    base_valid = torch.tensor(
-        [[True, True], [True, False], [True, True], [False, True]]
-    )
-    shared_bootstrap = torch.tensor(
-        [[1.0, 1.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
-    )
-    shared_trace = torch.tensor(
-        [[1.0, 1.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]
-    )
-    values = torch.randn_like(rewards)
-    next_values = torch.randn_like(rewards)
-    common = dict(
-        rewards=rewards,
-        values=values,
-        next_values=next_values,
-        bootstrap_mask=shared_bootstrap,
-        trace_mask=shared_trace,
-        valid_mask=base_valid,
-        gamma=0.97,
-        gae_lambda=0.91,
-        chunk_horizon=2,
-        normalization="global",
-        actor_weights=(1.0, 0.25),
-    )
-    legacy = compute_dual_channel_gae(**common)
-    explicit = compute_dual_channel_gae(
-        **common,
-        channel_valid_mask=base_valid.unsqueeze(-1).expand_as(rewards),
-        channel_bootstrap_mask=shared_bootstrap.unsqueeze(-1).expand_as(rewards),
-        channel_trace_mask=shared_trace.unsqueeze(-1).expand_as(rewards),
-    )
-    for name in (
-        "td_errors",
-        "advantages",
-        "value_targets",
-        "mixed_advantage",
-        "actor_advantage",
-        "actor_advantage_components",
-        "channel_valid_mask",
-    ):
-        torch.testing.assert_close(getattr(legacy, name), getattr(explicit, name))

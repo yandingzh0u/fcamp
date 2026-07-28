@@ -18,7 +18,6 @@ def snapshot_env_state(env) -> dict[str, torch.Tensor]:
         ),
         "last_action": env.last_action.clone(),
         "next_push_step": env.next_push_step.clone(),
-        "push_time_left": env.push_time_left.clone(),
         "first_push_step": env.first_push_step.clone(),
         "adaptive_bin_failed_count": env.adaptive_sampler.bin_failed_count.clone(),
         "adaptive_current_bin_failed_count": env.adaptive_sampler.current_bin_failed_count.clone(),
@@ -61,15 +60,10 @@ def restore_env_state(env, snapshot: dict[str, torch.Tensor]) -> None:
     )
     env.phase_steps.copy_(snapshot["phase_steps"])
     env.episode_steps.copy_(snapshot["episode_steps"])
-    if "episode_ids" in snapshot:
-        env.episode_ids.copy_(snapshot["episode_ids"])
-        env._next_episode_id = int(snapshot["next_episode_id"].item())
-    else:
-        env.episode_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
-        env._next_episode_id = int(env.num_envs)
+    env.episode_ids.copy_(snapshot["episode_ids"])
+    env._next_episode_id = int(snapshot["next_episode_id"].item())
     env.last_action.copy_(snapshot["last_action"])
     env.next_push_step.copy_(snapshot["next_push_step"])
-    env.push_time_left.copy_(snapshot["push_time_left"])
     env.first_push_step.copy_(snapshot["first_push_step"])
     sampler = env.adaptive_sampler
     sampler.bin_failed_count.copy_(snapshot["adaptive_bin_failed_count"].to(sampler.bin_failed_count))

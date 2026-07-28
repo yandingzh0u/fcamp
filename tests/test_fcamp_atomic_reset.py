@@ -61,7 +61,6 @@ def mimic_env_type(monkeypatch):
             "envs.imitation_data",
             G1_IMITATION_FRAME_DIM=1,
             G1_IMITATION_KEY_BODY_NAMES=(),
-            g1_add_disc_frame_dim=lambda _count: 1,
         ),
     )
     monkeypatch.setitem(
@@ -69,7 +68,6 @@ def mimic_env_type(monkeypatch):
         "envs.spec",
         _module(
             "envs.spec",
-            ADD_DISC_BODY_NAMES=(),
             CRITIC_OBS_DIM=2,
             OBS_DIM=2,
             PROJECT_ROOT=Path("."),
@@ -184,7 +182,7 @@ def _make_env(
     env_type,
     *,
     reference_joint_pos: torch.Tensor,
-    strict: bool,
+    contract_installed: bool,
     reset_noise: bool,
 ):
     env = object.__new__(env_type)
@@ -207,7 +205,8 @@ def _make_env(
         ]
     )
     env.action_scale = torch.tensor([[0.50, 0.25]])
-    env._strict_action_contract = strict
+    env._policy_action_low = torch.full((2,), -5.0) if contract_installed else None
+    env._policy_action_high = torch.full((2,), 5.0) if contract_installed else None
     env.reset_noise = reset_noise
     env.scene = _Scene(env)
     env.reset_phase_recorder = SimpleNamespace(record=lambda *_args: None)
@@ -262,7 +261,7 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
     env = _make_env(
         mimic_env_type,
         reference_joint_pos=references,
-        strict=True,
+        contract_installed=True,
         reset_noise=True,
     )
     env_ids = torch.tensor([3, 1, 2])
@@ -305,7 +304,7 @@ def test_pre_contract_reset_is_finite_and_does_not_clamp(
     env = _make_env(
         mimic_env_type,
         reference_joint_pos=references,
-        strict=False,
+        contract_installed=False,
         reset_noise=False,
     )
     env_ids = torch.tensor([0])
@@ -318,4 +317,3 @@ def test_pre_contract_reset_is_finite_and_does_not_clamp(
     env.action_scale[0, 0] = 0.0
     with pytest.raises(RuntimeError, match="non-finite reset policy command"):
         env.reset_envs(env_ids, phase_indices=torch.tensor([0]))
-

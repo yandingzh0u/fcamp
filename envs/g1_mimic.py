@@ -9,9 +9,8 @@ from components.rollout.reset_diagnostics import ResetPhaseRecorder
 from engine.config import EnvironmentConfig
 
 from .adaptive_sampling import AdaptiveTimestepsSampler
-from .imitation_data import G1_IMITATION_FRAME_DIM, G1_IMITATION_KEY_BODY_NAMES, g1_add_disc_frame_dim
+from .imitation_data import G1_IMITATION_FRAME_DIM, G1_IMITATION_KEY_BODY_NAMES
 from .spec import (
-    ADD_DISC_BODY_NAMES,
     CRITIC_OBS_DIM,
     OBS_DIM,
     PROJECT_ROOT,
@@ -29,7 +28,6 @@ from .motion import (
     MimicMotionReference,
     mimickit_frame_delta,
     mimickit_full_motion_steps,
-    sample_mimickit_phase,
 )
 from .observation import MimicObservationMixin
 from .reward import MimicRewardMixin
@@ -50,7 +48,6 @@ class G1MimicEnv(
     def __init__(
         self,
         cfg: EnvironmentConfig,
-        observation_group_size: int,
         *,
         render: bool = False,
         render_every: int = 1,
@@ -58,7 +55,6 @@ class G1MimicEnv(
     ):
         self.config = cfg
         self.task = resolve_task(cfg.task)
-        self.observation_group_size = observation_group_size
         self.observation_noise = cfg.observation_noise
         super().__init__(
             cfg,
@@ -78,15 +74,6 @@ class G1MimicEnv(
             dtype=torch.long,
             device=self.device,
         )
-        missing_add_disc_bodies = [name for name in ADD_DISC_BODY_NAMES if name not in self.robot.body_names]
-        if missing_add_disc_bodies:
-            raise ValueError(f"ADD discriminator bodies are missing from the robot asset: {missing_add_disc_bodies}")
-        self.add_disc_body_names = list(ADD_DISC_BODY_NAMES)
-        self.add_disc_body_ids = torch.tensor(
-            [self.robot.body_names.index(name) for name in self.add_disc_body_names],
-            dtype=torch.long,
-            device=self.device,
-        )
         self.anchor_body_id = self.robot.body_names.index(MIMIC_ANCHOR_BODY_NAME)
         self.ee_body_names = list(MIMIC_EE_BODY_NAMES)
         self.ee_body_indices = [self.track_body_names.index(name) for name in MIMIC_EE_BODY_NAMES]
@@ -101,15 +88,6 @@ class G1MimicEnv(
                 raise RuntimeError(
                     f"Ground-filter contact matrix shape mismatch: expected {expected_shape}, got {actual_shape}"
                 )
-        self.contact_robot_body_ids = torch.tensor(
-            [
-                self.robot.body_names.index(body_name) if body_name in self.robot.body_names else -1
-                for body_name in self.contact_sensor.body_names
-            ],
-            dtype=torch.long,
-            device=self.device,
-        )
-
         def _contact_allowed(body_name: str) -> bool:
             return any(token in body_name for token in CONTACT_ALLOWED_SUBSTRINGS)
 
@@ -122,9 +100,11 @@ class G1MimicEnv(
             dtype=torch.long,
             device=self.device,
         )
-        self.foot_body_names = list(MIMIC_FOOT_BODY_NAMES)
         self.foot_contact_body_ids = torch.tensor(
-            [self.contact_sensor.body_names.index(name) for name in self.foot_body_names],
+            [
+                self.contact_sensor.body_names.index(name)
+                for name in MIMIC_FOOT_BODY_NAMES
+            ],
             dtype=torch.long,
             device=self.device,
         )
@@ -143,9 +123,7 @@ class G1MimicEnv(
             robot_body_names=list(self.robot.body_names),
             action_joint_names=list(G1_29DOF_ACTION_NAMES),
             root_body_name="pelvis",
-            required_body_names=ADD_DISC_BODY_NAMES,
             kinematic_urdf_file=PROJECT_ROOT / "assets" / "robots" / "holosoma_g1" / "g1_29dof.urdf",
-            motion_reference_mode=cfg.motion_reference_mode,
         )
         self._init_adaptive_motion_sampling()
 
@@ -191,14 +169,6 @@ class G1MimicEnv(
         return G1_IMITATION_FRAME_DIM
 
     @property
-    def add_disc_frame_dim(self) -> int:
-        return g1_add_disc_frame_dim(len(self.add_disc_body_names))
-
-    @property
-    def uses_mimickit_motion_reference(self) -> bool:
-        return self.config.motion_reference_mode == "mimickit_add"
-
-    @property
     def motion_frame_delta(self) -> float:
         return mimickit_frame_delta(self.motion.fps, self.dt)
 
@@ -208,47 +178,6 @@ class G1MimicEnv(
             self.motion_end_phase,
             self.motion.fps,
             self.dt,
-        )
-
-    def get_imitation_demo_history(
-        self,
-        phase_indices: torch.Tensor,
-        window_size: int,
-        *,
-        flatten: bool = False,
-    ) -> torch.Tensor:
-        return self.motion.get_imitation_demo_history(
-            phase_indices,
-            window_size,
-            flatten=flatten,
-        )
-
-    def sample_imitation_demo_windows(
-        self,
-        num_samples: int,
-        window_size: int = 16,
-        *,
-        flatten: bool = True,
-        generator: torch.Generator | None = None,
-    ) -> torch.Tensor:
-        return self.motion.sample_imitation_demo_windows(
-            num_samples,
-            window_size,
-            flatten=flatten,
-            generator=generator,
-        )
-
-    def get_imitation_demo_windows_at_end_indices(
-        self,
-        end_indices: torch.Tensor,
-        window_size: int = 16,
-        *,
-        flatten: bool = True,
-    ) -> torch.Tensor:
-        return self.motion.get_imitation_demo_windows_at_end_indices(
-            end_indices,
-            window_size,
-            flatten=flatten,
         )
 
     def _adaptive_phase_range(self, horizon: int) -> tuple[int, int]:
@@ -265,15 +194,7 @@ class G1MimicEnv(
         if num_samples < 0:
             raise ValueError(f"num_samples must be >= 0, got {num_samples}")
         if num_samples == 0:
-            dtype = torch.float32 if self.reset_phase_sampling == "continuous_uniform" else torch.long
-            return torch.empty(0, dtype=dtype, device=self.device)
-        if self.reset_phase_sampling == "continuous_uniform":
-            return sample_mimickit_phase(
-                num_samples,
-                self.motion_start_phase,
-                self.motion_end_phase,
-                device=self.device,
-            )
+            return torch.empty(0, dtype=torch.long, device=self.device)
         min_phase, max_phase = self._adaptive_phase_range(horizon)
         if max_phase < min_phase:
             return torch.full((num_samples,), min_phase, dtype=torch.long, device=self.device)
@@ -283,7 +204,7 @@ class G1MimicEnv(
             keyframes = self._rsi_keyframe_phases(min_phase, max_phase)
             indices = torch.randint(0, keyframes.numel(), (num_samples,), device=self.device)
             return keyframes.index_select(0, indices)
-        if self.reset_phase_sampling == "uniform" or not self.adaptive_motion_sampling:
+        if self.reset_phase_sampling == "uniform":
             return torch.randint(min_phase, max_phase + 1, (num_samples,), dtype=torch.long, device=self.device)
         return self.adaptive_sampler.sample_frames(num_samples, min_phase, max_phase)
 
@@ -348,7 +269,7 @@ class G1MimicEnv(
             raise RuntimeError(
                 "Reference pose produced a non-finite reset policy command"
             )
-        if bool(getattr(self, "_strict_action_contract", False)):
+        if self._policy_action_low is not None:
             self.validate_policy_actions(reference_action)
         return reference_action
 
@@ -462,39 +383,15 @@ class G1MimicEnv(
         if actions.shape != (self.num_envs, self.action_dim):
             raise ValueError(f"Expected action shape {(self.num_envs, self.action_dim)}, got {tuple(actions.shape)}")
 
-        if self._strict_action_contract:
-            self.validate_policy_actions(actions)
-            applied_actions = actions
-            action_targets = (
-                self.default_action_joint_pos
-                + self.action_scale * applied_actions
-            )
-        else:
-            # Compatibility path for paper-specific adapters that own their
-            # action transform. FCAMP explicitly enables the strict path.
-            clipped_actions = torch.clamp(actions, -100.0, 100.0)
-            action_targets = (
-                self.default_action_joint_pos
-                + self.action_scale * clipped_actions
-            )
-            # Exactly preserve 2db reward/observation history semantics outside
-            # FCAMP: only the simulator target writer sees the legacy clamp.
-            applied_actions = actions
+        self.validate_policy_actions(actions)
+        action_targets = self.default_action_joint_pos + self.action_scale * actions
         self.robot.set_joint_position_target(action_targets, joint_ids=self.action_joint_ids)
-        return applied_actions
+        return actions
 
     def _init_adaptive_motion_sampling(self) -> None:
         self.reset_phase_sampling = str(self.config.reset_phase_sampling)
         self.rsi_keyframe_count = int(self.config.rsi_keyframe_count)
-        env_fps = (
-            int(round(1.0 / float(self.config.sim_dt)))
-            if float(self.config.sim_dt) > 0
-            else 50
-        )
-        self.adaptive_motion_sampling = bool(
-            self.config.adaptive_motion_sampling
-            and self.reset_phase_sampling == "adaptive"
-        )
+        env_fps = int(round(1.0 / float(self.config.sim_dt)))
         self.adaptive_sampler = AdaptiveTimestepsSampler(
             motion_time_step_total=int(self.motion.num_frames),
             device=self.device,
@@ -515,13 +412,6 @@ class G1MimicEnv(
             device=self.device,
         )
         self.record_motion_failures = True
-        self.terminate_on_motion_end = bool(self.config.terminate_on_motion_end)
-        self.policy_observation_mode = str(
-            getattr(self.config, "policy_observation_mode", "tracking")
-        )
-        self.motion_end_behavior = str(
-            getattr(self.config, "motion_end_behavior", "hold_last")
-        )
         self.reset_noise = bool(self.config.reset_noise)
         self.interval_pushes = bool(self.config.interval_pushes)
 
@@ -540,7 +430,7 @@ class G1MimicEnv(
         death_phase_steps: torch.Tensor,
     ) -> None:
 
-        if not self.adaptive_motion_sampling or not self.record_motion_failures:
+        if self.reset_phase_sampling != "adaptive" or not self.record_motion_failures:
             return
         failure = (
             tracking_failure
@@ -553,14 +443,14 @@ class G1MimicEnv(
 
     def _fold_adaptive_sampler(self) -> None:
 
-        if not self.adaptive_motion_sampling or not self.record_motion_failures:
+        if self.reset_phase_sampling != "adaptive" or not self.record_motion_failures:
             return
         self.adaptive_sampler.update_failure_ema()
 
     def adaptive_sampling_stats(self) -> dict[str, float]:
         min_phase, max_phase = self._adaptive_phase_range(horizon=1)
         if self.reset_phase_sampling == "adaptive":
-            stats = self.adaptive_sampler.stats(min_phase, max_phase)
+            stats = self.adaptive_sampler.stats()
             stats["mode"] = 0.0
             return stats
         if self.reset_phase_sampling == "rsi":
@@ -594,33 +484,3 @@ class G1MimicEnv(
             "entropy": 1.0 if total > 1 else 0.0,
             "peak_bin": -1.0,
         }
-
-    def _resample_finished_motions(self) -> tuple[torch.Tensor, torch.Tensor]:
-
-        env_ids = torch.where(self.phase_steps >= self.motion.num_frames)[0]
-        if env_ids.numel() == 0:
-            return env_ids, torch.empty(0, dtype=torch.long, device=self.device)
-        phase_indices = self.sample_phase_indices(env_ids.numel(), horizon=1)
-        self.phase_steps[env_ids] = phase_indices.to(dtype=self.phase_steps.dtype)
-        self._failure_recorded[env_ids] = False
-        reference = self.motion.get_frame(phase_indices)
-        root_pos = reference["root_pos_w"].clone()
-        root_quat = reference["root_quat_w"].clone()
-        root_lin_vel = reference["root_lin_vel_w"].clone()
-        root_ang_vel = reference["root_ang_vel_w"].clone()
-        joint_pos = reference["joint_pos"].clone()
-        joint_vel = reference["joint_vel"].clone()
-        if self.reset_noise:
-            self._apply_official_reset_noise(env_ids, root_pos, root_quat, root_lin_vel, root_ang_vel, joint_pos)
-        self.reset_phase_recorder.record(phase_indices)
-        self._write_robot_state(
-            root_pos=root_pos,
-            root_quat=root_quat,
-            root_lin_vel=root_lin_vel,
-            root_ang_vel=root_ang_vel,
-            joint_pos=joint_pos,
-            joint_vel=joint_vel,
-            env_ids=env_ids,
-        )
-        self.scene.update(self.physics_dt)
-        return env_ids, phase_indices

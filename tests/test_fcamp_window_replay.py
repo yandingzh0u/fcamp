@@ -39,7 +39,7 @@ def _offer(
 
 
 def test_fill_stores_complete_raw_float32_windows_and_partition_metadata() -> None:
-    replay = FCAMPWindowReplay({0: 3, 1: 2}, 2, 3, pin_memory=False)
+    replay = FCAMPWindowReplay({0: 3, 1: 2}, 2, 3)
     replay.begin_update(0, replacement_quotas={0: 1, 1: 1})
     source = _windows([10.0, 20.0]).to(dtype=torch.float64)
     replay.offer(
@@ -49,26 +49,7 @@ def test_fill_stores_complete_raw_float32_windows_and_partition_metadata() -> No
         dirty=torch.zeros(2, dtype=torch.bool),
     )
     _offer(replay, [90.0], stream_id=1, end_times=[909])
-    report = replay.commit_update()
-
-    assert report == {
-        0: {
-            "mode": "fill",
-            "offered": 2,
-            "inserted": 2,
-            "replaced": 0,
-            "size": 2,
-            "capacity": 3,
-        },
-        1: {
-            "mode": "fill",
-            "offered": 1,
-            "inserted": 1,
-            "replaced": 0,
-            "size": 1,
-            "capacity": 2,
-        },
-    }
+    replay.commit_update()
     state = replay.state_dict()
     stored = state["partitions"][0]
     assert stored["data"].dtype == torch.float32
@@ -77,13 +58,12 @@ def test_fill_stores_complete_raw_float32_windows_and_partition_metadata() -> No
     assert stored["end_time"].tolist() == [101, 102]
     assert stored["insert_update"].tolist() == [0, 0]
     assert replay.size(0) == 2
-    assert replay.remaining_capacity(0) == 1
     assert len(replay) == 3
 
 
 def test_streaming_reservoir_is_batching_invariant_and_not_prefix_biased() -> None:
-    one_batch = FCAMPWindowReplay({0: 5}, 2, 3, pin_memory=False)
-    split_batch = FCAMPWindowReplay({0: 5}, 2, 3, pin_memory=False)
+    one_batch = FCAMPWindowReplay({0: 5}, 2, 3)
+    split_batch = FCAMPWindowReplay({0: 5}, 2, 3)
     values = [float(value) for value in range(20)]
 
     one_batch.begin_update(
@@ -118,7 +98,7 @@ def test_streaming_reservoir_is_batching_invariant_and_not_prefix_biased() -> No
 
 
 def test_full_partition_replaces_exact_quota_with_unique_uniform_victims() -> None:
-    replay = FCAMPWindowReplay({0: 4}, 2, 3, pin_memory=False)
+    replay = FCAMPWindowReplay({0: 4}, 2, 3)
     replay.begin_update(2, replacement_quotas={0: 2})
     _offer(replay, [0.0, 1.0, 2.0, 3.0], stream_id=0)
     replay.commit_update()
@@ -131,16 +111,13 @@ def test_full_partition_replaces_exact_quota_with_unique_uniform_victims() -> No
     )
     _offer(replay, [100.0, 101.0, 102.0], stream_id=0)
     _offer(replay, [103.0, 104.0, 105.0, 106.0], stream_id=0)
-    report = replay.commit_update()
+    replay.commit_update()
 
     state = replay.state_dict()["partitions"][0]
     changed = (state["data"][:, 0, 0] != before[:, 0, 0]).nonzero().flatten()
     assert changed.numel() == 2
     assert bool((state["data"][changed, 0, 0] >= 100.0).all())
     assert state["insert_update"].tolist().count(5) == 2
-    assert report[0]["offered"] == 7
-    assert report[0]["inserted"] == 0
-    assert report[0]["replaced"] == 2
     assert state["offered_count"] == 11
     assert state["inserted_count"] == 4
     assert state["replaced_count"] == 2
@@ -155,7 +132,7 @@ def test_full_partition_replaces_exact_quota_with_unique_uniform_victims() -> No
 
 
 def test_sampling_is_stream_local_and_preserves_endpoint_alignment() -> None:
-    replay = FCAMPWindowReplay({0: 3, 1: 4}, 2, 3, pin_memory=False)
+    replay = FCAMPWindowReplay({0: 3, 1: 4}, 2, 3)
     replay.begin_update(0, replacement_quotas={0: 1, 1: 2})
     _offer(replay, [10.0, 11.0, 12.0], stream_id=0, end_times=[110, 111, 112])
     _offer(
@@ -194,7 +171,7 @@ def test_sampling_is_stream_local_and_preserves_endpoint_alignment() -> None:
 
 
 def test_dirty_offer_poison_is_transactional_and_never_becomes_live_data() -> None:
-    replay = FCAMPWindowReplay({0: 3}, 2, 3, pin_memory=False)
+    replay = FCAMPWindowReplay({0: 3}, 2, 3)
     replay.begin_update(0, replacement_quotas={0: 1})
     _offer(replay, [1.0], stream_id=0)
     with pytest.raises(ValueError, match="dirty FCAMP windows"):
@@ -224,7 +201,7 @@ def test_dirty_offer_poison_is_transactional_and_never_becomes_live_data() -> No
 
 
 def test_exact_replacement_quota_refuses_short_current_stream() -> None:
-    replay = FCAMPWindowReplay({0: 2}, 2, 3, pin_memory=False)
+    replay = FCAMPWindowReplay({0: 2}, 2, 3)
     replay.begin_update(0, replacement_quotas={0: 2})
     _offer(replay, [1.0, 2.0], stream_id=0)
     replay.commit_update()
@@ -234,7 +211,6 @@ def test_exact_replacement_quota_refuses_short_current_stream() -> None:
     _offer(replay, [20.0], stream_id=0)
     with pytest.raises(RuntimeError, match="exact replacement quota 2"):
         replay.commit_update()
-    assert replay.has_active_update
     replay.abort_update()
     after = replay.state_dict()
     torch.testing.assert_close(
@@ -245,7 +221,7 @@ def test_exact_replacement_quota_refuses_short_current_stream() -> None:
 
 
 def test_state_roundtrip_is_exact_and_schema_is_strict() -> None:
-    replay = FCAMPWindowReplay({0: 2, 1: 2}, 2, 3, pin_memory=False)
+    replay = FCAMPWindowReplay({0: 2, 1: 2}, 2, 3)
     replay.begin_update(0, replacement_quotas={0: 1, 1: 1})
     _offer(replay, [1.0, 2.0], stream_id=0, end_times=[10, 20])
     _offer(replay, [3.0], stream_id=1, end_times=[30])
@@ -256,7 +232,7 @@ def test_state_roundtrip_is_exact_and_schema_is_strict() -> None:
     replay.commit_update()
     state = replay.state_dict()
 
-    restored = FCAMPWindowReplay({0: 2, 1: 2}, 2, 3, pin_memory=False)
+    restored = FCAMPWindowReplay({0: 2, 1: 2}, 2, 3)
     assert restored.load_state_dict(state)
     restored_state = restored.state_dict()
     assert restored_state.keys() == state.keys()
@@ -286,13 +262,13 @@ def test_state_roundtrip_is_exact_and_schema_is_strict() -> None:
     with pytest.raises(FCAMPReplayStateError, match="do not conserve"):
         restored.load_state_dict(bad_counters)
 
-    wrong_shape = FCAMPWindowReplay({0: 2, 1: 2}, 3, 3, pin_memory=False)
+    wrong_shape = FCAMPWindowReplay({0: 2, 1: 2}, 3, 3)
     with pytest.raises(FCAMPReplayStateError, match="shape schema"):
         wrong_shape.load_state_dict(state)
 
 
 def test_invalid_offer_poison_and_checkpoint_during_transaction_are_rejected() -> None:
-    replay = FCAMPWindowReplay({0: 2}, 2, 3, pin_memory=False)
+    replay = FCAMPWindowReplay({0: 2}, 2, 3)
     replay.begin_update(0, replacement_quotas={0: 1})
     with pytest.raises(ValueError, match="non-finite"):
         replay.offer(
@@ -317,7 +293,7 @@ def test_invalid_offer_poison_and_checkpoint_during_transaction_are_rejected() -
 
 
 def test_update_and_stream_contracts_are_explicit() -> None:
-    replay = FCAMPWindowReplay({0: 2, 1: 3}, 2, 3, pin_memory=False)
+    replay = FCAMPWindowReplay({0: 2, 1: 3}, 2, 3)
     with pytest.raises(ValueError, match="exactly the configured streams"):
         replay.begin_update(0, replacement_quotas={0: 1})
     with pytest.raises(ValueError, match="must be in"):
@@ -330,4 +306,3 @@ def test_update_and_stream_contracts_are_explicit() -> None:
         replay.begin_update(0, replacement_quotas={0: 1, 1: 1})
     with pytest.raises(KeyError, match="unknown replay stream"):
         replay.sample(1, stream_id=99)
-

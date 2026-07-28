@@ -2,12 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 import yaml
-
-
-MethodName: TypeAlias = str
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,22 +25,12 @@ class EnvironmentConfig:
     observation_noise: bool
     reset_phase_sampling: str
     rsi_keyframe_count: int
-    adaptive_motion_sampling: bool
     adaptive_num_bins: int
     adaptive_alpha: float
     adaptive_predecessor_ratio: float
     adaptive_predecessor_lookback_bins: int
     action_rate_weight: float
-    terminate_on_motion_end: bool
-    motion_reference_mode: str
     root_velocity_mode: str
-    policy_observation_mode: str
-    motion_end_behavior: str
-    adaptive_uniform_ratio: float
-    adaptive_kernel_size: int
-    adaptive_lambda: float
-    physics_material_combine_mode: str
-    contact_sensor_update_period: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,12 +39,10 @@ class FlowCPSConfig:
 
     horizon: int
     actor_hidden_dims: tuple[int, ...]
-    critic_hidden_dims: tuple[int, ...]
     activation: str
     action_squash_scale: float
     flow_steps: int
     cps_noise_level: float
-    cps_trainable: bool
     cps_cov_rank: int
     rollout_env_steps: int
     discount_gamma: float
@@ -67,28 +52,23 @@ class FlowCPSConfig:
     policy_epochs: int
     num_mini_batches: int
     micro_batch_size: int
-    value_loss_coef: float
     policy_lr: float
     value_lr: float
     weight_decay: float
     critic_weight_decay: float
-    empirical_normalization: bool
     init_at_random_ep_len: bool
     max_grad_norm: float
     kl_early_stop_factor: float
-    advantage_normalization: str
 
 
 @dataclass(frozen=True, slots=True)
 class StylePriorConfig:
     """Temporal discriminator prior configuration used by FCAMP."""
 
-    enabled: bool
     obs_steps: int
     hidden_dims: tuple[int, ...]
     reward_scale: float
     reward_epsilon: float
-    optimizer: str
     learning_rate: float
     weight_decay: float
     epochs: int
@@ -96,31 +76,23 @@ class StylePriorConfig:
     current_buffer_size: int
     replay_size: int
     replay_samples: int
-    replay_dtype: str
-    replay_device: str
     grad_penalty: float
     logit_reg: float
     normalizer_clip: float
     reward_eval_batch_size: int
     max_updates_per_iteration: int
-    discriminator_warmup_rollouts: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class FCAMPCreditConfig:
-    mode: str
     task_weight: float
     amp_weight: float
-    integrate_amp_reward_dt: bool
-    advantage_normalization: str
-    ratio_mode: str
 
 
 @dataclass(frozen=True, slots=True)
 class FCAMPCriticConfig:
     encoder_hidden_dims: tuple[int, ...]
     head_hidden_dims: tuple[int, ...]
-    sharing: str
     task_loss_weight: float
     amp_loss_weight: float
 
@@ -141,14 +113,6 @@ class FCAMPConfig(FlowCPSConfig):
     critics: FCAMPCriticConfig
     streams: FCAMPStreamsConfig
 
-    @property
-    def amp(self) -> StylePriorConfig:
-        """Compatibility alias for older FCAMP internals."""
-        return self.style_prior
-
-
-MethodConfig: TypeAlias = FCAMPConfig
-
 
 @dataclass(frozen=True, slots=True)
 class TrainingConfig:
@@ -156,7 +120,6 @@ class TrainingConfig:
     max_updates: int
     log_every: int
     save_every: int
-    official_reset_every: int
     resume: str
     reset_optimizer_on_resume: bool
     reset_sampler_on_resume: bool
@@ -170,25 +133,10 @@ class TrainingConfig:
 
 @dataclass(frozen=True, slots=True)
 class ExperimentConfig:
-    method: MethodName
+    method: str
     environment: EnvironmentConfig
-    parameters: MethodConfig
+    parameters: FCAMPConfig
     training: TrainingConfig
-
-    @property
-    def algorithm(self) -> str:
-        """Legacy checkpoint/log alias."""
-        return self.method
-
-    @property
-    def observation_group_size(self) -> int:
-        return 1
-
-
-METHOD_CONFIGS = {
-    "fcamp": FCAMPConfig,
-}
-
 
 def _construct(cls, values: dict[str, Any]):
     names = {field.name for field in fields(cls)}
@@ -201,8 +149,6 @@ def _construct(cls, values: dict[str, Any]):
     converted = dict(values)
     for name in (
         "actor_hidden_dims",
-        "critic_hidden_dims",
-        "disc_hidden_dims",
         "hidden_dims",
         "encoder_hidden_dims",
         "head_hidden_dims",
@@ -212,17 +158,10 @@ def _construct(cls, values: dict[str, Any]):
     return cls(**converted)
 
 
-def _construct_method_config(method: str, values: dict[str, Any], source_path: Path) -> MethodConfig:
-    if method != "fcamp":
-        raise ValueError(f"Unknown method {method!r}. Only FCAMP is supported.")
+def _construct_fcamp(values: dict[str, Any]) -> FCAMPConfig:
     nested = dict(values)
-    if "style_prior" not in nested and "amp" in nested:
-        nested["style_prior"] = nested.pop("amp")
     try:
         style_prior = dict(nested["style_prior"])
-        # Preserve compatibility with configs written before the explicit
-        # discriminator warm-up lifecycle was introduced.
-        style_prior.setdefault("discriminator_warmup_rollouts", 0)
         nested["style_prior"] = _construct(StylePriorConfig, style_prior)
         nested["credit"] = _construct(FCAMPCreditConfig, dict(nested["credit"]))
         nested["critics"] = _construct(FCAMPCriticConfig, dict(nested["critics"]))
@@ -259,8 +198,6 @@ def _resolve_path(value: str, config_path: Path) -> str:
 
 def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> ExperimentConfig:
     normalized = dict(tree)
-    if "method" not in normalized and "algorithm" in normalized:
-        normalized["method"] = normalized.pop("algorithm")
     required = {"method", "environment", "parameters", "training"}
     missing = required - normalized.keys()
     unknown = normalized.keys() - required
@@ -269,32 +206,132 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
     if unknown:
         raise KeyError(f"ExperimentConfig unknown keys: {sorted(unknown)}")
     method = str(normalized["method"])
-    if method not in METHOD_CONFIGS:
-        raise ValueError(f"method must be one of {sorted(METHOD_CONFIGS)}, got {method!r}")
+    if method != "fcamp":
+        raise ValueError(f"method must be 'fcamp', got {method!r}")
     source_path = Path(source).expanduser().resolve()
     environment_values = dict(normalized["environment"])
-    environment_values.setdefault("platform_profile", "custom")
-    environment_values.setdefault("terminate_on_motion_end", False)
-    environment_values.setdefault("motion_reference_mode", "frame")
-    environment_values.setdefault("root_velocity_mode", "com")
-    environment_values.setdefault("policy_observation_mode", "tracking")
-    environment_values.setdefault("motion_end_behavior", "hold_last")
-    environment_values.setdefault("adaptive_uniform_ratio", 0.1)
-    environment_values.setdefault("adaptive_kernel_size", 1)
-    environment_values.setdefault("adaptive_lambda", 0.8)
-    environment_values.setdefault("physics_material_combine_mode", "average")
-    environment_values.setdefault("contact_sensor_update_period", "control")
     training_values = dict(normalized["training"])
-    training_values.setdefault("official_reset_every", 0)
     training_values["resume"] = _resolve_path(str(training_values["resume"]), source_path)
     config = ExperimentConfig(
         method=method,
         environment=_construct(EnvironmentConfig, environment_values),
-        parameters=_construct_method_config(method, dict(normalized["parameters"]), source_path),
+        parameters=_construct_fcamp(dict(normalized["parameters"])),
         training=_construct(TrainingConfig, training_values),
     )
     _validate(config)
     return config
+
+
+def config_from_checkpoint_dict(
+    tree: dict[str, Any],
+    source: str | Path = ".",
+) -> ExperimentConfig:
+    """Load the active FCAMP fields from an a833-compatible checkpoint."""
+
+    def require_removed(
+        section: str,
+        values: dict[str, Any],
+        expected: dict[str, Any],
+    ) -> None:
+        for name, required in expected.items():
+            if name not in values:
+                continue
+            actual = values[name]
+            if isinstance(required, tuple):
+                actual = tuple(actual)
+            if type(actual) is not type(required) or actual != required:
+                raise ValueError(
+                    f"checkpoint {section}.{name}={values[name]!r} is incompatible "
+                    f"with the fixed FCAMP value {required!r}"
+                )
+
+    def select(cls, values: dict[str, Any]) -> dict[str, Any]:
+        return {field.name: values[field.name] for field in fields(cls)}
+
+    environment_raw = dict(tree["environment"])
+    parameters_raw = dict(tree["parameters"])
+    style_raw = dict(parameters_raw["style_prior"])
+    credit_raw = dict(parameters_raw["credit"])
+    critics_raw = dict(parameters_raw["critics"])
+    training_raw = dict(tree["training"])
+    require_removed(
+        "environment",
+        environment_raw,
+        {
+            "adaptive_motion_sampling": environment_raw["reset_phase_sampling"]
+            == "adaptive",
+            "motion_reference_mode": "frame",
+            "policy_observation_mode": "tracking",
+            "physics_material_combine_mode": "average",
+            "contact_sensor_update_period": "control",
+        },
+    )
+    require_removed(
+        "parameters",
+        parameters_raw,
+        {
+            "critic_hidden_dims": (512, 256, 128),
+            "cps_trainable": True,
+            "value_loss_coef": 1.0,
+            "empirical_normalization": True,
+            "advantage_normalization": "global",
+        },
+    )
+    require_removed(
+        "parameters.style_prior",
+        style_raw,
+        {
+            "enabled": True,
+            "optimizer": "sgd",
+            "replay_dtype": "float32",
+            "replay_device": "cpu",
+            "discriminator_warmup_rollouts": 1,
+        },
+    )
+    require_removed(
+        "parameters.credit",
+        credit_raw,
+        {
+            "mode": "causal_frame",
+            "integrate_amp_reward_dt": True,
+            "advantage_normalization": "global",
+            "ratio_mode": "joint_path",
+        },
+    )
+    require_removed(
+        "parameters.critics",
+        critics_raw,
+        {"sharing": "encoder"},
+    )
+    require_removed(
+        "training",
+        training_raw,
+        {"official_reset_every": 0},
+    )
+    parameters = select(FCAMPConfig, parameters_raw)
+    parameters["style_prior"] = select(
+        StylePriorConfig,
+        style_raw,
+    )
+    parameters["credit"] = select(
+        FCAMPCreditConfig,
+        credit_raw,
+    )
+    parameters["critics"] = select(
+        FCAMPCriticConfig,
+        critics_raw,
+    )
+    parameters["streams"] = select(
+        FCAMPStreamsConfig,
+        dict(parameters_raw["streams"]),
+    )
+    active = {
+        "method": tree["method"],
+        "environment": select(EnvironmentConfig, environment_raw),
+        "parameters": parameters,
+        "training": select(TrainingConfig, training_raw),
+    }
+    return config_from_dict(active, source)
 
 
 def load_config(config_path: str | Path, overrides: list[str] | None = None) -> ExperimentConfig:
@@ -322,36 +359,17 @@ def _validate(config: ExperimentConfig) -> None:
     if env.reset_phase_sampling not in {
         "adaptive",
         "uniform",
-        "continuous_uniform",
         "rsi",
         "zero",
     }:
         raise ValueError(
             "environment.reset_phase_sampling must be one of "
-            "adaptive/uniform/continuous_uniform/rsi/zero"
+            "adaptive/uniform/rsi/zero"
         )
     if env.rsi_keyframe_count < 1:
         raise ValueError("environment.rsi_keyframe_count must be positive")
-    if env.adaptive_motion_sampling != (env.reset_phase_sampling == "adaptive"):
-        raise ValueError(
-            "environment.adaptive_motion_sampling must match adaptive reset_phase_sampling"
-        )
-    if env.motion_reference_mode != "frame":
-        raise ValueError("environment.motion_reference_mode must be frame")
     if env.root_velocity_mode not in {"com", "link"}:
         raise ValueError("environment.root_velocity_mode must be com or link")
-    if env.policy_observation_mode != "tracking":
-        raise ValueError("environment.policy_observation_mode must be tracking")
-    if env.motion_end_behavior not in {"hold_last", "resample_command"}:
-        raise ValueError("environment.motion_end_behavior must be hold_last or resample_command")
-    if env.physics_material_combine_mode not in {"average", "multiply"}:
-        raise ValueError("environment.physics_material_combine_mode must be average or multiply")
-    if env.contact_sensor_update_period not in {"control", "physics"}:
-        raise ValueError("environment.contact_sensor_update_period must be control or physics")
-    if not (0.0 < env.adaptive_uniform_ratio <= 1.0):
-        raise ValueError("environment.adaptive_uniform_ratio must be in (0, 1]")
-    if env.adaptive_kernel_size < 1 or not (0.0 < env.adaptive_lambda <= 1.0):
-        raise ValueError("environment adaptive kernel settings are invalid")
     if env.platform_profile == "g1_largebox_50hz":
         if env.task != "largebox_plane":
             raise ValueError("g1_largebox_50hz requires environment.task=largebox_plane")
@@ -365,15 +383,10 @@ def _validate(config: ExperimentConfig) -> None:
         raise ValueError("training.max_updates must be positive")
     if train.log_every < 1:
         raise ValueError("training.log_every must be positive")
-    if train.official_reset_every < 0:
-        raise ValueError("training.official_reset_every must be non-negative")
     resolve_task(env.task)
-    if config.method == "fcamp":
-        if env.num_envs < 2:
-            raise ValueError("FCAMP requires at least two environments for two streams")
-        if env.reset_phase_sampling == "continuous_uniform":
-            raise ValueError("FCAMP fixed-window reset history requires integer phases")
-        _validate_fcamp(config.parameters)
+    if env.num_envs < 2:
+        raise ValueError("FCAMP requires at least two environments for two streams")
+    _validate_fcamp(config.parameters)
 
 def _validate_fcamp(params: FCAMPConfig) -> None:
     if params.horizon < 1:
@@ -388,12 +401,10 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError("Flow-CPS requires parameters.cps_noise_level in (0, 1)")
     if params.cps_cov_rank < 0:
         raise ValueError("Flow-CPS requires parameters.cps_cov_rank >= 0")
-    norm = str(params.advantage_normalization).lower()
-    if norm not in {"per_prefix", "global", "none"}:
-        raise ValueError(
-            "parameters.advantage_normalization must be one of "
-            f"'per_prefix', 'global', 'none'; got {params.advantage_normalization!r}"
-        )
+    if params.policy_lr <= 0.0:
+        raise ValueError("Flow-CPS requires parameters.policy_lr > 0")
+    if params.value_lr <= 0.0:
+        raise ValueError("Flow-CPS requires parameters.value_lr > 0")
 
     style = params.style_prior
     credit = params.credit
@@ -401,22 +412,16 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
     streams = params.streams
     if not (0.0 < streams.phase0_fraction < 1.0):
         raise ValueError("FCAMP streams.phase0_fraction must be in (0, 1)")
-    if not style.enabled:
-        raise ValueError("FCAMP requires parameters.style_prior.enabled=true")
     if style.obs_steps < 2:
         raise ValueError("FCAMP requires style_prior.obs_steps >= 2")
     if not style.hidden_dims:
         raise ValueError("FCstyle discriminator hidden_dims cannot be empty")
     if style.reward_scale <= 0.0 or not (0.0 < style.reward_epsilon < 1.0):
         raise ValueError("FCAMP style reward scale/epsilon are invalid")
-    if style.optimizer.lower() not in {"sgd", "adam", "adamw"}:
-        raise ValueError("FCAMP style_prior.optimizer must be sgd, adam, or adamw")
     if style.learning_rate <= 0.0 or style.batch_size < 2 or style.epochs < 1:
         raise ValueError("FCstyle discriminator optimizer/batch/epoch settings are invalid")
     if style.max_updates_per_iteration < 1:
         raise ValueError("FCAMP max_updates_per_iteration must be positive")
-    if style.discriminator_warmup_rollouts not in {0, 1}:
-        raise ValueError("FCAMP discriminator_warmup_rollouts must be 0 or 1")
     if style.current_buffer_size < style.batch_size:
         raise ValueError("FCAMP style_prior.current_buffer_size must be >= batch_size")
     current_phase0 = int(
@@ -432,10 +437,6 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         or style.replay_samples > style.replay_size
     ):
         raise ValueError("FCAMP complete-window replay settings are invalid")
-    if style.replay_dtype.lower() != "float32":
-        raise ValueError("FCAMP requires style_prior.replay_dtype=float32")
-    if style.replay_device.lower() != "cpu":
-        raise ValueError("FCAMP complete-window replay must use replay_device=cpu")
     phase0_capacity = int(round(style.replay_size * streams.phase0_fraction))
     phase0_replace = int(round(style.replay_samples * streams.phase0_fraction))
     if not (
@@ -448,25 +449,14 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
         raise ValueError(
             "FCAMP replay size/replacement quotas cannot realize both streams"
         )
-    if credit.mode not in {"causal_frame", "chunk_shared"}:
-        raise ValueError("FCAMP credit.mode must be causal_frame or chunk_shared")
-    if credit.advantage_normalization != "global":
-        raise ValueError(
-            "FCAMP actor advantage must normalize the weighted reward mixture "
-            "once globally"
-        )
-    if not credit.integrate_amp_reward_dt:
-        raise ValueError(
-            "FCAMP requires credit.integrate_amp_reward_dt=true so the style "
-            "reward has the same control-frequency semantics as task reward"
-        )
-    if credit.ratio_mode != "joint_path":
-        raise ValueError("FCAMP requires credit.ratio_mode=joint_path")
     if credit.task_weight < 0.0 or credit.amp_weight < 0.0:
         raise ValueError("FCstyle reward weights must be non-negative")
     if credit.task_weight == 0.0 and credit.amp_weight == 0.0:
         raise ValueError("FCAMP requires at least one non-zero reward weight")
-    if critics.sharing != "encoder":
-        raise ValueError("Full FCAMP requires critics.sharing=encoder")
-    if not critics.encoder_hidden_dims or not critics.head_hidden_dims:
-        raise ValueError("FCAMP critic encoder/head dimensions cannot be empty")
+    if (
+        not critics.encoder_hidden_dims
+        or not critics.head_hidden_dims
+        or any(width < 1 for width in critics.encoder_hidden_dims)
+        or any(width < 1 for width in critics.head_hidden_dims)
+    ):
+        raise ValueError("FCAMP critic encoder/head dimensions must be positive")

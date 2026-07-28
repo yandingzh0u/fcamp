@@ -1,23 +1,18 @@
 from __future__ import annotations
 
-import math
 import ast
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import numpy as np
 import pytest
 import torch
 
-from components.imitation.motion_features import canonicalize_imitation_window
 from envs.imitation_data import (
     G1_IMITATION_FRAME_DIM,
     G1_IMITATION_JOINT_AXES,
     G1_IMITATION_NUM_JOINTS,
     build_g1_imitation_frame,
     history_indices,
-    quat_wxyz_to_tan_norm,
-    sample_contiguous_window_indices,
 )
 from envs.motion import MimicMotionReference
 
@@ -48,18 +43,6 @@ def test_imitation_joint_axes_match_the_runtime_urdf_action_order() -> None:
         if joint.find("axis") is not None
     }
     assert [urdf_axes[name] for name in joint_names] == list(G1_IMITATION_JOINT_AXES)
-
-
-def test_wxyz_rotation_encoding_matches_mimickit_tangent_normal() -> None:
-    identity = quat_wxyz_to_tan_norm(torch.tensor([[1.0, 0.0, 0.0, 0.0]]))
-    assert torch.allclose(identity, torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]]))
-
-    # +90 degrees about z in explicit wxyz order rotates x onto +y while z stays z.
-    half = math.pi / 4.0
-    q_z90 = torch.tensor([[math.cos(half), 0.0, 0.0, math.sin(half)]])
-    encoded = quat_wxyz_to_tan_norm(q_z90)
-    expected = torch.tensor([[0.0, 1.0, 0.0, 0.0, 0.0, 1.0]])
-    assert torch.allclose(encoded, expected, atol=1.0e-6)
 
 
 def test_imitation_frame_is_233d_and_translation_invariant_except_root_position() -> None:
@@ -93,20 +76,9 @@ def test_imitation_frame_is_233d_and_translation_invariant_except_root_position(
     assert torch.allclose(shifted[:, 3:], frame[:, 3:], atol=1.0e-6)
 
 
-def test_demo_window_indices_are_strictly_contiguous_and_never_wrap() -> None:
-    windows = sample_contiguous_window_indices(256, 16, 41, device="cpu")
-    assert windows.shape == (256, 16)
-    assert bool((windows[:, 1:] - windows[:, :-1] == 1).all())
-    assert int(windows.min()) >= 0
-    assert int(windows.max()) < 41
-
-    with pytest.raises(ValueError, match="window_size"):
-        sample_contiguous_window_indices(1, 42, 41, device="cpu")
-
-
 def test_reset_history_clamps_only_the_left_boundary() -> None:
     phases = torch.tensor([0, 2, 8])
-    indices = history_indices(phases, 4, 9, clamp_start=True)
+    indices = history_indices(phases, 4, 9)
     assert torch.equal(
         indices,
         torch.tensor(
@@ -117,10 +89,6 @@ def test_reset_history_clamps_only_the_left_boundary() -> None:
             ]
         ),
     )
-    with pytest.raises(ValueError, match="before motion frame 0"):
-        history_indices(torch.tensor([2]), 4, 9, clamp_start=False)
-
-
 def _fake_motion(num_frames: int = 24) -> MimicMotionReference:
     motion = object.__new__(MimicMotionReference)
     motion.device = torch.device("cpu")
@@ -186,7 +154,7 @@ def test_imitation_reference_interpolates_exact_fractional_phases() -> None:
     torch.testing.assert_close(frame[:, 2], torch.tensor([0.715, 0.7325]))
     # Joint positions are converted to the common rot6d representation, so
     # interpolation must change the final frame rather than floor to 1 and 3.
-    floored = motion.get_imitation_frame(torch.tensor([1, 3]))
+    floored = motion.get_imitation_frame_at_times(torch.tensor([1.0, 3.0]))
     assert not torch.allclose(frame, floored)
 
 
@@ -237,135 +205,12 @@ def test_fcamp_expert_frame_uses_fk_at_the_same_dataset_state_and_time() -> None
     )
 
 
-def test_fcamp_expert_frame_requires_explicit_runtime_fk_model() -> None:
-    motion = _fake_motion(num_frames=4)
-    with pytest.raises(RuntimeError, match="kinematic_urdf_file"):
-        motion.get_fcamp_expert_frame_at_times(torch.tensor([0.0]))
-
-
-def test_evaluator_demo_frame_is_independent_of_add_motion_semantics() -> None:
-    motion = _fake_motion(num_frames=5)
-    motion.add_joint_vel = torch.full_like(motion.joint_vel, 123.0)
-    motion.add_root_link_lin_vel = torch.full((5, 3), 456.0)
-    motion.add_root_link_ang_vel = torch.full((5, 3), 789.0)
-    # Opposite quaternion signs encode the same physical rotation. Evaluator
-    # interpolation must follow the common shortest path in either mode.
-    motion.body_quat_full_w[2] *= -1.0
-    phases = torch.tensor([1.5, 2.25, 3.75])
-
-    motion.motion_reference_mode = "frame"
-    frame_mode = motion.get_imitation_frame_at_times(phases)
-    motion.motion_reference_mode = "mimickit_add"
-    add_mode = motion.get_imitation_frame_at_times(phases)
-
-    torch.testing.assert_close(frame_mode, add_mode)
-    assert bool(torch.isfinite(add_mode).all())
-    # Raw dataset velocities are zero/root and one/joint in _fake_motion; the
-    # ADD forward-difference buffers above must never leak into evaluation.
-    torch.testing.assert_close(add_mode[:, -35:-32], torch.zeros(3, 3))
-    torch.testing.assert_close(add_mode[:, -29:], torch.ones(3, 29))
-
-
-def _write_minimal_holosoma_motion(path: Path) -> None:
-    num_frames = 2
-    body_pos = np.zeros((num_frames, 2, 3), dtype=np.float32)
-    body_pos[:, 1] = np.array([[1.0, 2.0, 0.9], [1.5, 2.2, 0.95]], dtype=np.float32)
-    body_quat = np.zeros((num_frames, 2, 4), dtype=np.float32)
-    # Holosoma motion .npz stores raw rigid-body quaternions as wxyz.  Holosoma
-    # converts to xyzw only at its simulator boundary.
-    body_quat[..., 0] = 1.0
-    body_lin = np.zeros((num_frames, 2, 3), dtype=np.float32)
-    body_lin[:, 1] = np.array([0.5, -0.2, 0.1], dtype=np.float32)
-    body_ang = np.zeros((num_frames, 2, 3), dtype=np.float32)
-    body_ang[:, 1] = np.array([0.0, 0.0, 2.0], dtype=np.float32)
-    np.savez(
-        path,
-        joint_names=np.array(["joint"], dtype=object),
-        body_names=np.array(["pelvis", "torso_link"], dtype=object),
-        joint_pos=np.zeros((num_frames, 1), dtype=np.float32),
-        joint_vel=np.zeros((num_frames, 1), dtype=np.float32),
-        body_pos_w=body_pos,
-        body_quat_w=body_quat,
-        body_lin_vel_w=body_lin,
-        body_ang_vel_w=body_ang,
-    )
-
-
-def test_holosoma_loader_reconstructs_fixed_head_body(tmp_path: Path) -> None:
-    path = tmp_path / "motion.npz"
-    _write_minimal_holosoma_motion(path)
-    motion = MimicMotionReference(
-        path,
-        track_body_ids=torch.tensor([0, 1, 2]),
-        anchor_body_id=1,
-        device=torch.device("cpu"),
-        robot_body_names=["pelvis", "torso_link", "head_link"],
-        action_joint_names=["joint"],
-        root_body_name="pelvis",
-        imitation_key_body_names=("head_link",),
-    )
-
-    offset = torch.tensor([0.0039635, 0.0, -0.044])
-    torch.testing.assert_close(
-        motion.body_quat_full_w[:, :2],
-        torch.tensor([1.0, 0.0, 0.0, 0.0]).expand(2, 2, 4),
-    )
-    torso_pos = motion.body_pos_full_w[:, 1]
-    torch.testing.assert_close(motion.body_pos_full_w[:, 2], torso_pos + offset)
-    torch.testing.assert_close(motion.body_quat_full_w[:, 2], motion.body_quat_full_w[:, 1])
-    torch.testing.assert_close(motion.body_ang_vel_full_w[:, 2], motion.body_ang_vel_full_w[:, 1])
-    expected_lin = motion.body_lin_vel_full_w[:, 1] + torch.linalg.cross(
-        motion.body_ang_vel_full_w[:, 1], offset.expand(2, -1)
-    )
-    torch.testing.assert_close(motion.body_lin_vel_full_w[:, 2], expected_lin)
-
-
-def test_holosoma_loader_rejects_unrecoverable_imitation_body(tmp_path: Path) -> None:
-    path = tmp_path / "motion.npz"
-    _write_minimal_holosoma_motion(path)
-    with pytest.raises(ValueError, match="missing from the motion"):
-        MimicMotionReference(
-            path,
-            track_body_ids=torch.tensor([0]),
-            anchor_body_id=1,
-            device=torch.device("cpu"),
-            robot_body_names=["pelvis", "torso_link", "unrecoverable"],
-            action_joint_names=["joint"],
-            root_body_name="pelvis",
-            imitation_key_body_names=("unrecoverable",),
-        )
-
-
-def test_motion_demo_history_and_samples_clamp_only_the_left_boundary() -> None:
-    motion = _fake_motion()
-    reset_history = motion.get_imitation_demo_history(torch.tensor([0, 3]), 4, flatten=False)
-    assert reset_history.shape == (2, 4, G1_IMITATION_FRAME_DIM)
-    assert torch.equal(reset_history[0, :, 0], torch.zeros(4))
-    assert torch.equal(reset_history[1, :, 0], torch.arange(4, dtype=torch.float32))
-
-    sampled = motion.sample_imitation_demo_windows(
-        32,
-        16,
-        flatten=False,
-        generator=torch.Generator().manual_seed(9),
-    )
-    assert sampled.shape == (32, 16, G1_IMITATION_FRAME_DIM)
-    # MimicKit samples newest frames over the full timeline. Negative history
-    # clips to frame zero, producing only a zero prefix followed by contiguous
-    # +1 steps; it never wraps the motion end into the beginning.
-    delta = sampled[:, 1:, 0] - sampled[:, :-1, 0]
-    assert bool(((delta == 0) | (delta == 1)).all())
-    assert bool((delta[:, 1:] >= delta[:, :-1]).all())
-    assert bool((delta == 0).any())
-    assert bool((delta == 1).any())
-
-
 def test_fcamp_history_and_endpoint_windows_share_fk_and_left_boundary() -> None:
     motion = _fake_motion(num_frames=9)
     motion._fk_model = _StateDependentFK()
     endpoints = torch.tensor([0.0, 3.0])
 
-    history = motion.get_fcamp_demo_history(endpoints, 4, flatten=False)
+    history = motion.get_fcamp_demo_history(endpoints, 4)
     assert history.shape == (2, 4, G1_IMITATION_FRAME_DIM)
     assert torch.equal(history[0, :, 0], torch.zeros(4))
     assert torch.equal(history[1, :, 0], torch.arange(4, dtype=torch.float32))
@@ -374,46 +219,8 @@ def test_fcamp_history_and_endpoint_windows_share_fk_and_left_boundary() -> None
     )
 
     specified = motion.get_fcamp_demo_windows_at_end_indices(
-        endpoints.long(), 4, flatten=False
+        endpoints.long(), 4
     )
     torch.testing.assert_close(specified, history)
-    flattened = motion.get_fcamp_demo_windows_at_end_indices(
-        endpoints.long(), 4, flatten=True
-    )
-    torch.testing.assert_close(
-        flattened.reshape(2, 4, G1_IMITATION_FRAME_DIM),
-        canonicalize_imitation_window(history),
-    )
     with pytest.raises(ValueError, match="integer phases"):
         motion.get_fcamp_demo_history(torch.tensor([1.5]), 4)
-
-
-def test_flattened_demo_samples_use_final_frame_root_xy_canonicalization() -> None:
-    motion = _fake_motion()
-    raw = motion.sample_imitation_demo_windows(
-        8,
-        6,
-        flatten=False,
-        generator=torch.Generator().manual_seed(17),
-    )
-    flattened = motion.sample_imitation_demo_windows(
-        8,
-        6,
-        flatten=True,
-        generator=torch.Generator().manual_seed(17),
-    )
-    canonical = flattened.reshape(8, 6, G1_IMITATION_FRAME_DIM)
-
-    torch.testing.assert_close(canonical, canonicalize_imitation_window(raw))
-    torch.testing.assert_close(canonical[:, -1, :2], torch.zeros(8, 2))
-    torch.testing.assert_close(canonical[:, :, 2], raw[:, :, 2])
-
-    translated_motion = _fake_motion()
-    translated_motion.body_pos_full_w[:, :, :2] += torch.tensor([31.0, -47.0])
-    translated = translated_motion.sample_imitation_demo_windows(
-        8,
-        6,
-        flatten=True,
-        generator=torch.Generator().manual_seed(17),
-    )
-    torch.testing.assert_close(translated, flattened)

@@ -6,13 +6,6 @@ import math
 import torch
 
 
-def normalized_kl(raw_kl, kl_units: int) -> float:
-    """Convert a raw (chunk-level) KL into a per-control-step KL."""
-    units = max(1, int(kl_units))
-    value = float(raw_kl.item() if torch.is_tensor(raw_kl) else raw_kl)
-    return value / units
-
-
 def adaptive_lr_from_kl(
     raw_kl,
     kl_units: int,

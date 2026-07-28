@@ -10,12 +10,13 @@ from components.imitation.style_reward import discriminator_style_reward
 from components.imitation.window_pipeline import TemporalWindowPipeline
 from components.normalization.running_stats import RunningNormalizer
 from components.rollout.flow_cps_base import FlowCPSBase
+from components.rollout.fcamp_diagnostics import FCAMPDiagnosticsMixin
 from components.rollout.training_streams import (
     CURRICULUM_STREAM,
     PHASE0_STREAM,
 )
 from method.fcamp import FCAMP, FCAMP_CHECKPOINT_CONTRACT
-from models.mlp_actor_critic import EmpiricalNormalization
+from components.normalization.running_stats import EmpiricalNormalization
 from models.style_discriminator import StyleDiscriminator
 
 
@@ -38,13 +39,13 @@ def test_fcamp_actor_adapts_lr_from_masked_joint_path_kl_before_step() -> None:
     algo.cfg = SimpleNamespace(
         flow_steps=2,
         clip_range=0.2,
-        credit=SimpleNamespace(ratio_mode="joint_path"),
         max_grad_norm=1.0,
         policy_epochs=1,
         desired_kl=0.01,
         kl_early_stop_factor=100.0,
         num_mini_batches=1,
         micro_batch_size=0,
+        streams=SimpleNamespace(phase0_fraction=0.1),
     )
     algo._policy = torch.nn.Linear(1, 1, bias=False)
     algo.learning_rate = 3.0e-4
@@ -79,12 +80,16 @@ def test_fcamp_actor_adapts_lr_from_masked_joint_path_kl_before_step() -> None:
     algo._update_adaptive_learning_rates = update_lr
     valid = torch.tensor([[[True, True], [True, False]]])
     rollout = {
-        "actions": torch.zeros(1, 2, 2, 1),
         "actor_obs": actor_obs.view(1, 2, 1),
         "latents": torch.zeros(1, 2, 3, 2),
         "old_log_probs": torch.zeros(1, 2, 2, 2),
         "advantages": torch.ones(1, 2, 2),
         "valid": valid,
+        "stream_ids": torch.full(
+            (2,),
+            PHASE0_STREAM,
+            dtype=torch.int8,
+        ),
     }
 
     metrics = algo._actor_update(rollout)
@@ -102,7 +107,7 @@ def test_fcamp_actor_adapts_lr_from_masked_joint_path_kl_before_step() -> None:
 
 
 def test_fcamp_owns_the_production_updater() -> None:
-    assert FCAMP.update is not FlowCPSBase.update
+    assert FCAMP.update is FCAMPDiagnosticsMixin.update
     assert not inspect.isabstract(FCAMP)
 
 
@@ -156,7 +161,7 @@ def test_amp_reward_uses_full_independent_discriminator() -> None:
     torch.manual_seed(5)
     algo = object.__new__(FCAMP)
     algo.cfg = SimpleNamespace(
-        amp=SimpleNamespace(
+        style_prior=SimpleNamespace(
             reward_eval_batch_size=1,
             reward_scale=2.0,
             reward_epsilon=1.0e-4,
@@ -185,10 +190,9 @@ def test_amp_reward_uses_full_independent_discriminator() -> None:
 def test_discriminator_update_cannot_change_deterministic_actor_action() -> None:
     torch.manual_seed(8)
     algo = object.__new__(FCAMP)
-    algo.base_actor_obs_dim = 3
     algo.actor_obs_dim = 3
     algo.num_act = 1
-    algo.empirical_normalization = False
+    algo.actor_obs_normalizer = EmpiricalNormalization(3, "cpu")
     algo.discriminator = StyleDiscriminator(6, hidden_dims=(4,))
     algo.disc_normalizer = RunningNormalizer(6, device="cpu")
     algo._flow_mean_actions = lambda actor_obs, prev_action: (
@@ -283,7 +287,9 @@ def test_rollout_snapshot_optimizes_actor_and_critic_before_discriminator() -> N
     algo = object.__new__(FCAMP)
     algo.disc_version = 7
     algo.disc_normalizer = SimpleNamespace(count=torch.tensor(12.0))
-    algo.empirical_normalization = False
+    algo.actor_obs_normalizer = object()
+    algo.prefix_context_normalizer = object()
+    algo._update_empirical_normalizer_chunked = lambda *_args, **_kwargs: None
     events: list[str] = []
 
     def actor_update(_rollout):
@@ -315,6 +321,11 @@ def test_rollout_snapshot_optimizes_actor_and_critic_before_discriminator() -> N
         "disc_normalizer_count_used": 12.0,
         "amp_valid": torch.tensor([[[False, True]]]),
         "imitation_window_age": torch.tensor([[[-1, 16]]]),
+        "valid": torch.ones(1, 1, 2, dtype=torch.bool),
+        "stream_ids": torch.tensor([PHASE0_STREAM], dtype=torch.int8),
+        "actor_obs_raw": torch.zeros(1, 1, 1),
+        "contexts_raw": torch.zeros(1, 1, 2, 1),
+        "next_contexts_raw": torch.zeros(1, 1, 2, 1),
     }
 
     result = algo._optimize_rollout_snapshot(rollout, update_idx=3)
@@ -328,7 +339,9 @@ def test_no_current_disc_window_does_not_skip_actor_or_critic() -> None:
     algo = object.__new__(FCAMP)
     algo.disc_version = 2
     algo.disc_normalizer = SimpleNamespace(count=torch.tensor(0.0))
-    algo.empirical_normalization = False
+    algo.actor_obs_normalizer = object()
+    algo.prefix_context_normalizer = object()
+    algo._update_empirical_normalizer_chunked = lambda *_args, **_kwargs: None
     events: list[str] = []
     algo._actor_update = lambda _rollout: events.append("actor") or {}
     algo._critic_update = lambda _rollout: events.append("critic") or {}
@@ -345,6 +358,11 @@ def test_no_current_disc_window_does_not_skip_actor_or_critic() -> None:
         "disc_normalizer_count_used": 0.0,
         "amp_valid": torch.zeros(1, 1, 2, dtype=torch.bool),
         "imitation_window_age": torch.full((1, 1, 2), -1, dtype=torch.long),
+        "valid": torch.ones(1, 1, 2, dtype=torch.bool),
+        "stream_ids": torch.tensor([PHASE0_STREAM], dtype=torch.int8),
+        "actor_obs_raw": torch.zeros(1, 1, 1),
+        "contexts_raw": torch.zeros(1, 1, 2, 1),
+        "next_contexts_raw": torch.zeros(1, 1, 2, 1),
     }
 
     algo._optimize_rollout_snapshot(rollout, update_idx=1)
@@ -374,7 +392,7 @@ def test_discriminator_trains_on_old_normalizer_then_commits_next_snapshot() -> 
     algo = object.__new__(FCAMP)
     algo.env = SimpleNamespace(device=torch.device("cpu"))
     algo.cfg = SimpleNamespace(
-        amp=SimpleNamespace(
+        style_prior=SimpleNamespace(
             batch_size=2,
             epochs=1,
             max_updates_per_iteration=1,
@@ -430,13 +448,25 @@ def test_discriminator_trains_on_old_normalizer_then_commits_next_snapshot() -> 
 def test_chunked_context_normalizer_matches_one_shot_valid_moments() -> None:
     torch.manual_seed(19)
     algo = object.__new__(FCAMP)
-    algo.cfg = SimpleNamespace(micro_batch_size=3)
+    algo.cfg = SimpleNamespace(
+        micro_batch_size=3,
+        streams=SimpleNamespace(phase0_fraction=0.1),
+    )
     chunked = EmpiricalNormalization(4, "cpu")
     expected = EmpiricalNormalization(4, "cpu")
     samples = torch.randn(2, 5, 3, 4)
     valid = torch.rand(2, 5, 3) > 0.3
 
-    algo._update_empirical_normalizer_chunked(chunked, samples, valid)
+    algo._update_empirical_normalizer_chunked(
+        chunked,
+        samples,
+        valid,
+        stream_labels=torch.full(
+            valid.shape,
+            PHASE0_STREAM,
+            dtype=torch.int8,
+        ),
+    )
     expected._update(samples.reshape(-1, 4)[valid.reshape(-1)])
 
     assert int(chunked.count.item()) == int(valid.sum().item())

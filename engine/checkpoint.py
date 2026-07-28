@@ -9,6 +9,8 @@ import shutil
 
 import torch
 
+from .config import config_from_checkpoint_dict
+
 
 _RESUME_ENV_KEYS = (
     "platform_profile",
@@ -25,42 +27,20 @@ _RESUME_ENV_KEYS = (
     "reset_noise",
     "interval_pushes",
     "observation_noise",
-    "adaptive_motion_sampling",
     "adaptive_num_bins",
     "adaptive_alpha",
     "adaptive_predecessor_ratio",
     "adaptive_predecessor_lookback_bins",
-    "adaptive_uniform_ratio",
-    "adaptive_kernel_size",
-    "adaptive_lambda",
-    "terminate_on_motion_end",
-    "motion_reference_mode",
     "root_velocity_mode",
-    "policy_observation_mode",
-    "motion_end_behavior",
     "action_rate_weight",
-    "physics_material_combine_mode",
-    "contact_sensor_update_period",
 )
-
-_RESUME_ENV_DEFAULTS = {
-    "adaptive_uniform_ratio": 0.1,
-    "adaptive_kernel_size": 1,
-    "adaptive_lambda": 0.8,
-    "policy_observation_mode": "tracking",
-    "motion_end_behavior": "hold_last",
-    "physics_material_combine_mode": "average",
-    "contact_sensor_update_period": "control",
-}
-
 
 def _resume_signature(config: dict) -> dict:
     environment = config.get("environment", {})
     return {
-        "method": config.get("method", config.get("algorithm")),
+        "method": config.get("method"),
         "environment": {
-            key: environment.get(key, _RESUME_ENV_DEFAULTS.get(key))
-            for key in _RESUME_ENV_KEYS
+            key: environment.get(key) for key in _RESUME_ENV_KEYS
         },
         "parameters": config.get("parameters"),
     }
@@ -157,7 +137,9 @@ class Checkpointer:
         saved_config = payload.get("config")
         if saved_config is not None:
             current_signature = _resume_signature(asdict(t.cfg))
-            saved_signature = _resume_signature(saved_config)
+            saved_signature = _resume_signature(
+                asdict(config_from_checkpoint_dict(saved_config))
+            )
             if saved_signature != current_signature:
                 raise ValueError(
                     "Checkpoint training semantics do not match the current config; "
@@ -207,11 +189,7 @@ class Checkpointer:
         except Exception as exc:
             print(f"[CHECKPOINT] WARN: could not restore RNG state: {exc}", flush=True)
 
-        reset_after_resume = getattr(t.algo, "reset_after_resume", None)
-        if callable(reset_after_resume):
-            resumed_observation = reset_after_resume()
-            if resumed_observation is not None:
-                t.current_observation = resumed_observation
+        t.current_observation = t.algo.reset_after_resume()
 
         t.start_update = int(payload.get("update_idx", 0)) + 1
         completed_updates = t.start_update - 1

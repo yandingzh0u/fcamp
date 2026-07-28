@@ -38,7 +38,6 @@ def main() -> None:
     from engine.trainer import CoreTrainer
     from envs.robots.g1 import G1_29DOF_ACTION_NAMES, G1_LOCAL_URDF_PATH
     from envs.tasks import resolve_task
-    from method import load_method_class
 
     run_name = args_cli.run_name or f"{cfg.method}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir = REPO_ROOT / "runs" / run_name
@@ -126,7 +125,7 @@ def main() -> None:
     print(f"[RUN] resolved_config_sha256={resolved['resolved_config_sha256']}", flush=True)
     print(f"[RUN] source_snapshot_sha256={snapshot_sha256}", flush=True)
 
-    trainer = CoreTrainer(simulation_app, cfg, load_method_class(cfg.method), run_dir / "checkpoints")
+    trainer = CoreTrainer(simulation_app, cfg, run_dir / "checkpoints")
     try:
         if args_cli.validate_only:
             trainer.validate_only()
