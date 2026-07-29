@@ -427,6 +427,17 @@ class FCAMPDiagnosticsMixin:
             flush=True,
         )
         print(
+            "[DISC_ENDPOINT] "
+            f"expert_n={metrics.get('disc_endpoint/expert_train_sample_count', 0.0):.0f} "
+            f"expert_uniform_tv={metrics.get('disc_endpoint/expert_train_uniform_tv', float('nan')):.5f} "
+            f"expert_uniform_max={metrics.get('disc_endpoint/expert_train_max_abs_uniform_error', float('nan')):.5f} "
+            f"current_expert_tv={metrics.get('disc_endpoint/current_train_expert_train_tv', float('nan')):.5f} "
+            f"replay_expert_tv={metrics.get('disc_endpoint/replay_train_expert_train_tv', float('nan')):.5f} "
+            f"norm_expert_n={metrics.get('disc_norm/expert_endpoint_sample_count', 0.0):.0f} "
+            f"norm_expert_uniform_tv={metrics.get('disc_norm/expert_endpoint_uniform_tv', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
             "[FCAMP_CONTRACT] "
             f"fk_max={metrics.get('disc_contract/fk_alignment_abs_max', float('nan')):.3e} "
             f"policy_action_violation={metrics.get('act/policy_bound_violation_max', float('nan')):.3e} "
@@ -481,6 +492,8 @@ class FCAMPDiagnosticsMixin:
             f"critic_contract={FCAMP_CHECKPOINT_CONTRACT['critic_contract']} "
             f"reset_contract={FCAMP_CHECKPOINT_CONTRACT['reset_contract']} "
             f"expert_velocity_contract={FCAMP_CHECKPOINT_CONTRACT['expert_velocity_contract']} "
+            f"expert_sampling_contract={FCAMP_CHECKPOINT_CONTRACT['expert_sampling_contract']} "
+            f"expert_sampling_seed={self.expert_sampling_seed} "
             f"validation_contract={FCAMP_CHECKPOINT_CONTRACT['validation_contract']} "
             f"ppo_contract={FCAMP_CHECKPOINT_CONTRACT['ppo_contract']} "
             f"phase0_trajectory_attempt_stream={self.cfg.streams.phase0_fraction:.2f}",

@@ -1,0 +1,871 @@
+[RUN] dir=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800
+[RUN] log_file=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/logs/train.log
+[RUN] method=fcamp task=largebox_plane seed=0
+[RUN] resolved_config_sha256=2c021f113a55a5ac0f8a554dc9f7898118afdbcb18b0a3cf911638d843c8bc01
+[RUN] source_snapshot_sha256=2a20cacdbd60e6a37e675263b3cb062e9b73a2344a8d7a1732d2eaf39b5ee8de
+[INFO] IsaacLab logging to file: /tmp/isaaclab_2026-07-29_11-57-19.log
+[METRICS] jsonl=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/logs/metrics.jsonl tensorboard=True
+[METHOD] name=fcamp actor=causal_flow_cps prior=temporal_discriminator reward=pure_amp credit=causal_frame critic=scalar_flow
+[ARCH] task=largebox_plane actor_obs=260 actor_input=self_state,last_action phase=False target=False discriminator_in_actor=False prefix_context=985 action_dim=29 H=4 W_D=16 imitation_frame=233 imitation_window=3728
+[CREDIT] head=amp credit=causal_frame advantage_norm=global ratio_mode=joint_path task_weight=0 disc_weight=1 amp_dt=True
+[STYLE_PRIOR] discriminator=standard_mlp hidden=[1024, 512] BCE=True GP=10.0 replay=200000 EMA=False policy_conditioning=False motion_end_terminal=True replay_mode=complete_window_stratified fcamp_schema=19 action_contract=residual_absolute_v1 actor_observation_contract=self_state_last_action_v1 reward_contract=pure_amp_dt_v1 critic_contract=scalar_amp_flow_v1 reset_contract=phase_reference_link_velocity_v2 expert_velocity_contract=npz_root_link_world_v1 expert_sampling_contract=independent_uniform_integer_disc_and_norm_v1 expert_sampling_seed=301776063824 validation_contract=tracking_primary_v1 ppo_contract=fcamp_joint_flow_path_sum_v1 phase0_trajectory_attempt_stream=0.10
+[INFO] checkpoint_dir=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/checkpoints
+/home/y/miniconda3/envs/env_isaaclab/lib/python3.11/site-packages/torch/autograd/graph.py:824: UserWarning: Attempting to run cuBLAS, but there was no current CUDA context! Attempting to set the primary context... (Triggered internally at /pytorch/aten/src/ATen/cuda/CublasHandlePool.cpp:181.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+[WARMUP] env_transitions=196608 time=12.211s
+[UPDATE] 10/500 amp=0.64096 done=0.04043 ep_len=21.08
+[FCAMP] policy=-0.01146 kl=0.017927 ratio=0.9988 clip=0.2614 grad=0.2162 lr=0.001012
+[SAMPLER_PHASE] start_mean=109.48 start_min=0 start_max=323 top_bin=0 top_prob=0.35279 entropy=0.90248 failed_sum=68.083
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.099 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=17.0 curr_fail_p50=118.0 phase0_inflight_p50=8.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.64096 credit=0.01282 amp_raw_std=0.03181 actor_std=0.99998
+[CRITIC] loss=0.24268 V=0.1060 target=0.1074 rmse=0.0318 ev=0.8567 grad=0.0608 grad_clip=0.0000
+[DISC] loss=6.38738 bce=0.35935 gp=0.46487 accE=0.997 accP=0.915 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00892 expert_uniform_max=0.00307 current_expert_tv=0.27679 replay_expert_tv=0.11914 norm_expert_n=32768 norm_expert_uniform_tv=0.00766
+[FCAMP_CONTRACT] fk_max=3.064e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.330s actor=2.320s critic=0.318s disc=1.507s gpu_peak=4.31GiB
+[TRAIN_RESET] count=7949 phase0_frac=0.1205 p50=75.0 p95=262.0 target_count=900 target_nonzero=0 curriculum_p50=96.0
+[PROGRESS] env_steps=2162688 iteration=13.530s throughput=14531.4
+[UPDATE] 20/500 amp=0.59970 done=0.03046 ep_len=27.92
+[FCAMP] policy=-0.00965 kl=0.017282 ratio=0.9988 clip=0.2559 grad=0.2539 lr=0.000675
+[SAMPLER_PHASE] start_mean=109.54 start_min=0 start_max=323 top_bin=0 top_prob=0.37032 entropy=0.89259 failed_sum=107.109
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=33.0 curr_fail_p50=118.0 phase0_inflight_p50=16.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.59970 credit=0.01199 amp_raw_std=0.03201 actor_std=1.00000
+[CRITIC] loss=0.23721 V=0.1259 target=0.1266 rmse=0.0320 ev=0.8937 grad=0.0729 grad_clip=0.0000
+[DISC] loss=4.52978 bce=0.35093 gp=0.29577 accE=1.000 accP=0.927 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00798 expert_uniform_max=0.00237 current_expert_tv=0.28677 replay_expert_tv=0.12247 norm_expert_n=32768 norm_expert_uniform_tv=0.00822
+[FCAMP_CONTRACT] fk_max=2.843e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.477s actor=2.247s critic=0.304s disc=1.445s gpu_peak=4.31GiB
+[TRAIN_RESET] count=5988 phase0_frac=0.0982 p50=72.0 p95=264.0 target_count=542 target_nonzero=0 curriculum_p50=89.0
+[PROGRESS] env_steps=4128768 iteration=13.523s throughput=14539.1
+[UPDATE] 30/500 amp=0.60622 done=0.02615 ep_len=35.08
+[FCAMP] policy=-0.00902 kl=0.014291 ratio=0.9996 clip=0.2149 grad=0.3165 lr=0.000450
+[SAMPLER_PHASE] start_mean=111.10 start_min=0 start_max=323 top_bin=0 top_prob=0.37410 entropy=0.89003 failed_sum=128.382
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=48.0 curr_fail_p50=117.0 phase0_inflight_p50=24.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.60622 credit=0.01212 amp_raw_std=0.03571 actor_std=0.99990
+[CRITIC] loss=0.23246 V=0.1544 target=0.1531 rmse=0.0357 ev=0.9063 grad=0.1274 grad_clip=0.0000
+[DISC] loss=3.58453 bce=0.35194 gp=0.21259 accE=1.000 accP=0.932 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00829 expert_uniform_max=0.00343 current_expert_tv=0.27850 replay_expert_tv=0.12985 norm_expert_n=32768 norm_expert_uniform_tv=0.00660
+[FCAMP_CONTRACT] fk_max=2.611e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.355s actor=2.234s critic=0.314s disc=1.434s gpu_peak=4.31GiB
+[TRAIN_RESET] count=5142 phase0_frac=0.0846 p50=73.0 p95=265.0 target_count=395 target_nonzero=0 curriculum_p50=87.0
+[PROGRESS] env_steps=6094848 iteration=13.389s throughput=14684.5
+[UPDATE] 40/500 amp=0.61576 done=0.02378 ep_len=40.72
+[FCAMP] policy=-0.00765 kl=0.016812 ratio=0.9994 clip=0.2503 grad=0.3737 lr=0.000450
+[SAMPLER_PHASE] start_mean=114.81 start_min=0 start_max=323 top_bin=0 top_prob=0.37095 entropy=0.89125 failed_sum=140.319
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=64.0 curr_fail_p50=124.0 phase0_inflight_p50=24.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.61576 credit=0.01232 amp_raw_std=0.03838 actor_std=0.99990
+[CRITIC] loss=0.20585 V=0.1886 target=0.1839 rmse=0.0387 ev=0.9175 grad=0.1356 grad_clip=0.0000
+[DISC] loss=3.00600 bce=0.35338 gp=0.16366 accE=1.000 accP=0.934 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.01093 expert_uniform_max=0.00374 current_expert_tv=0.25610 replay_expert_tv=0.13834 norm_expert_n=32768 norm_expert_uniform_tv=0.00916
+[FCAMP_CONTRACT] fk_max=3.117e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.443s actor=2.203s critic=0.304s disc=1.438s gpu_peak=4.31GiB
+[TRAIN_RESET] count=4676 phase0_frac=0.0838 p50=76.0 p95=266.0 target_count=361 target_nonzero=0 curriculum_p50=91.0
+[PROGRESS] env_steps=8060928 iteration=13.438s throughput=14631.2
+[UPDATE] 50/500 amp=0.61813 done=0.02184 ep_len=41.52
+[FCAMP] policy=-0.00757 kl=0.016302 ratio=0.9992 clip=0.2432 grad=0.4286 lr=0.000450
+[SAMPLER_PHASE] start_mean=116.16 start_min=0 start_max=323 top_bin=0 top_prob=0.36530 entropy=0.89339 failed_sum=146.355
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=67.0 curr_fail_p50=126.0 phase0_inflight_p50=28.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.61813 credit=0.01236 amp_raw_std=0.03414 actor_std=0.99992
+[CRITIC] loss=0.13711 V=0.1732 target=0.1765 rmse=0.0343 ev=0.9386 grad=0.2457 grad_clip=0.0000
+[DISC] loss=2.60001 bce=0.35247 gp=0.13067 accE=1.000 accP=0.935 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00674 expert_uniform_max=0.00191 current_expert_tv=0.24228 replay_expert_tv=0.14236 norm_expert_n=32768 norm_expert_uniform_tv=0.00976
+[FCAMP_CONTRACT] fk_max=2.855e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.558s actor=2.196s critic=0.305s disc=1.476s gpu_peak=4.31GiB
+[TRAIN_RESET] count=4293 phase0_frac=0.0815 p50=78.0 p95=268.0 target_count=325 target_nonzero=0 curriculum_p50=93.0
+[PROGRESS] env_steps=10027008 iteration=13.585s throughput=14472.0
+[VALIDATION_START] update=50 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.025s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.264s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=8.371s
+[VALIDATION_PROGRESS] step=75/500 done=1.00000 alive=0.00000 elapsed=13.870s
+[VALIDATION_DONE] update=50 time=14.242s
+[VAL] steps_mean=70.90 steps_min=66 steps_p50=71 steps_p95=73 steps_max=75 fail_phase_mean=70.9 done=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.39771 anchor_ori_bad=0.06689 ee_body_bad=0.64746 pose_fail=nan time_out=0.00000 anchor_z=0.42207 anchor_grav=0.50398 ee_z_max=0.24199 ee_z_mean=0.14062
+[VAL_FAIL] act_abs=1.53064 act_max=4.75931 root_pos=0.89599 root_ori=91.803deg anchor_pos=0.89993 anchor_ori=81.818deg joint_pos=0.24878 joint_vel=0.93286 body_pos=0.64878 body_pos_top=torso:0.89993 body_z=0.29457 body_z_top=right_shoulder:0.63033
+[VAL_OUTCOME] failure=1.0000 motion_complete=0.0000 time_out=0.0000 steps_p50=71
+[VAL_PHASE] failure_p50=71.0 failure_p95=73.0 anchor_pos_p50=73.0 anchor_ori_p50=70.0 ee_body_p50=70.0 motion_complete_p50=-1.0
+[VAL_MOTION] window_mmd2_w16=0.2948205 window_mmd2_w32=0.2049784 raw_w16=0.2948205 raw_w32=0.2049784 pairs_w16=2945 pairs_w32=897 gap_w16=16 gap_w32=32 phase_mean_w16=43.03 phase_max_w16=73.00 phase_mean_w32=51.05 phase_max_w32=73.00 progress_max_w16=0.2253 progress_max_w32=0.2253 progress_span_w16=0.1759 progress_span_w32=0.1265 samples_w16=7041 samples_w32=4993 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.137017 delta_internal=0.043364 delta_ratio=3.1597 delta_boundary_p95=0.221792 delta_boundary_p99=0.228635 delta_internal_p95=0.072783 delta_internal_p99=0.109821 d2_boundary=0.149191 d2_internal=0.055910 d2_ratio=2.6684 d2_boundary_p95=0.235150 d2_boundary_p99=0.242631 d2_internal_p95=0.150457 d2_internal_p99=0.209537
+[VAL_CHUNK_STATE] joint_vel_boundary=0.574163 joint_vel_internal=0.446661 joint_vel_ratio=1.2855 joint_vel_boundary_p95=1.307076 joint_vel_boundary_p99=1.921727 joint_vel_internal_p95=1.217711 joint_vel_internal_p99=1.800762 root_ang_boundary=0.411655 root_ang_internal=0.361011 root_ang_ratio=1.1403 root_ang_boundary_p95=1.144643 root_ang_boundary_p99=1.861859 root_ang_internal_p95=1.188889 root_ang_internal_p99=1.836519
+[VAL_CHUNK_RESET] action_delta=0.290083 action_delta_p95=0.291721 joint_vel_jump=0.562366 joint_vel_jump_p95=0.605578 root_ang_vel_jump=0.495136 root_ang_vel_jump_p95=0.537443 joint_pos_error=0.010772 joint_vel_error=0.485505 root_ang_vel_error=0.495136
+[VAL_OFFSET0] joint_pos=0.157187 joint_pos_p95=0.266885 joint_vel=0.820733 joint_vel_p95=1.342026 root_ang_vel=1.014646 root_ang_vel_p95=2.391540 count=148420
+[VAL_OFFSET1] joint_pos=0.158731 joint_pos_p95=0.266696 joint_vel=0.850433 joint_vel_p95=1.425642 root_ang_vel=1.042310 root_ang_vel_p95=2.419767 count=145802
+[VAL_OFFSET2] joint_pos=0.161367 joint_pos_p95=0.267584 joint_vel=0.852388 joint_vel_p95=1.406032 root_ang_vel=1.064901 root_ang_vel_p95=2.414098 count=144014
+[VAL_OFFSET3] joint_pos=0.164260 joint_pos_p95=0.268408 joint_vel=0.836542 joint_vel_p95=1.408838 root_ang_vel=1.067798 root_ang_vel_p95=2.407674 count=142617
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/checkpoints/update_0050.pt
+[UPDATE] 60/500 amp=0.63488 done=0.02125 ep_len=46.20
+[FCAMP] policy=-0.00757 kl=0.016125 ratio=0.9996 clip=0.2408 grad=0.4396 lr=0.000300
+[SAMPLER_PHASE] start_mean=119.76 start_min=0 start_max=323 top_bin=0 top_prob=0.35697 entropy=0.89657 failed_sum=149.102
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=67.0 curr_fail_p50=131.0 phase0_inflight_p50=32.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.63488 credit=0.01270 amp_raw_std=0.03600 actor_std=0.99991
+[CRITIC] loss=0.09981 V=0.1922 target=0.1922 rmse=0.0360 ev=0.9444 grad=0.5140 grad_clip=0.1000
+[DISC] loss=2.30536 bce=0.35339 gp=0.10750 accE=1.000 accP=0.935 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.01135 expert_uniform_max=0.00426 current_expert_tv=0.23096 replay_expert_tv=0.14035 norm_expert_n=32768 norm_expert_uniform_tv=0.00797
+[FCAMP_CONTRACT] fk_max=3.007e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.496s actor=2.181s critic=0.304s disc=1.438s gpu_peak=4.31GiB
+[TRAIN_RESET] count=4177 phase0_frac=0.0845 p50=75.0 p95=267.0 target_count=328 target_nonzero=0 curriculum_p50=89.0
+[PROGRESS] env_steps=11993088 iteration=13.472s throughput=14593.8
+[UPDATE] 70/500 amp=0.63403 done=0.01994 ep_len=48.48
+[FCAMP] policy=-0.00794 kl=0.016548 ratio=0.9996 clip=0.2442 grad=0.5211 lr=0.000300
+[SAMPLER_PHASE] start_mean=119.94 start_min=0 start_max=323 top_bin=0 top_prob=0.34640 entropy=0.90078 failed_sum=149.657
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=68.0 curr_fail_p50=133.0 phase0_inflight_p50=28.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.63403 credit=0.01268 amp_raw_std=0.03858 actor_std=0.99993
+[CRITIC] loss=0.09161 V=0.1953 target=0.1987 rmse=0.0387 ev=0.9435 grad=0.7232 grad_clip=0.2500
+[DISC] loss=2.07800 bce=0.35130 gp=0.09053 accE=1.000 accP=0.937 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00842 expert_uniform_max=0.00221 current_expert_tv=0.22122 replay_expert_tv=0.15036 norm_expert_n=32768 norm_expert_uniform_tv=0.00818
+[FCAMP_CONTRACT] fk_max=2.861e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.574s actor=2.209s critic=0.318s disc=1.425s gpu_peak=4.31GiB
+[TRAIN_RESET] count=3921 phase0_frac=0.0890 p50=79.0 p95=264.0 target_count=324 target_nonzero=0 curriculum_p50=91.0
+[PROGRESS] env_steps=13959168 iteration=13.580s throughput=14478.2
+[UPDATE] 80/500 amp=0.64843 done=0.01970 ep_len=47.80
+[FCAMP] policy=-0.00750 kl=0.014678 ratio=0.9996 clip=0.2181 grad=0.5708 lr=0.000300
+[SAMPLER_PHASE] start_mean=121.87 start_min=0 start_max=323 top_bin=0 top_prob=0.33158 entropy=0.90651 failed_sum=148.418
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=68.0 curr_fail_p50=141.0 phase0_inflight_p50=32.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.64843 credit=0.01297 amp_raw_std=0.04103 actor_std=0.99996
+[CRITIC] loss=0.08843 V=0.2170 target=0.2196 rmse=0.0411 ev=0.9431 grad=0.4678 grad_clip=0.1000
+[DISC] loss=1.90100 bce=0.35117 gp=0.07777 accE=1.000 accP=0.938 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00837 expert_uniform_max=0.00270 current_expert_tv=0.21344 replay_expert_tv=0.15482 norm_expert_n=32768 norm_expert_uniform_tv=0.01117
+[FCAMP_CONTRACT] fk_max=2.903e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.536s actor=2.191s critic=0.309s disc=1.455s gpu_peak=4.31GiB
+[TRAIN_RESET] count=3874 phase0_frac=0.0903 p50=84.0 p95=268.0 target_count=322 target_nonzero=0 curriculum_p50=99.0
+[PROGRESS] env_steps=15925248 iteration=13.542s throughput=14518.8
+[UPDATE] 90/500 amp=0.64929 done=0.01833 ep_len=50.80
+[FCAMP] policy=-0.00777 kl=0.017092 ratio=0.9995 clip=0.2499 grad=0.6125 lr=0.000300
+[SAMPLER_PHASE] start_mean=123.02 start_min=0 start_max=323 top_bin=0 top_prob=0.31378 entropy=0.91273 failed_sum=145.889
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=69.0 curr_fail_p50=143.0 phase0_inflight_p50=32.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.64929 credit=0.01299 amp_raw_std=0.04676 actor_std=0.99993
+[CRITIC] loss=0.08862 V=0.2501 target=0.2478 rmse=0.0468 ev=0.9357 grad=0.3709 grad_clip=0.0000
+[DISC] loss=1.75820 bce=0.35078 gp=0.06793 accE=1.000 accP=0.938 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00847 expert_uniform_max=0.00243 current_expert_tv=0.22058 replay_expert_tv=0.15350 norm_expert_n=32768 norm_expert_uniform_tv=0.01049
+[FCAMP_CONTRACT] fk_max=2.936e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.313s actor=2.181s critic=0.304s disc=1.438s gpu_peak=4.31GiB
+[TRAIN_RESET] count=3603 phase0_frac=0.0899 p50=84.0 p95=269.0 target_count=300 target_nonzero=0 curriculum_p50=98.0
+[PROGRESS] env_steps=17891328 iteration=13.287s throughput=14797.5
+[UPDATE] 100/500 amp=0.65526 done=0.01805 ep_len=53.56
+[FCAMP] policy=-0.00821 kl=0.015135 ratio=0.9994 clip=0.2254 grad=0.6049 lr=0.000300
+[SAMPLER_PHASE] start_mean=126.23 start_min=0 start_max=323 top_bin=0 top_prob=0.29253 entropy=0.91918 failed_sum=142.224
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=69.0 curr_fail_p50=143.0 phase0_inflight_p50=32.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.65526 credit=0.01311 amp_raw_std=0.04828 actor_std=0.99997
+[CRITIC] loss=0.08858 V=0.2568 target=0.2583 rmse=0.0483 ev=0.9351 grad=0.7719 grad_clip=0.3000
+[DISC] loss=1.64338 bce=0.34901 gp=0.06061 accE=1.000 accP=0.933 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00844 expert_uniform_max=0.00248 current_expert_tv=0.21548 replay_expert_tv=0.14841 norm_expert_n=32768 norm_expert_uniform_tv=0.00974
+[FCAMP_CONTRACT] fk_max=2.822e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.176s actor=2.196s critic=0.305s disc=1.430s gpu_peak=4.31GiB
+[TRAIN_RESET] count=3549 phase0_frac=0.0851 p50=89.0 p95=267.0 target_count=281 target_nonzero=0 curriculum_p50=103.0
+[PROGRESS] env_steps=19857408 iteration=13.159s throughput=14941.4
+[VALIDATION_START] update=100 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.025s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.247s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.784s
+[VALIDATION_PROGRESS] step=100/500 done=0.23792 alive=0.76208 elapsed=15.672s
+[VALIDATION_PROGRESS] step=150/500 done=0.33606 alive=0.66394 elapsed=23.773s
+[VALIDATION_PROGRESS] step=200/500 done=0.89478 alive=0.10522 elapsed=32.555s
+[VALIDATION_PROGRESS] step=250/500 done=0.98572 alive=0.01428 elapsed=41.252s
+[VALIDATION_PROGRESS] step=300/500 done=0.99646 alive=0.00354 elapsed=49.797s
+[VALIDATION_PROGRESS] step=313/500 done=1.00000 alive=0.00000 elapsed=52.008s
+[VALIDATION_DONE] update=100 time=52.063s
+[VAL] steps_mean=152.65 steps_min=69 steps_p50=165 steps_p95=228 steps_max=313 fail_phase_mean=152.6 done=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.00879 anchor_ori_bad=0.10510 ee_body_bad=0.92651 pose_fail=nan time_out=0.00000 anchor_z=0.30010 anchor_grav=0.41538 ee_z_max=0.25810 ee_z_mean=0.14363
+[VAL_FAIL] act_abs=1.07744 act_max=3.12043 root_pos=0.78400 root_ori=51.394deg anchor_pos=0.79747 anchor_ori=54.183deg joint_pos=0.23437 joint_vel=1.13920 body_pos=0.78672 body_pos_top=right_shoulder:0.93447 body_z=0.23956 body_z_top=right_shoulder:0.40923
+[VAL_OUTCOME] failure=1.0000 motion_complete=0.0000 time_out=0.0000 steps_p50=165
+[VAL_PHASE] failure_p50=165.0 failure_p95=228.0 anchor_pos_p50=232.0 anchor_ori_p50=157.0 ee_body_p50=165.0 motion_complete_p50=-1.0
+[VAL_MOTION] window_mmd2_w16=0.2759681 window_mmd2_w32=0.1401555 raw_w16=0.2759681 raw_w32=0.1401555 pairs_w16=8426 pairs_w32=7102 gap_w16=16 gap_w32=32 phase_mean_w16=93.46 phase_max_w16=298.00 phase_mean_w32=102.51 phase_max_w32=298.00 progress_max_w16=0.9198 progress_max_w32=0.9198 progress_span_w16=0.8704 progress_span_w32=0.8210 samples_w16=17890 samples_w32=15842 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.228514 delta_internal=0.062153 delta_ratio=3.6766 delta_boundary_p95=0.321899 delta_boundary_p99=0.344641 delta_internal_p95=0.090277 delta_internal_p99=0.136827 d2_boundary=0.263047 d2_internal=0.096320 d2_ratio=2.7310 d2_boundary_p95=0.358445 d2_boundary_p99=0.386773 d2_internal_p95=0.258376 d2_internal_p99=0.324141
+[VAL_CHUNK_STATE] joint_vel_boundary=0.716087 joint_vel_internal=0.321353 joint_vel_ratio=2.2283 joint_vel_boundary_p95=1.147631 joint_vel_boundary_p99=1.958042 joint_vel_internal_p95=0.623584 joint_vel_internal_p99=0.959835 root_ang_boundary=0.526318 root_ang_internal=0.257357 root_ang_ratio=2.0451 root_ang_boundary_p95=1.304781 root_ang_boundary_p99=1.955514 root_ang_internal_p95=0.666531 root_ang_internal_p99=1.195907
+[VAL_CHUNK_RESET] action_delta=0.468784 action_delta_p95=0.471347 joint_vel_jump=0.667514 joint_vel_jump_p95=0.750295 root_ang_vel_jump=0.678458 root_ang_vel_jump_p95=0.796695 joint_pos_error=0.011973 joint_vel_error=0.636773 root_ang_vel_error=0.678458
+[VAL_OFFSET0] joint_pos=0.120902 joint_pos_p95=0.180210 joint_vel=0.763836 joint_vel_p95=1.149522 root_ang_vel=0.699363 root_ang_vel_p95=1.488253 count=315592
+[VAL_OFFSET1] joint_pos=0.121115 joint_pos_p95=0.180573 joint_vel=0.794694 joint_vel_p95=1.232717 root_ang_vel=0.765349 root_ang_vel_p95=1.781677 count=313705
+[VAL_OFFSET2] joint_pos=0.122045 joint_pos_p95=0.180734 joint_vel=0.781856 joint_vel_p95=1.237797 root_ang_vel=0.751239 root_ang_vel_p95=1.739284 count=311660
+[VAL_OFFSET3] joint_pos=0.123517 joint_pos_p95=0.180777 joint_vel=0.779621 joint_vel_p95=1.165329 root_ang_vel=0.751488 root_ang_vel_p95=1.709054 count=309512
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/checkpoints/update_0100.pt
+[UPDATE] 110/500 amp=0.65146 done=0.01681 ep_len=61.92
+[FCAMP] policy=-0.00781 kl=0.016264 ratio=0.9992 clip=0.2389 grad=0.6731 lr=0.000300
+[SAMPLER_PHASE] start_mean=130.49 start_min=0 start_max=323 top_bin=0 top_prob=0.27169 entropy=0.92470 failed_sum=138.043
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=69.5 curr_fail_p50=154.0 phase0_inflight_p50=32.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.65146 credit=0.01303 amp_raw_std=0.04819 actor_std=0.99998
+[CRITIC] loss=0.08535 V=0.2708 target=0.2721 rmse=0.0482 ev=0.9384 grad=0.6079 grad_clip=0.0000
+[DISC] loss=1.54090 bce=0.34714 gp=0.05420 accE=1.000 accP=0.938 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00928 expert_uniform_max=0.00331 current_expert_tv=0.19684 replay_expert_tv=0.15424 norm_expert_n=32768 norm_expert_uniform_tv=0.01381
+[FCAMP_CONTRACT] fk_max=2.778e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.274s actor=2.181s critic=0.305s disc=1.450s gpu_peak=4.31GiB
+[TRAIN_RESET] count=3304 phase0_frac=0.0920 p50=89.0 p95=269.0 target_count=288 target_nonzero=0 curriculum_p50=100.0
+[PROGRESS] env_steps=21823488 iteration=13.260s throughput=14827.3
+[UPDATE] 120/500 amp=0.64937 done=0.01559 ep_len=56.08
+[FCAMP] policy=-0.00832 kl=0.016535 ratio=0.9992 clip=0.2419 grad=0.6501 lr=0.000300
+[SAMPLER_PHASE] start_mean=131.54 start_min=0 start_max=323 top_bin=0 top_prob=0.25115 entropy=0.92940 failed_sum=133.530
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=69.0 curr_fail_p50=155.0 phase0_inflight_p50=36.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.64937 credit=0.01299 amp_raw_std=0.05161 actor_std=1.00000
+[CRITIC] loss=0.08733 V=0.2857 target=0.2842 rmse=0.0516 ev=0.9365 grad=0.5310 grad_clip=0.0500
+[DISC] loss=1.45345 bce=0.34508 gp=0.04902 accE=1.000 accP=0.939 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00704 expert_uniform_max=0.00294 current_expert_tv=0.19681 replay_expert_tv=0.15231 norm_expert_n=32768 norm_expert_uniform_tv=0.00880
+[FCAMP_CONTRACT] fk_max=2.837e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.336s actor=2.233s critic=0.319s disc=1.443s gpu_peak=4.31GiB
+[TRAIN_RESET] count=3065 phase0_frac=0.0917 p50=93.0 p95=269.0 target_count=263 target_nonzero=0 curriculum_p50=108.0
+[PROGRESS] env_steps=23789568 iteration=13.382s throughput=14691.7
+[UPDATE] 130/500 amp=0.65539 done=0.01573 ep_len=59.92
+[FCAMP] policy=-0.00862 kl=0.016643 ratio=0.9997 clip=0.2432 grad=0.6991 lr=0.000300
+[SAMPLER_PHASE] start_mean=134.50 start_min=0 start_max=323 top_bin=0 top_prob=0.23067 entropy=0.93332 failed_sum=128.988
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=70.0 curr_fail_p50=161.0 phase0_inflight_p50=36.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.65539 credit=0.01311 amp_raw_std=0.05009 actor_std=1.00001
+[CRITIC] loss=0.08354 V=0.2898 target=0.2913 rmse=0.0501 ev=0.9406 grad=0.6172 grad_clip=0.0000
+[DISC] loss=1.38099 bce=0.34447 gp=0.04493 accE=1.000 accP=0.933 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00663 expert_uniform_max=0.00179 current_expert_tv=0.20367 replay_expert_tv=0.14380 norm_expert_n=32768 norm_expert_uniform_tv=0.00699
+[FCAMP_CONTRACT] fk_max=2.849e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.504s actor=2.201s critic=0.310s disc=1.467s gpu_peak=4.31GiB
+[TRAIN_RESET] count=3093 phase0_frac=0.0795 p50=97.0 p95=270.0 target_count=225 target_nonzero=0 curriculum_p50=107.0
+[PROGRESS] env_steps=25755648 iteration=13.536s throughput=14524.6
+[UPDATE] 140/500 amp=0.65591 done=0.01547 ep_len=56.92
+[FCAMP] policy=-0.00785 kl=0.016991 ratio=0.9988 clip=0.2460 grad=0.7495 lr=0.000300
+[SAMPLER_PHASE] start_mean=134.74 start_min=0 start_max=323 top_bin=0 top_prob=0.21199 entropy=0.93631 failed_sum=124.609
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=70.0 curr_fail_p50=163.0 phase0_inflight_p50=40.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.65591 credit=0.01312 amp_raw_std=0.05338 actor_std=1.00004
+[CRITIC] loss=0.08696 V=0.3001 target=0.3010 rmse=0.0534 ev=0.9384 grad=0.4900 grad_clip=0.0500
+[DISC] loss=1.31178 bce=0.34349 gp=0.04098 accE=1.000 accP=0.932 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00673 expert_uniform_max=0.00227 current_expert_tv=0.19916 replay_expert_tv=0.13593 norm_expert_n=32768 norm_expert_uniform_tv=0.00896
+[FCAMP_CONTRACT] fk_max=3.044e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.271s actor=2.180s critic=0.305s disc=1.429s gpu_peak=4.31GiB
+[TRAIN_RESET] count=3041 phase0_frac=0.0839 p50=98.0 p95=268.0 target_count=238 target_nonzero=0 curriculum_p50=109.0
+[PROGRESS] env_steps=27721728 iteration=13.237s throughput=14853.3
+[UPDATE] 150/500 amp=0.65402 done=0.01450 ep_len=65.52
+[FCAMP] policy=-0.00989 kl=0.014816 ratio=0.9989 clip=0.2178 grad=0.6791 lr=0.000200
+[SAMPLER_PHASE] start_mean=137.35 start_min=0 start_max=323 top_bin=2 top_prob=0.20257 entropy=0.93825 failed_sum=120.316
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=70.0 curr_fail_p50=168.0 phase0_inflight_p50=40.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.65402 credit=0.01308 amp_raw_std=0.05813 actor_std=1.00003
+[CRITIC] loss=0.09269 V=0.3339 target=0.3280 rmse=0.0584 ev=0.9356 grad=0.5567 grad_clip=0.0500
+[DISC] loss=1.25101 bce=0.34315 gp=0.03760 accE=1.000 accP=0.930 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00729 expert_uniform_max=0.00218 current_expert_tv=0.19580 replay_expert_tv=0.13251 norm_expert_n=32768 norm_expert_uniform_tv=0.00879
+[FCAMP_CONTRACT] fk_max=3.028e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.163s actor=2.179s critic=0.306s disc=1.463s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2850 phase0_frac=0.0761 p50=112.0 p95=268.0 target_count=205 target_nonzero=0 curriculum_p50=121.0
+[PROGRESS] env_steps=29687808 iteration=13.164s throughput=14935.6
+[VALIDATION_START] update=150 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.026s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.241s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.913s
+[VALIDATION_PROGRESS] step=100/500 done=0.07898 alive=0.92102 elapsed=15.648s
+[VALIDATION_PROGRESS] step=150/500 done=0.08252 alive=0.91748 elapsed=23.266s
+[VALIDATION_PROGRESS] step=200/500 done=0.51038 alive=0.48962 elapsed=31.467s
+[VALIDATION_PROGRESS] step=250/500 done=0.99011 alive=0.00989 elapsed=39.993s
+[VALIDATION_PROGRESS] step=300/500 done=0.99854 alive=0.00146 elapsed=48.353s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=52.327s
+[VALIDATION_DONE] update=150 time=52.383s
+[VAL] steps_mean=194.29 steps_min=76 steps_p50=199 steps_p95=234 steps_max=324 fail_phase_mean=194.3 done=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.22656 anchor_ori_bad=0.05664 ee_body_bad=0.85425 pose_fail=nan time_out=0.00000 anchor_z=0.33507 anchor_grav=0.30815 ee_z_max=0.25501 ee_z_mean=0.15340
+[VAL_FAIL] act_abs=1.09750 act_max=3.25445 root_pos=0.80400 root_ori=60.712deg anchor_pos=0.82220 anchor_ori=50.293deg joint_pos=0.27654 joint_vel=1.52701 body_pos=0.85158 body_pos_top=left_shoulder:0.94667 body_z=0.25936 body_z_top=left_shoulder:0.40223
+[VAL_OUTCOME] failure=0.9998 motion_complete=0.0002 time_out=0.0000 steps_p50=199
+[VAL_PHASE] failure_p50=199.0 failure_p95=234.0 anchor_pos_p50=209.0 anchor_ori_p50=197.0 ee_body_p50=196.0 motion_complete_p50=324.0
+[VAL_MOTION] window_mmd2_w16=0.2998172 window_mmd2_w32=0.1714692 raw_w16=0.2998172 raw_w32=0.1714692 pairs_w16=11007 pairs_w32=9673 gap_w16=16 gap_w32=32 phase_mean_w16=109.37 phase_max_w16=241.00 phase_mean_w32=117.72 phase_max_w32=241.00 progress_max_w16=0.7438 progress_max_w32=0.7438 progress_span_w16=0.6944 progress_span_w32=0.6451 samples_w16=23106 samples_w32=21058 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.267431 delta_internal=0.070615 delta_ratio=3.7872 delta_boundary_p95=0.403029 delta_boundary_p99=0.473779 delta_internal_p95=0.103329 delta_internal_p99=0.160398 d2_boundary=0.308669 d2_internal=0.117019 d2_ratio=2.6378 d2_boundary_p95=0.434508 d2_boundary_p99=0.501411 d2_internal_p95=0.314511 d2_internal_p99=0.396801
+[VAL_CHUNK_STATE] joint_vel_boundary=0.729024 joint_vel_internal=0.328040 joint_vel_ratio=2.2224 joint_vel_boundary_p95=1.305483 joint_vel_boundary_p99=1.892795 joint_vel_internal_p95=0.672616 joint_vel_internal_p99=1.030098 root_ang_boundary=0.576790 root_ang_internal=0.264197 root_ang_ratio=2.1832 root_ang_boundary_p95=1.366564 root_ang_boundary_p99=1.967944 root_ang_internal_p95=0.657680 root_ang_internal_p99=1.164578
+[VAL_CHUNK_RESET] action_delta=0.567804 action_delta_p95=0.570350 joint_vel_jump=0.747133 joint_vel_jump_p95=0.850579 root_ang_vel_jump=0.428989 root_ang_vel_jump_p95=0.549797 joint_pos_error=0.014162 joint_vel_error=0.754718 root_ang_vel_error=0.428989
+[VAL_OFFSET0] joint_pos=0.116314 joint_pos_p95=0.195438 joint_vel=0.775327 joint_vel_p95=1.490241 root_ang_vel=0.727330 root_ang_vel_p95=1.615885 count=401002
+[VAL_OFFSET1] joint_pos=0.116531 joint_pos_p95=0.195254 joint_vel=0.797417 joint_vel_p95=1.522373 root_ang_vel=0.773397 root_ang_vel_p95=1.779286 count=398973
+[VAL_OFFSET2] joint_pos=0.117471 joint_pos_p95=0.195944 joint_vel=0.775830 joint_vel_p95=1.467252 root_ang_vel=0.753982 root_ang_vel_p95=1.801103 count=396871
+[VAL_OFFSET3] joint_pos=0.118899 joint_pos_p95=0.197053 joint_vel=0.773061 joint_vel_p95=1.375935 root_ang_vel=0.751898 root_ang_vel_p95=1.786230 count=394795
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/checkpoints/update_0150.pt
+[UPDATE] 160/500 amp=0.65009 done=0.01433 ep_len=67.80
+[FCAMP] policy=-0.00883 kl=0.015767 ratio=0.9990 clip=0.2279 grad=0.7584 lr=0.000200
+[SAMPLER_PHASE] start_mean=144.44 start_min=0 start_max=323 top_bin=2 top_prob=0.21415 entropy=0.93963 failed_sum=116.068
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=73.0 curr_fail_p50=176.0 phase0_inflight_p50=44.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.65009 credit=0.01300 amp_raw_std=0.06109 actor_std=1.00003
+[CRITIC] loss=0.09893 V=0.3319 target=0.3290 rmse=0.0612 ev=0.9333 grad=1.1999 grad_clip=0.6500
+[DISC] loss=1.19655 bce=0.33993 gp=0.03495 accE=1.000 accP=0.930 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00647 expert_uniform_max=0.00179 current_expert_tv=0.18204 replay_expert_tv=0.13254 norm_expert_n=32768 norm_expert_uniform_tv=0.01075
+[FCAMP_CONTRACT] fk_max=2.959e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.299s actor=2.177s critic=0.306s disc=1.478s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2817 phase0_frac=0.0916 p50=107.0 p95=270.0 target_count=247 target_nonzero=0 curriculum_p50=119.0
+[PROGRESS] env_steps=31653888 iteration=13.312s throughput=14769.0
+[UPDATE] 170/500 amp=0.64613 done=0.01289 ep_len=71.75
+[FCAMP] policy=-0.00887 kl=0.015654 ratio=0.9997 clip=0.2253 grad=0.7985 lr=0.000200
+[SAMPLER_PHASE] start_mean=146.65 start_min=0 start_max=323 top_bin=2 top_prob=0.22512 entropy=0.94005 failed_sum=111.508
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=72.0 curr_fail_p50=184.0 phase0_inflight_p50=52.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.64613 credit=0.01292 amp_raw_std=0.06306 actor_std=1.00008
+[CRITIC] loss=0.10459 V=0.3489 target=0.3456 rmse=0.0631 ev=0.9393 grad=1.7642 grad_clip=0.9000
+[DISC] loss=1.14734 bce=0.33814 gp=0.03253 accE=1.000 accP=0.936 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00695 expert_uniform_max=0.00203 current_expert_tv=0.17749 replay_expert_tv=0.13596 norm_expert_n=32768 norm_expert_uniform_tv=0.00843
+[FCAMP_CONTRACT] fk_max=3.088e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.184s actor=2.174s critic=0.305s disc=1.446s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2534 phase0_frac=0.0777 p50=116.0 p95=270.0 target_count=190 target_nonzero=0 curriculum_p50=124.0
+[PROGRESS] env_steps=33619968 iteration=13.162s throughput=14937.8
+[UPDATE] 180/500 amp=0.64525 done=0.01257 ep_len=75.10
+[FCAMP] policy=-0.00877 kl=0.016606 ratio=0.9995 clip=0.2367 grad=0.8004 lr=0.000200
+[SAMPLER_PHASE] start_mean=151.01 start_min=0 start_max=323 top_bin=2 top_prob=0.23295 entropy=0.93967 failed_sum=106.950
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=83.0 curr_fail_p50=193.0 phase0_inflight_p50=56.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.64525 credit=0.01291 amp_raw_std=0.06203 actor_std=1.00015
+[CRITIC] loss=0.10160 V=0.3607 target=0.3585 rmse=0.0621 ev=0.9388 grad=1.2888 grad_clip=0.5500
+[DISC] loss=1.10449 bce=0.33656 gp=0.03059 accE=1.000 accP=0.937 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00771 expert_uniform_max=0.00264 current_expert_tv=0.19229 replay_expert_tv=0.12903 norm_expert_n=32768 norm_expert_uniform_tv=0.00830
+[FCAMP_CONTRACT] fk_max=2.819e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.132s actor=2.188s critic=0.305s disc=1.450s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2471 phase0_frac=0.0700 p50=123.0 p95=269.0 target_count=167 target_nonzero=0 curriculum_p50=130.0
+[PROGRESS] env_steps=35586048 iteration=13.127s throughput=14977.4
+[UPDATE] 190/500 amp=0.64024 done=0.01231 ep_len=72.16
+[FCAMP] policy=-0.00941 kl=0.016359 ratio=0.9997 clip=0.2331 grad=0.8579 lr=0.000200
+[SAMPLER_PHASE] start_mean=153.83 start_min=0 start_max=323 top_bin=2 top_prob=0.23607 entropy=0.93860 failed_sum=102.745
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=92.0 curr_fail_p50=202.0 phase0_inflight_p50=52.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.64024 credit=0.01280 amp_raw_std=0.06695 actor_std=1.00008
+[CRITIC] loss=0.10497 V=0.3902 target=0.3807 rmse=0.0676 ev=0.9379 grad=0.5257 grad_clip=0.0000
+[DISC] loss=1.06464 bce=0.33546 gp=0.02876 accE=1.000 accP=0.934 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00983 expert_uniform_max=0.00286 current_expert_tv=0.18765 replay_expert_tv=0.12112 norm_expert_n=32768 norm_expert_uniform_tv=0.00921
+[FCAMP_CONTRACT] fk_max=2.944e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.333s actor=2.184s critic=0.305s disc=1.437s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2420 phase0_frac=0.0785 p50=125.0 p95=269.0 target_count=186 target_nonzero=0 curriculum_p50=131.0
+[PROGRESS] env_steps=37552128 iteration=13.310s throughput=14771.1
+[UPDATE] 200/500 amp=0.63864 done=0.01223 ep_len=85.15
+[FCAMP] policy=-0.00935 kl=0.016692 ratio=0.9997 clip=0.2359 grad=0.8475 lr=0.000133
+[SAMPLER_PHASE] start_mean=159.40 start_min=0 start_max=323 top_bin=2 top_prob=0.23471 entropy=0.93711 failed_sum=98.646
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=106.5 curr_fail_p50=210.0 phase0_inflight_p50=60.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.63864 credit=0.01277 amp_raw_std=0.07085 actor_std=1.00010
+[CRITIC] loss=0.11086 V=0.4179 target=0.4069 rmse=0.0717 ev=0.9382 grad=1.1235 grad_clip=0.6000
+[DISC] loss=1.02893 bce=0.33470 gp=0.02720 accE=1.000 accP=0.934 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00667 expert_uniform_max=0.00191 current_expert_tv=0.18994 replay_expert_tv=0.12128 norm_expert_n=32768 norm_expert_uniform_tv=0.00627
+[FCAMP_CONTRACT] fk_max=2.784e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.261s actor=2.196s critic=0.305s disc=1.437s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2404 phase0_frac=0.0740 p50=129.0 p95=265.0 target_count=172 target_nonzero=0 curriculum_p50=135.0
+[PROGRESS] env_steps=39518208 iteration=13.250s throughput=14838.1
+[VALIDATION_START] update=200 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.025s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.223s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.909s
+[VALIDATION_PROGRESS] step=100/500 done=0.00000 alive=1.00000 elapsed=15.436s
+[VALIDATION_PROGRESS] step=150/500 done=0.00000 alive=1.00000 elapsed=22.545s
+[VALIDATION_PROGRESS] step=200/500 done=0.07874 alive=0.92126 elapsed=30.230s
+[VALIDATION_PROGRESS] step=250/500 done=0.91821 alive=0.08179 elapsed=38.537s
+[VALIDATION_PROGRESS] step=300/500 done=0.96655 alive=0.03345 elapsed=47.320s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=51.320s
+[VALIDATION_DONE] update=200 time=51.375s
+[VAL] steps_mean=230.61 steps_min=156 steps_p50=229 steps_p95=299 steps_max=324 fail_phase_mean=229.1 done=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.01282 anchor_ori_bad=0.00488 ee_body_bad=0.97205 pose_fail=nan time_out=0.00000 anchor_z=0.10262 anchor_grav=0.45346 ee_z_max=0.25811 ee_z_mean=0.13693
+[VAL_FAIL] act_abs=0.94253 act_max=2.70614 root_pos=0.44205 root_ori=38.985deg anchor_pos=0.45784 anchor_ori=57.491deg joint_pos=0.21776 joint_vel=1.18716 body_pos=0.52239 body_pos_top=left_shoulder:0.66269 body_z=0.13351 body_z_top=right_wrist:0.23476
+[VAL_OUTCOME] failure=0.9843 motion_complete=0.0157 time_out=0.0000 steps_p50=229
+[VAL_PHASE] failure_p50=229.0 failure_p95=298.0 anchor_pos_p50=232.0 anchor_ori_p50=208.5 ee_body_p50=228.0 motion_complete_p50=324.0
+[VAL_MOTION] window_mmd2_w16=0.1815325 window_mmd2_w32=0.1010775 raw_w16=0.1815325 raw_w32=0.1010775 pairs_w16=12963 pairs_w32=12162 gap_w16=16 gap_w32=32 phase_mean_w16=122.95 phase_max_w16=323.00 phase_mean_w32=131.03 phase_max_w32=323.00 progress_max_w16=0.9969 progress_max_w32=0.9969 progress_span_w16=0.9475 progress_span_w32=0.8981 samples_w16=27253 samples_w32=25205 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.355821 delta_internal=0.087064 delta_ratio=4.0869 delta_boundary_p95=0.549892 delta_boundary_p99=0.670625 delta_internal_p95=0.146375 delta_internal_p99=0.190889 d2_boundary=0.386933 d2_internal=0.149795 d2_ratio=2.5831 d2_boundary_p95=0.579341 d2_boundary_p99=0.685108 d2_internal_p95=0.414925 d2_internal_p99=0.520067
+[VAL_CHUNK_STATE] joint_vel_boundary=0.953290 joint_vel_internal=0.429305 joint_vel_ratio=2.2205 joint_vel_boundary_p95=1.712987 joint_vel_boundary_p99=2.236006 joint_vel_internal_p95=0.893516 joint_vel_internal_p99=1.421343 root_ang_boundary=0.717529 root_ang_internal=0.358828 root_ang_ratio=1.9996 root_ang_boundary_p95=1.607500 root_ang_boundary_p99=2.218477 root_ang_internal_p95=0.855382 root_ang_internal_p99=1.645783
+[VAL_CHUNK_RESET] action_delta=0.634698 action_delta_p95=0.637639 joint_vel_jump=1.097380 joint_vel_jump_p95=1.206592 root_ang_vel_jump=0.447640 root_ang_vel_jump_p95=0.593921 joint_pos_error=0.019540 joint_vel_error=1.144477 root_ang_vel_error=0.447640
+[VAL_OFFSET0] joint_pos=0.119287 joint_pos_p95=0.187704 joint_vel=0.937410 joint_vel_p95=1.596350 root_ang_vel=0.820727 root_ang_vel_p95=1.803022 count=475326
+[VAL_OFFSET1] joint_pos=0.119381 joint_pos_p95=0.186943 joint_vel=0.945713 joint_vel_p95=1.633917 root_ang_vel=0.857819 root_ang_vel_p95=1.846387 count=473184
+[VAL_OFFSET2] joint_pos=0.120340 joint_pos_p95=0.188104 joint_vel=0.900833 joint_vel_p95=1.632416 root_ang_vel=0.833238 root_ang_vel_p95=1.954220 count=471249
+[VAL_OFFSET3] joint_pos=0.121891 joint_pos_p95=0.191256 joint_vel=0.883971 joint_vel_p95=1.574069 root_ang_vel=0.810105 root_ang_vel_p95=1.843999 count=469420
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/checkpoints/update_0200.pt
+[UPDATE] 210/500 amp=0.63689 done=0.01192 ep_len=83.98
+[FCAMP] policy=-0.00918 kl=0.016761 ratio=0.9995 clip=0.2372 grad=0.8823 lr=0.000200
+[SAMPLER_PHASE] start_mean=165.07 start_min=0 start_max=323 top_bin=3 top_prob=0.23757 entropy=0.93442 failed_sum=94.643
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=103.0 curr_fail_p50=221.0 phase0_inflight_p50=56.0 phase0_success_cum=0.00000 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.63689 credit=0.01274 amp_raw_std=0.06373 actor_std=1.00010
+[CRITIC] loss=0.10005 V=0.3755 target=0.3766 rmse=0.0637 ev=0.9367 grad=0.7410 grad_clip=0.3500
+[DISC] loss=0.99341 bce=0.33267 gp=0.02567 accE=1.000 accP=0.937 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00811 expert_uniform_max=0.00301 current_expert_tv=0.18597 replay_expert_tv=0.11453 norm_expert_n=32768 norm_expert_uniform_tv=0.00822
+[FCAMP_CONTRACT] fk_max=3.219e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.060s actor=2.207s critic=0.305s disc=1.459s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2343 phase0_frac=0.0790 p50=130.0 p95=270.0 target_count=181 target_nonzero=0 curriculum_p50=140.0
+[PROGRESS] env_steps=41484288 iteration=13.085s throughput=15026.0
+[UPDATE] 220/500 amp=0.63724 done=0.01119 ep_len=83.65
+[FCAMP] policy=-0.00933 kl=0.015230 ratio=0.9999 clip=0.2168 grad=0.9008 lr=0.000200
+[SAMPLER_PHASE] start_mean=168.19 start_min=0 start_max=323 top_bin=3 top_prob=0.25394 entropy=0.93014 failed_sum=91.121
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=106.0 curr_fail_p50=218.0 phase0_inflight_p50=68.0 phase0_success_cum=0.00001 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.63724 credit=0.01274 amp_raw_std=0.06927 actor_std=1.00013
+[CRITIC] loss=0.10829 V=0.4058 target=0.4014 rmse=0.0694 ev=0.9335 grad=0.7913 grad_clip=0.2000
+[DISC] loss=0.96099 bce=0.32998 gp=0.02441 accE=1.000 accP=0.942 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00686 expert_uniform_max=0.00240 current_expert_tv=0.18781 replay_expert_tv=0.10880 norm_expert_n=32768 norm_expert_uniform_tv=0.00788
+[FCAMP_CONTRACT] fk_max=2.950e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.126s actor=2.205s critic=0.304s disc=1.445s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2200 phase0_frac=0.0623 p50=143.0 p95=270.0 target_count=134 target_nonzero=0 curriculum_p50=148.0
+[PROGRESS] env_steps=43450368 iteration=13.132s throughput=14971.6
+[UPDATE] 230/500 amp=0.64177 done=0.01125 ep_len=90.87
+[FCAMP] policy=-0.00924 kl=0.015587 ratio=0.9996 clip=0.2203 grad=0.8950 lr=0.000200
+[SAMPLER_PHASE] start_mean=173.58 start_min=0 start_max=323 top_bin=3 top_prob=0.26867 entropy=0.92548 failed_sum=87.639
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=127.5 curr_fail_p50=226.0 phase0_inflight_p50=68.0 phase0_success_cum=0.00003 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.64177 credit=0.01284 amp_raw_std=0.06733 actor_std=1.00017
+[CRITIC] loss=0.10368 V=0.4065 target=0.4033 rmse=0.0674 ev=0.9370 grad=0.6705 grad_clip=0.1500
+[DISC] loss=0.93346 bce=0.33151 gp=0.02312 accE=1.000 accP=0.937 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.01077 expert_uniform_max=0.00346 current_expert_tv=0.17694 replay_expert_tv=0.10989 norm_expert_n=32768 norm_expert_uniform_tv=0.00525
+[FCAMP_CONTRACT] fk_max=2.843e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.190s actor=2.222s critic=0.314s disc=1.490s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2212 phase0_frac=0.0665 p50=144.0 p95=270.0 target_count=140 target_nonzero=0 curriculum_p50=149.0
+[PROGRESS] env_steps=45416448 iteration=13.267s throughput=14819.7
+[UPDATE] 240/500 amp=0.65167 done=0.01079 ep_len=93.97
+[FCAMP] policy=-0.00931 kl=0.015244 ratio=0.9992 clip=0.2148 grad=0.9025 lr=0.000200
+[SAMPLER_PHASE] start_mean=177.76 start_min=0 start_max=323 top_bin=3 top_prob=0.27736 entropy=0.92065 failed_sum=84.686
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=140.0 curr_fail_p50=228.0 phase0_inflight_p50=72.0 phase0_success_cum=0.00011 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.01667 disc_quota=1
+[AMP_CREDIT] raw=0.65167 credit=0.01303 amp_raw_std=0.06735 actor_std=1.00021
+[CRITIC] loss=0.10679 V=0.4073 target=0.4071 rmse=0.0674 ev=0.9358 grad=1.2542 grad_clip=0.5000
+[DISC] loss=0.90771 bce=0.33166 gp=0.02206 accE=1.000 accP=0.938 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00945 expert_uniform_max=0.00273 current_expert_tv=0.17950 replay_expert_tv=0.08957 norm_expert_n=32768 norm_expert_uniform_tv=0.00781
+[FCAMP_CONTRACT] fk_max=2.789e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.172s actor=2.187s critic=0.325s disc=1.453s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2122 phase0_frac=0.0575 p50=151.0 p95=274.0 target_count=120 target_nonzero=0 curriculum_p50=157.0
+[PROGRESS] env_steps=47382528 iteration=13.188s throughput=14907.7
+[UPDATE] 250/500 amp=0.64548 done=0.01066 ep_len=94.26
+[FCAMP] policy=-0.00926 kl=0.015262 ratio=0.9988 clip=0.2137 grad=0.9619 lr=0.000200
+[SAMPLER_PHASE] start_mean=182.31 start_min=0 start_max=323 top_bin=3 top_prob=0.28479 entropy=0.91538 failed_sum=81.666
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=98.0 curr_fail_p50=230.0 phase0_inflight_p50=76.0 phase0_success_cum=0.00019 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.64548 credit=0.01291 amp_raw_std=0.06245 actor_std=1.00013
+[CRITIC] loss=0.09641 V=0.3824 target=0.3901 rmse=0.0629 ev=0.9363 grad=0.4746 grad_clip=0.0000
+[DISC] loss=0.88074 bce=0.32874 gp=0.02111 accE=1.000 accP=0.939 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00788 expert_uniform_max=0.00252 current_expert_tv=0.19293 replay_expert_tv=0.09082 norm_expert_n=32768 norm_expert_uniform_tv=0.00719
+[FCAMP_CONTRACT] fk_max=3.049e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.194s actor=2.221s critic=0.308s disc=1.467s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2095 phase0_frac=0.0644 p50=154.0 p95=271.0 target_count=133 target_nonzero=0 curriculum_p50=159.0
+[PROGRESS] env_steps=49348608 iteration=13.241s throughput=14848.4
+[VALIDATION_START] update=250 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.026s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.223s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.890s
+[VALIDATION_PROGRESS] step=100/500 done=0.00818 alive=0.99182 elapsed=15.531s
+[VALIDATION_PROGRESS] step=150/500 done=0.00903 alive=0.99097 elapsed=22.964s
+[VALIDATION_PROGRESS] step=200/500 done=0.02795 alive=0.97205 elapsed=30.823s
+[VALIDATION_PROGRESS] step=250/500 done=0.93677 alive=0.06323 elapsed=38.972s
+[VALIDATION_PROGRESS] step=300/500 done=0.95276 alive=0.04724 elapsed=47.376s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=51.218s
+[VALIDATION_DONE] update=250 time=51.275s
+[VAL] steps_mean=230.98 steps_min=79 steps_p50=228 steps_p95=299 steps_max=324 fail_phase_mean=228.1 done=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.00891 anchor_ori_bad=0.00781 ee_body_bad=0.95801 pose_fail=nan time_out=0.00000 anchor_z=0.07272 anchor_grav=0.48860 ee_z_max=0.25642 ee_z_mean=0.13181
+[VAL_FAIL] act_abs=0.80497 act_max=2.31272 root_pos=0.40252 root_ori=38.071deg anchor_pos=0.41921 anchor_ori=62.805deg joint_pos=0.20503 joint_vel=1.04004 body_pos=0.49848 body_pos_top=left_shoulder:0.67014 body_z=0.11632 body_z_top=right_wrist:0.24808
+[VAL_OUTCOME] failure=0.9695 motion_complete=0.0305 time_out=0.0000 steps_p50=228
+[VAL_PHASE] failure_p50=228.0 failure_p95=233.0 anchor_pos_p50=222.0 anchor_ori_p50=170.5 ee_body_p50=228.0 motion_complete_p50=324.0
+[VAL_MOTION] window_mmd2_w16=0.2332327 window_mmd2_w32=0.1397413 raw_w16=0.2332327 raw_w32=0.1397413 pairs_w16=12951 pairs_w32=12268 gap_w16=16 gap_w32=32 phase_mean_w16=123.38 phase_max_w16=323.00 phase_mean_w32=131.46 phase_max_w32=323.00 progress_max_w16=0.9969 progress_max_w32=0.9969 progress_span_w16=0.9475 progress_span_w32=0.8981 samples_w16=27345 samples_w32=25297 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.370922 delta_internal=0.094606 delta_ratio=3.9207 delta_boundary_p95=0.585101 delta_boundary_p99=0.686579 delta_internal_p95=0.147321 delta_internal_p99=0.223627 d2_boundary=0.406164 d2_internal=0.163910 d2_ratio=2.4780 d2_boundary_p95=0.607592 d2_boundary_p99=0.707625 d2_internal_p95=0.441892 d2_internal_p99=0.556683
+[VAL_CHUNK_STATE] joint_vel_boundary=0.957431 joint_vel_internal=0.436649 joint_vel_ratio=2.1927 joint_vel_boundary_p95=1.635368 joint_vel_boundary_p99=2.026964 joint_vel_internal_p95=0.886075 joint_vel_internal_p99=1.423928 root_ang_boundary=0.816993 root_ang_internal=0.356313 root_ang_ratio=2.2929 root_ang_boundary_p95=1.697042 root_ang_boundary_p99=2.158211 root_ang_internal_p95=0.842390 root_ang_internal_p99=1.597784
+[VAL_CHUNK_RESET] action_delta=0.685922 action_delta_p95=0.690180 joint_vel_jump=1.397051 joint_vel_jump_p95=1.524180 root_ang_vel_jump=0.510504 root_ang_vel_jump_p95=0.697542 joint_pos_error=0.023078 joint_vel_error=1.453903 root_ang_vel_error=0.510504
+[VAL_OFFSET0] joint_pos=0.119823 joint_pos_p95=0.181746 joint_vel=0.937115 joint_vel_p95=1.506339 root_ang_vel=0.835108 root_ang_vel_p95=1.776454 count=475539
+[VAL_OFFSET1] joint_pos=0.120334 joint_pos_p95=0.182008 joint_vel=0.936259 joint_vel_p95=1.632572 root_ang_vel=0.878267 root_ang_vel_p95=1.833975 count=473548
+[VAL_OFFSET2] joint_pos=0.121416 joint_pos_p95=0.183670 joint_vel=0.876990 joint_vel_p95=1.499651 root_ang_vel=0.838985 root_ang_vel_p95=1.795275 count=472523
+[VAL_OFFSET3] joint_pos=0.122658 joint_pos_p95=0.185053 joint_vel=0.853576 joint_vel_p95=1.445947 root_ang_vel=0.812179 root_ang_vel_p95=1.726430 count=470613
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/checkpoints/update_0250.pt
+[UPDATE] 260/500 amp=0.65071 done=0.01050 ep_len=85.93
+[FCAMP] policy=-0.00669 kl=0.015781 ratio=0.9997 clip=0.2181 grad=1.2072 lr=0.000200
+[SAMPLER_PHASE] start_mean=185.73 start_min=0 start_max=323 top_bin=3 top_prob=0.28850 entropy=0.90994 failed_sum=78.883
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=146.5 curr_fail_p50=232.0 phase0_inflight_p50=72.0 phase0_success_cum=0.00029 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.65071 credit=0.01301 amp_raw_std=0.06994 actor_std=1.00011
+[CRITIC] loss=0.11049 V=0.4164 target=0.4175 rmse=0.0699 ev=0.9347 grad=1.2792 grad_clip=0.5000
+[DISC] loss=0.85870 bce=0.32850 gp=0.02030 accE=1.000 accP=0.939 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.01011 expert_uniform_max=0.00312 current_expert_tv=0.20544 replay_expert_tv=0.08185 norm_expert_n=32768 norm_expert_uniform_tv=0.00940
+[FCAMP_CONTRACT] fk_max=3.299e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.162s actor=2.193s critic=0.313s disc=1.477s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2064 phase0_frac=0.0640 p50=157.0 p95=270.0 target_count=130 target_nonzero=0 curriculum_p50=164.0
+[PROGRESS] env_steps=51314688 iteration=13.194s throughput=14901.3
+[UPDATE] 270/500 amp=0.65113 done=0.01053 ep_len=85.40
+[FCAMP] policy=-0.00987 kl=0.014500 ratio=0.9995 clip=0.2059 grad=0.8771 lr=0.000133
+[SAMPLER_PHASE] start_mean=190.37 start_min=0 start_max=323 top_bin=3 top_prob=0.29113 entropy=0.90427 failed_sum=75.943
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=144.0 curr_fail_p50=233.0 phase0_inflight_p50=72.0 phase0_success_cum=0.00038 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00719 disc_quota=1
+[AMP_CREDIT] raw=0.65113 credit=0.01302 amp_raw_std=0.07240 actor_std=1.00009
+[CRITIC] loss=0.11285 V=0.4486 target=0.4449 rmse=0.0725 ev=0.9335 grad=1.4841 grad_clip=0.9000
+[DISC] loss=0.83782 bce=0.32838 gp=0.01954 accE=1.000 accP=0.939 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00896 expert_uniform_max=0.00282 current_expert_tv=0.19952 replay_expert_tv=0.08322 norm_expert_n=32768 norm_expert_uniform_tv=0.00530
+[FCAMP_CONTRACT] fk_max=3.147e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.125s actor=2.213s critic=0.305s disc=1.463s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2070 phase0_frac=0.0676 p50=160.0 p95=271.0 target_count=139 target_nonzero=0 curriculum_p50=165.0
+[PROGRESS] env_steps=53280768 iteration=13.164s throughput=14935.7
+[UPDATE] 280/500 amp=0.65018 done=0.01020 ep_len=94.54
+[FCAMP] policy=-0.00958 kl=0.015766 ratio=0.9996 clip=0.2213 grad=0.9414 lr=0.000200
+[SAMPLER_PHASE] start_mean=193.07 start_min=0 start_max=323 top_bin=3 top_prob=0.29407 entropy=0.89727 failed_sum=72.819
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=184.0 curr_fail_p50=233.0 phase0_inflight_p50=84.0 phase0_success_cum=0.00058 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.01515 disc_quota=1
+[AMP_CREDIT] raw=0.65018 credit=0.01300 amp_raw_std=0.07038 actor_std=1.00008
+[CRITIC] loss=0.10948 V=0.4524 target=0.4496 rmse=0.0704 ev=0.9384 grad=1.3570 grad_clip=0.4500
+[DISC] loss=0.81710 bce=0.32690 gp=0.01885 accE=1.000 accP=0.943 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00834 expert_uniform_max=0.00353 current_expert_tv=0.20401 replay_expert_tv=0.07639 norm_expert_n=32768 norm_expert_uniform_tv=0.00708
+[FCAMP_CONTRACT] fk_max=3.183e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.112s actor=2.205s critic=0.306s disc=1.477s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2005 phase0_frac=0.0678 p50=164.0 p95=271.0 target_count=132 target_nonzero=0 curriculum_p50=170.0
+[PROGRESS] env_steps=55246848 iteration=13.151s throughput=14949.8
+[UPDATE] 290/500 amp=0.65103 done=0.01022 ep_len=92.02
+[FCAMP] policy=-0.00821 kl=0.016154 ratio=0.9994 clip=0.2232 grad=1.0316 lr=0.000200
+[SAMPLER_PHASE] start_mean=196.48 start_min=0 start_max=323 top_bin=3 top_prob=0.29609 entropy=0.89060 failed_sum=69.844
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=145.5 curr_fail_p50=232.0 phase0_inflight_p50=84.0 phase0_success_cum=0.00076 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00000 disc_quota=1
+[AMP_CREDIT] raw=0.65103 credit=0.01302 amp_raw_std=0.06984 actor_std=1.00012
+[CRITIC] loss=0.10717 V=0.4462 target=0.4447 rmse=0.0699 ev=0.9362 grad=1.0745 grad_clip=0.3500
+[DISC] loss=0.79872 bce=0.32613 gp=0.01827 accE=1.000 accP=0.944 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00958 expert_uniform_max=0.00234 current_expert_tv=0.21176 replay_expert_tv=0.06921 norm_expert_n=32768 norm_expert_uniform_tv=0.00825
+[FCAMP_CONTRACT] fk_max=2.772e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.129s actor=2.213s critic=0.307s disc=1.449s gpu_peak=4.31GiB
+[TRAIN_RESET] count=2010 phase0_frac=0.0602 p50=164.0 p95=273.0 target_count=118 target_nonzero=0 curriculum_p50=169.0
+[PROGRESS] env_steps=57212928 iteration=13.149s throughput=14951.9
+[UPDATE] 300/500 amp=0.65420 done=0.00987 ep_len=93.43
+[FCAMP] policy=-0.00869 kl=0.017256 ratio=0.9995 clip=0.2385 grad=1.0764 lr=0.000200
+[SAMPLER_PHASE] start_mean=198.40 start_min=0 start_max=323 top_bin=3 top_prob=0.29707 entropy=0.88401 failed_sum=66.738
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=166.0 curr_fail_p50=234.0 phase0_inflight_p50=80.0 phase0_success_cum=0.00087 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00820 disc_quota=1
+[AMP_CREDIT] raw=0.65420 credit=0.01308 amp_raw_std=0.07048 actor_std=1.00016
+[CRITIC] loss=0.10760 V=0.4445 target=0.4464 rmse=0.0705 ev=0.9379 grad=0.8119 grad_clip=0.2500
+[DISC] loss=0.78316 bce=0.32553 gp=0.01790 accE=1.000 accP=0.943 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00430 expert_uniform_max=0.00157 current_expert_tv=0.22446 replay_expert_tv=0.07043 norm_expert_n=32768 norm_expert_uniform_tv=0.01251
+[FCAMP_CONTRACT] fk_max=2.918e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.223s actor=2.191s critic=0.304s disc=1.467s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1941 phase0_frac=0.0654 p50=167.0 p95=272.0 target_count=122 target_nonzero=0 curriculum_p50=171.0
+[PROGRESS] env_steps=59179008 iteration=13.242s throughput=14847.4
+[VALIDATION_START] update=300 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.025s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.236s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.846s
+[VALIDATION_PROGRESS] step=100/500 done=0.00354 alive=0.99646 elapsed=15.433s
+[VALIDATION_PROGRESS] step=150/500 done=0.00378 alive=0.99622 elapsed=22.769s
+[VALIDATION_PROGRESS] step=200/500 done=0.01196 alive=0.98804 elapsed=30.445s
+[VALIDATION_PROGRESS] step=250/500 done=0.94360 alive=0.05640 elapsed=38.571s
+[VALIDATION_PROGRESS] step=300/500 done=0.94873 alive=0.05127 elapsed=46.976s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=50.860s
+[VALIDATION_DONE] update=300 time=50.915s
+[VAL] steps_mean=231.32 steps_min=73 steps_p50=227 steps_p95=302 steps_max=324 fail_phase_mean=228.1 done=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.00085 anchor_ori_bad=0.00122 ee_body_bad=0.96509 pose_fail=nan time_out=0.00000 anchor_z=0.05811 anchor_grav=0.47644 ee_z_max=0.25649 ee_z_mean=0.12968
+[VAL_FAIL] act_abs=0.80302 act_max=2.33008 root_pos=0.41612 root_ori=39.919deg anchor_pos=0.43324 anchor_ori=63.243deg joint_pos=0.21773 joint_vel=1.07610 body_pos=0.51220 body_pos_top=left_shoulder:0.68111 body_z=0.10770 body_z_top=right_wrist:0.24945
+[VAL_OUTCOME] failure=0.9664 motion_complete=0.0336 time_out=0.0000 steps_p50=227
+[VAL_PHASE] failure_p50=227.0 failure_p95=231.0 anchor_pos_p50=301.0 anchor_ori_p50=181.0 ee_body_p50=227.0 motion_complete_p50=324.0
+[VAL_MOTION] window_mmd2_w16=0.2314582 window_mmd2_w32=0.1521699 raw_w16=0.2314582 raw_w32=0.1521699 pairs_w16=12999 pairs_w32=12464 gap_w16=16 gap_w32=32 phase_mean_w16=124.07 phase_max_w16=323.00 phase_mean_w32=132.14 phase_max_w32=323.00 progress_max_w16=0.9969 progress_max_w32=0.9969 progress_span_w16=0.9475 progress_span_w32=0.8981 samples_w16=27573 samples_w32=25525 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.392952 delta_internal=0.109953 delta_ratio=3.5738 delta_boundary_p95=0.589782 delta_boundary_p99=0.718256 delta_internal_p95=0.162025 delta_internal_p99=0.221129 d2_boundary=0.438592 d2_internal=0.181066 d2_ratio=2.4223 d2_boundary_p95=0.623897 d2_boundary_p99=0.741929 d2_internal_p95=0.468736 d2_internal_p99=0.585148
+[VAL_CHUNK_STATE] joint_vel_boundary=1.006416 joint_vel_internal=0.465296 joint_vel_ratio=2.1630 joint_vel_boundary_p95=1.692529 joint_vel_boundary_p99=2.377653 joint_vel_internal_p95=0.902157 joint_vel_internal_p99=1.453157 root_ang_boundary=0.853281 root_ang_internal=0.356871 root_ang_ratio=2.3910 root_ang_boundary_p95=1.849327 root_ang_boundary_p99=2.623088 root_ang_internal_p95=0.848461 root_ang_internal_p99=1.429179
+[VAL_CHUNK_RESET] action_delta=0.745718 action_delta_p95=0.750202 joint_vel_jump=1.547651 joint_vel_jump_p95=1.661415 root_ang_vel_jump=0.656298 root_ang_vel_jump_p95=0.826963 joint_pos_error=0.025556 joint_vel_error=1.609945 root_ang_vel_error=0.656298
+[VAL_OFFSET0] joint_pos=0.121574 joint_pos_p95=0.194617 joint_vel=0.990371 joint_vel_p95=1.637446 root_ang_vel=0.878670 root_ang_vel_p95=1.852769 count=476490
+[VAL_OFFSET1] joint_pos=0.121951 joint_pos_p95=0.194766 joint_vel=0.968544 joint_vel_p95=1.721395 root_ang_vel=0.910809 root_ang_vel_p95=1.956453 count=474704
+[VAL_OFFSET2] joint_pos=0.123231 joint_pos_p95=0.196043 joint_vel=0.901627 joint_vel_p95=1.551064 root_ang_vel=0.863304 root_ang_vel_p95=1.952208 count=473002
+[VAL_OFFSET3] joint_pos=0.124971 joint_pos_p95=0.197769 joint_vel=0.887822 joint_vel_p95=1.484189 root_ang_vel=0.826538 root_ang_vel_p95=1.847808 count=470775
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/checkpoints/update_0300.pt
+[UPDATE] 310/500 amp=0.65588 done=0.01016 ep_len=96.62
+[FCAMP] policy=-0.00862 kl=0.015200 ratio=0.9995 clip=0.2118 grad=1.0304 lr=0.000133
+[SAMPLER_PHASE] start_mean=202.57 start_min=0 start_max=323 top_bin=3 top_prob=0.29700 entropy=0.87720 failed_sum=63.917
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=158.0 curr_fail_p50=235.0 phase0_inflight_p50=76.0 phase0_success_cum=0.00115 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.02878 disc_quota=1
+[AMP_CREDIT] raw=0.65588 credit=0.01312 amp_raw_std=0.07204 actor_std=1.00012
+[CRITIC] loss=0.10809 V=0.4706 target=0.4678 rmse=0.0721 ev=0.9376 grad=0.7556 grad_clip=0.2500
+[DISC] loss=0.76799 bce=0.32625 gp=0.01739 accE=1.000 accP=0.943 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00849 expert_uniform_max=0.00246 current_expert_tv=0.23395 replay_expert_tv=0.07449 norm_expert_n=32768 norm_expert_uniform_tv=0.00970
+[FCAMP_CONTRACT] fk_max=2.989e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.146s actor=2.196s critic=0.303s disc=1.444s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1997 phase0_frac=0.0716 p50=170.0 p95=271.0 target_count=139 target_nonzero=0 curriculum_p50=177.0
+[PROGRESS] env_steps=61145088 iteration=13.140s throughput=14962.6
+[UPDATE] 320/500 amp=0.66686 done=0.00994 ep_len=97.62
+[FCAMP] policy=-0.00846 kl=0.016806 ratio=0.9997 clip=0.2334 grad=1.0750 lr=0.000200
+[SAMPLER_PHASE] start_mean=203.90 start_min=0 start_max=323 top_bin=3 top_prob=0.29457 entropy=0.87067 failed_sum=61.227
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=178.0 curr_fail_p50=236.0 phase0_inflight_p50=80.0 phase0_success_cum=0.00154 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.05833 disc_quota=1
+[AMP_CREDIT] raw=0.66686 credit=0.01334 amp_raw_std=0.07000 actor_std=1.00014
+[CRITIC] loss=0.10822 V=0.4615 target=0.4630 rmse=0.0700 ev=0.9366 grad=1.4559 grad_clip=0.8500
+[DISC] loss=0.75263 bce=0.32559 gp=0.01694 accE=1.000 accP=0.942 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00795 expert_uniform_max=0.00309 current_expert_tv=0.24689 replay_expert_tv=0.07376 norm_expert_n=32768 norm_expert_uniform_tv=0.00921
+[FCAMP_CONTRACT] fk_max=2.933e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.218s actor=2.204s critic=0.302s disc=1.483s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1954 phase0_frac=0.0619 p50=171.0 p95=272.0 target_count=120 target_nonzero=0 curriculum_p50=177.0
+[PROGRESS] env_steps=63111168 iteration=13.264s throughput=14822.9
+[UPDATE] 330/500 amp=0.65873 done=0.00995 ep_len=88.28
+[FCAMP] policy=-0.00887 kl=0.016479 ratio=0.9996 clip=0.2280 grad=1.0167 lr=0.000200
+[SAMPLER_PHASE] start_mean=205.75 start_min=0 start_max=323 top_bin=3 top_prob=0.29415 entropy=0.86402 failed_sum=58.777
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=172.0 curr_fail_p50=239.0 phase0_inflight_p50=84.0 phase0_success_cum=0.00189 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.04425 disc_quota=1
+[AMP_CREDIT] raw=0.65873 credit=0.01317 amp_raw_std=0.07245 actor_std=1.00018
+[CRITIC] loss=0.10782 V=0.4667 target=0.4660 rmse=0.0725 ev=0.9338 grad=0.6952 grad_clip=0.2000
+[DISC] loss=0.73697 bce=0.32388 gp=0.01652 accE=1.000 accP=0.947 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00825 expert_uniform_max=0.00230 current_expert_tv=0.25168 replay_expert_tv=0.07382 norm_expert_n=32768 norm_expert_uniform_tv=0.00952
+[FCAMP_CONTRACT] fk_max=3.129e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.235s actor=2.180s critic=0.305s disc=1.451s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1957 phase0_frac=0.0583 p50=180.0 p95=274.0 target_count=113 target_nonzero=0 curriculum_p50=184.0
+[PROGRESS] env_steps=65077248 iteration=13.222s throughput=14869.7
+[UPDATE] 340/500 amp=0.66497 done=0.00961 ep_len=98.29
+[FCAMP] policy=-0.00874 kl=0.014682 ratio=0.9996 clip=0.2051 grad=1.0099 lr=0.000133
+[SAMPLER_PHASE] start_mean=208.37 start_min=0 start_max=323 top_bin=5 top_prob=0.30142 entropy=0.85832 failed_sum=56.355
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.100 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=191.0 curr_fail_p50=238.0 phase0_inflight_p50=84.0 phase0_success_cum=0.00247 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.02239 disc_quota=1
+[AMP_CREDIT] raw=0.66497 credit=0.01330 amp_raw_std=0.07461 actor_std=1.00011
+[CRITIC] loss=0.11940 V=0.4978 target=0.4915 rmse=0.0749 ev=0.9346 grad=2.1587 grad_clip=0.8000
+[DISC] loss=0.72420 bce=0.32363 gp=0.01621 accE=1.000 accP=0.946 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.01137 expert_uniform_max=0.00325 current_expert_tv=0.26175 replay_expert_tv=0.06860 norm_expert_n=32768 norm_expert_uniform_tv=0.00798
+[FCAMP_CONTRACT] fk_max=2.897e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.049s actor=2.178s critic=0.309s disc=1.493s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1889 phase0_frac=0.0720 p50=174.0 p95=273.0 target_count=134 target_nonzero=0 curriculum_p50=181.0
+[PROGRESS] env_steps=67043328 iteration=13.079s throughput=15032.2
+[UPDATE] 350/500 amp=0.66358 done=0.00950 ep_len=102.11
+[FCAMP] policy=-0.00887 kl=0.015152 ratio=0.9996 clip=0.2100 grad=1.0894 lr=0.000133
+[SAMPLER_PHASE] start_mean=210.16 start_min=0 start_max=323 top_bin=5 top_prob=0.31425 entropy=0.85235 failed_sum=54.258
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=174.0 curr_fail_p50=249.0 phase0_inflight_p50=96.0 phase0_success_cum=0.00285 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.05042 disc_quota=1
+[AMP_CREDIT] raw=0.66358 credit=0.01327 amp_raw_std=0.07173 actor_std=1.00014
+[CRITIC] loss=0.10579 V=0.4715 target=0.4715 rmse=0.0717 ev=0.9360 grad=0.4770 grad_clip=0.0000
+[DISC] loss=0.71163 bce=0.32328 gp=0.01588 accE=1.000 accP=0.945 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.01013 expert_uniform_max=0.00303 current_expert_tv=0.26208 replay_expert_tv=0.07111 norm_expert_n=32768 norm_expert_uniform_tv=0.00852
+[FCAMP_CONTRACT] fk_max=2.795e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.190s actor=2.180s critic=0.304s disc=1.438s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1867 phase0_frac=0.0648 p50=181.0 p95=274.0 target_count=119 target_nonzero=0 curriculum_p50=187.0
+[PROGRESS] env_steps=69009408 iteration=13.163s throughput=14936.3
+[VALIDATION_START] update=350 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.025s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.221s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.937s
+[VALIDATION_PROGRESS] step=100/500 done=0.00195 alive=0.99805 elapsed=15.744s
+[VALIDATION_PROGRESS] step=150/500 done=0.02686 alive=0.97314 elapsed=23.615s
+[VALIDATION_PROGRESS] step=200/500 done=0.04968 alive=0.95032 elapsed=31.600s
+[VALIDATION_PROGRESS] step=250/500 done=0.79358 alive=0.20642 elapsed=39.886s
+[VALIDATION_PROGRESS] step=300/500 done=0.80151 alive=0.19849 elapsed=48.389s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=52.430s
+[VALIDATION_DONE] update=350 time=52.486s
+[VAL] steps_mean=241.41 steps_min=77 steps_p50=228 steps_p95=324 steps_max=324 fail_phase_mean=234.1 done=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.00220 anchor_ori_bad=0.00134 ee_body_bad=0.91687 pose_fail=nan time_out=0.00000 anchor_z=0.07276 anchor_grav=0.45582 ee_z_max=0.25730 ee_z_mean=0.13181
+[VAL_FAIL] act_abs=1.01273 act_max=3.52770 root_pos=0.37918 root_ori=51.101deg anchor_pos=0.39544 anchor_ori=56.096deg joint_pos=0.24002 joint_vel=1.18527 body_pos=0.43633 body_pos_top=left_shoulder:0.57253 body_z=0.11477 body_z_top=left_wrist:0.24469
+[VAL_OUTCOME] failure=0.9191 motion_complete=0.0809 time_out=0.0000 steps_p50=228
+[VAL_PHASE] failure_p50=228.0 failure_p95=309.0 anchor_pos_p50=300.0 anchor_ori_p50=145.0 ee_body_p50=228.0 motion_complete_p50=324.0
+[VAL_MOTION] window_mmd2_w16=0.2537661 window_mmd2_w32=0.1665058 raw_w16=0.2537661 raw_w32=0.1665058 pairs_w16=14416 pairs_w32=13312 gap_w16=16 gap_w32=32 phase_mean_w16=137.24 phase_max_w16=323.00 phase_mean_w32=145.55 phase_max_w32=323.00 progress_max_w16=0.9969 progress_max_w32=0.9969 progress_span_w16=0.9475 progress_span_w32=0.8981 samples_w16=30095 samples_w32=28047 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.408610 delta_internal=0.121570 delta_ratio=3.3611 delta_boundary_p95=0.621330 delta_boundary_p99=0.733803 delta_internal_p95=0.181303 delta_internal_p99=0.239707 d2_boundary=0.464840 d2_internal=0.197386 d2_ratio=2.3550 d2_boundary_p95=0.667665 d2_boundary_p99=0.766629 d2_internal_p95=0.511943 d2_internal_p99=0.646903
+[VAL_CHUNK_STATE] joint_vel_boundary=1.038939 joint_vel_internal=0.488564 joint_vel_ratio=2.1265 joint_vel_boundary_p95=1.843006 joint_vel_boundary_p99=2.501402 joint_vel_internal_p95=0.945683 joint_vel_internal_p99=1.384375 root_ang_boundary=0.835927 root_ang_internal=0.384715 root_ang_ratio=2.1728 root_ang_boundary_p95=1.887021 root_ang_boundary_p99=2.927815 root_ang_internal_p95=0.867119 root_ang_internal_p99=1.354780
+[VAL_CHUNK_RESET] action_delta=0.793689 action_delta_p95=0.797976 joint_vel_jump=1.683859 joint_vel_jump_p95=1.823830 root_ang_vel_jump=0.838031 root_ang_vel_jump_p95=1.010086 joint_pos_error=0.027284 joint_vel_error=1.741166 root_ang_vel_error=0.838031
+[VAL_OFFSET0] joint_pos=0.130221 joint_pos_p95=0.222093 joint_vel=1.033985 joint_vel_p95=1.748331 root_ang_vel=0.935540 root_ang_vel_p95=2.059300 count=497263
+[VAL_OFFSET1] joint_pos=0.130826 joint_pos_p95=0.221545 joint_vel=0.989011 joint_vel_p95=1.729111 root_ang_vel=0.936345 root_ang_vel_p95=2.084210 count=495358
+[VAL_OFFSET2] joint_pos=0.132524 joint_pos_p95=0.222245 joint_vel=0.921629 joint_vel_p95=1.531408 root_ang_vel=0.898593 root_ang_vel_p95=2.064664 count=493410
+[VAL_OFFSET3] joint_pos=0.134218 joint_pos_p95=0.224859 joint_vel=0.910505 joint_vel_p95=1.492461 root_ang_vel=0.875561 root_ang_vel_p95=1.953239 count=491562
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/checkpoints/update_0350.pt
+[UPDATE] 360/500 amp=0.66600 done=0.00947 ep_len=107.08
+[FCAMP] policy=-0.00908 kl=0.016567 ratio=0.9992 clip=0.2285 grad=1.1096 lr=0.000133
+[SAMPLER_PHASE] start_mean=210.07 start_min=0 start_max=323 top_bin=5 top_prob=0.32599 entropy=0.84614 failed_sum=52.116
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=176.0 curr_fail_p50=247.0 phase0_inflight_p50=96.0 phase0_success_cum=0.00325 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.00901 disc_quota=1
+[AMP_CREDIT] raw=0.66600 credit=0.01332 amp_raw_std=0.07214 actor_std=1.00018
+[CRITIC] loss=0.10596 V=0.4891 target=0.4877 rmse=0.0722 ev=0.9381 grad=0.5663 grad_clip=0.0000
+[DISC] loss=0.69936 bce=0.32341 gp=0.01549 accE=1.000 accP=0.946 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00610 expert_uniform_max=0.00344 current_expert_tv=0.26559 replay_expert_tv=0.07983 norm_expert_n=32768 norm_expert_uniform_tv=0.00937
+[FCAMP_CONTRACT] fk_max=2.611e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=8.944s actor=2.176s critic=0.304s disc=1.446s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1862 phase0_frac=0.0596 p50=177.0 p95=273.0 target_count=111 target_nonzero=0 curriculum_p50=182.0
+[PROGRESS] env_steps=70975488 iteration=12.920s throughput=15217.1
+[UPDATE] 370/500 amp=0.66826 done=0.00981 ep_len=99.84
+[FCAMP] policy=-0.00881 kl=0.014854 ratio=0.9994 clip=0.2061 grad=1.0668 lr=0.000133
+[SAMPLER_PHASE] start_mean=213.09 start_min=0 start_max=323 top_bin=5 top_prob=0.33677 entropy=0.84105 failed_sum=50.099
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=189.0 curr_fail_p50=269.5 phase0_inflight_p50=96.0 phase0_success_cum=0.00365 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.02857 disc_quota=1
+[AMP_CREDIT] raw=0.66826 credit=0.01337 amp_raw_std=0.07004 actor_std=1.00020
+[CRITIC] loss=0.10369 V=0.4986 target=0.4958 rmse=0.0701 ev=0.9411 grad=0.5955 grad_clip=0.0500
+[DISC] loss=0.68781 bce=0.32245 gp=0.01525 accE=1.000 accP=0.945 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00671 expert_uniform_max=0.00267 current_expert_tv=0.26843 replay_expert_tv=0.09183 norm_expert_n=32768 norm_expert_uniform_tv=0.00937
+[FCAMP_CONTRACT] fk_max=3.010e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.144s actor=2.174s critic=0.304s disc=1.472s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1928 phase0_frac=0.0555 p50=180.0 p95=273.0 target_count=105 target_nonzero=0 curriculum_p50=184.0
+[PROGRESS] env_steps=72941568 iteration=13.146s throughput=14956.2
+[UPDATE] 380/500 amp=0.67267 done=0.00951 ep_len=117.71
+[FCAMP] policy=-0.00916 kl=0.014737 ratio=0.9990 clip=0.2034 grad=1.0616 lr=0.000133
+[SAMPLER_PHASE] start_mean=214.60 start_min=0 start_max=323 top_bin=5 top_prob=0.34638 entropy=0.83613 failed_sum=48.103
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=187.0 curr_fail_p50=254.0 phase0_inflight_p50=92.0 phase0_success_cum=0.00418 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.07843 disc_quota=1
+[AMP_CREDIT] raw=0.67267 credit=0.01345 amp_raw_std=0.06852 actor_std=1.00022
+[CRITIC] loss=0.10790 V=0.4965 target=0.4970 rmse=0.0685 ev=0.9437 grad=2.0886 grad_clip=0.7500
+[DISC] loss=0.67709 bce=0.32251 gp=0.01495 accE=1.000 accP=0.943 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00693 expert_uniform_max=0.00257 current_expert_tv=0.27713 replay_expert_tv=0.09357 norm_expert_n=32768 norm_expert_uniform_tv=0.00707
+[FCAMP_CONTRACT] fk_max=2.807e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.259s actor=2.192s critic=0.305s disc=1.488s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1870 phase0_frac=0.0556 p50=185.0 p95=274.0 target_count=102 target_nonzero=0 curriculum_p50=196.0
+[PROGRESS] env_steps=74907648 iteration=13.294s throughput=14788.8
+[UPDATE] 390/500 amp=0.66917 done=0.00947 ep_len=106.71
+[FCAMP] policy=-0.00993 kl=0.015801 ratio=0.9994 clip=0.2187 grad=1.0599 lr=0.000133
+[SAMPLER_PHASE] start_mean=215.02 start_min=0 start_max=323 top_bin=5 top_prob=0.35551 entropy=0.83071 failed_sum=46.340
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=188.0 curr_fail_p50=252.0 phase0_inflight_p50=96.0 phase0_success_cum=0.00479 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.03191 disc_quota=1
+[AMP_CREDIT] raw=0.66917 credit=0.01338 amp_raw_std=0.06930 actor_std=1.00018
+[CRITIC] loss=0.10173 V=0.4926 target=0.4935 rmse=0.0693 ev=0.9391 grad=0.5744 grad_clip=0.0500
+[DISC] loss=0.66549 bce=0.32130 gp=0.01466 accE=1.000 accP=0.948 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00931 expert_uniform_max=0.00276 current_expert_tv=0.28278 replay_expert_tv=0.10123 norm_expert_n=32768 norm_expert_uniform_tv=0.01023
+[FCAMP_CONTRACT] fk_max=2.946e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.193s actor=2.178s critic=0.304s disc=1.500s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1861 phase0_frac=0.0510 p50=194.0 p95=273.0 target_count=94 target_nonzero=0 curriculum_p50=201.0
+[PROGRESS] env_steps=76873728 iteration=13.227s throughput=14864.1
+[UPDATE] 400/500 amp=0.67568 done=0.00960 ep_len=110.98
+[FCAMP] policy=-0.00888 kl=0.016361 ratio=0.9992 clip=0.2236 grad=1.2309 lr=0.000200
+[SAMPLER_PHASE] start_mean=216.45 start_min=0 start_max=323 top_bin=5 top_prob=0.36402 entropy=0.82567 failed_sum=44.490
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=211.5 curr_fail_p50=253.0 phase0_inflight_p50=100.0 phase0_success_cum=0.00536 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.06250 disc_quota=1
+[AMP_CREDIT] raw=0.67568 credit=0.01351 amp_raw_std=0.06686 actor_std=1.00017
+[CRITIC] loss=0.09929 V=0.5010 target=0.5021 rmse=0.0669 ev=0.9428 grad=0.8098 grad_clip=0.2500
+[DISC] loss=0.65751 bce=0.32298 gp=0.01440 accE=1.000 accP=0.944 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00816 expert_uniform_max=0.00316 current_expert_tv=0.28247 replay_expert_tv=0.10580 norm_expert_n=32768 norm_expert_uniform_tv=0.00684
+[FCAMP_CONTRACT] fk_max=3.004e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.318s actor=2.206s critic=0.304s disc=1.455s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1887 phase0_frac=0.0514 p50=193.0 p95=274.0 target_count=96 target_nonzero=0 curriculum_p50=202.0
+[PROGRESS] env_steps=78839808 iteration=13.334s throughput=14744.5
+[VALIDATION_START] update=400 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.025s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.216s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.788s
+[VALIDATION_PROGRESS] step=100/500 done=0.00073 alive=0.99927 elapsed=15.368s
+[VALIDATION_PROGRESS] step=150/500 done=0.00171 alive=0.99829 elapsed=22.941s
+[VALIDATION_PROGRESS] step=200/500 done=0.01392 alive=0.98608 elapsed=30.972s
+[VALIDATION_PROGRESS] step=250/500 done=0.51953 alive=0.48047 elapsed=39.230s
+[VALIDATION_PROGRESS] step=300/500 done=0.53467 alive=0.46533 elapsed=47.731s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=51.773s
+[VALIDATION_DONE] update=400 time=51.829s
+[VAL] steps_mean=266.38 steps_min=71 steps_p50=237 steps_p95=324 steps_max=324 fail_phase_mean=254.7 done=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.00269 anchor_ori_bad=0.00024 ee_body_bad=0.82898 pose_fail=nan time_out=0.00000 anchor_z=0.11482 anchor_grav=0.38897 ee_z_max=0.25583 ee_z_mean=0.13186
+[VAL_FAIL] act_abs=1.14929 act_max=4.28372 root_pos=0.46431 root_ori=49.337deg anchor_pos=0.46966 anchor_ori=48.166deg joint_pos=0.24588 joint_vel=1.13931 body_pos=0.46718 body_pos_top=left_shoulder:0.57789 body_z=0.13236 body_z_top=left_wrist:0.25300
+[VAL_OUTCOME] failure=0.8317 motion_complete=0.1683 time_out=0.0000 steps_p50=237
+[VAL_PHASE] failure_p50=231.0 failure_p95=311.0 anchor_pos_p50=290.5 anchor_ori_p50=263.0 ee_body_p50=231.0 motion_complete_p50=324.0
+[VAL_MOTION] window_mmd2_w16=0.2763657 window_mmd2_w32=0.1730604 raw_w16=0.2763657 raw_w32=0.1730604 pairs_w16=15859 pairs_w32=14335 gap_w16=16 gap_w32=32 phase_mean_w16=147.95 phase_max_w16=323.00 phase_mean_w32=156.23 phase_max_w32=323.00 progress_max_w16=0.9969 progress_max_w32=0.9969 progress_span_w16=0.9475 progress_span_w32=0.8981 samples_w16=32839 samples_w32=30791 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.409576 delta_internal=0.127959 delta_ratio=3.2008 delta_boundary_p95=0.600651 delta_boundary_p99=0.700821 delta_internal_p95=0.198290 delta_internal_p99=0.244078 d2_boundary=0.477260 d2_internal=0.206452 d2_ratio=2.3117 d2_boundary_p95=0.683436 d2_boundary_p99=0.774167 d2_internal_p95=0.529015 d2_internal_p99=0.662875
+[VAL_CHUNK_STATE] joint_vel_boundary=1.061556 joint_vel_internal=0.508706 joint_vel_ratio=2.0868 joint_vel_boundary_p95=1.842360 joint_vel_boundary_p99=2.326943 joint_vel_internal_p95=0.935177 joint_vel_internal_p99=1.462908 root_ang_boundary=0.810930 root_ang_internal=0.400527 root_ang_ratio=2.0247 root_ang_boundary_p95=1.774868 root_ang_boundary_p99=2.430344 root_ang_internal_p95=0.900825 root_ang_internal_p99=1.376680
+[VAL_CHUNK_RESET] action_delta=0.814363 action_delta_p95=0.820050 joint_vel_jump=1.632910 joint_vel_jump_p95=1.757915 root_ang_vel_jump=0.889268 root_ang_vel_jump_p95=1.028000 joint_pos_error=0.027141 joint_vel_error=1.690411 root_ang_vel_error=0.889268
+[VAL_OFFSET0] joint_pos=0.125069 joint_pos_p95=0.216978 joint_vel=1.005801 joint_vel_p95=1.685619 root_ang_vel=0.899429 root_ang_vel_p95=1.904470 count=548231
+[VAL_OFFSET1] joint_pos=0.125865 joint_pos_p95=0.216745 joint_vel=0.957202 joint_vel_p95=1.617447 root_ang_vel=0.892598 root_ang_vel_p95=1.876685 count=546590
+[VAL_OFFSET2] joint_pos=0.127189 joint_pos_p95=0.217345 joint_vel=0.882626 joint_vel_p95=1.496585 root_ang_vel=0.854839 root_ang_vel_p95=1.993156 count=544485
+[VAL_OFFSET3] joint_pos=0.128494 joint_pos_p95=0.220075 joint_vel=0.900501 joint_vel_p95=1.504659 root_ang_vel=0.847287 root_ang_vel_p95=1.908262 count=542896
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/checkpoints/update_0400.pt
+[UPDATE] 410/500 amp=0.67687 done=0.00968 ep_len=103.96
+[FCAMP] policy=-0.00899 kl=0.016986 ratio=0.9994 clip=0.2299 grad=1.2026 lr=0.000089
+[SAMPLER_PHASE] start_mean=216.36 start_min=0 start_max=323 top_bin=5 top_prob=0.37250 entropy=0.82207 failed_sum=42.988
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=185.0 curr_fail_p50=278.0 phase0_inflight_p50=96.0 phase0_success_cum=0.00620 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.10435 disc_quota=1
+[AMP_CREDIT] raw=0.67687 credit=0.01354 amp_raw_std=0.06885 actor_std=1.00017
+[CRITIC] loss=0.10132 V=0.5288 target=0.5241 rmse=0.0690 ev=0.9469 grad=0.7475 grad_clip=0.2500
+[DISC] loss=0.64756 bce=0.32157 gp=0.01423 accE=1.000 accP=0.944 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00697 expert_uniform_max=0.00230 current_expert_tv=0.28271 replay_expert_tv=0.11496 norm_expert_n=32768 norm_expert_uniform_tv=0.00920
+[FCAMP_CONTRACT] fk_max=2.676e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=8.933s actor=2.206s critic=0.311s disc=1.486s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1903 phase0_frac=0.0610 p50=190.0 p95=273.0 target_count=115 target_nonzero=0 curriculum_p50=199.0
+[PROGRESS] env_steps=80805888 iteration=12.997s throughput=15126.8
+[UPDATE] 420/500 amp=0.67296 done=0.00957 ep_len=99.45
+[FCAMP] policy=-0.00959 kl=0.015276 ratio=0.9991 clip=0.2117 grad=1.1448 lr=0.000133
+[SAMPLER_PHASE] start_mean=218.97 start_min=0 start_max=323 top_bin=5 top_prob=0.38052 entropy=0.81762 failed_sum=41.362
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=197.0 curr_fail_p50=255.0 phase0_inflight_p50=88.0 phase0_success_cum=0.00697 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.10092 disc_quota=1
+[AMP_CREDIT] raw=0.67296 credit=0.01346 amp_raw_std=0.06620 actor_std=1.00018
+[CRITIC] loss=0.09681 V=0.5098 target=0.5104 rmse=0.0662 ev=0.9490 grad=0.7552 grad_clip=0.2500
+[DISC] loss=0.63808 bce=0.32054 gp=0.01404 accE=1.000 accP=0.947 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00807 expert_uniform_max=0.00258 current_expert_tv=0.30399 replay_expert_tv=0.12344 norm_expert_n=32768 norm_expert_uniform_tv=0.00773
+[FCAMP_CONTRACT] fk_max=2.778e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.098s actor=2.189s critic=0.304s disc=1.451s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1882 phase0_frac=0.0579 p50=197.0 p95=275.0 target_count=109 target_nonzero=0 curriculum_p50=206.0
+[PROGRESS] env_steps=82771968 iteration=13.093s throughput=15016.3
+[UPDATE] 430/500 amp=0.67342 done=0.00924 ep_len=106.20
+[FCAMP] policy=-0.00996 kl=0.015596 ratio=0.9998 clip=0.2151 grad=1.1242 lr=0.000133
+[SAMPLER_PHASE] start_mean=219.29 start_min=0 start_max=323 top_bin=5 top_prob=0.38473 entropy=0.81598 failed_sum=39.683
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=203.0 curr_fail_p50=265.0 phase0_inflight_p50=104.0 phase0_success_cum=0.00772 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.08421 disc_quota=1
+[AMP_CREDIT] raw=0.67342 credit=0.01347 amp_raw_std=0.07035 actor_std=1.00022
+[CRITIC] loss=0.10023 V=0.5414 target=0.5352 rmse=0.0706 ev=0.9494 grad=0.5805 grad_clip=0.0500
+[DISC] loss=0.62953 bce=0.31998 gp=0.01387 accE=1.000 accP=0.947 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00754 expert_uniform_max=0.00270 current_expert_tv=0.29102 replay_expert_tv=0.12335 norm_expert_n=32768 norm_expert_uniform_tv=0.00845
+[FCAMP_CONTRACT] fk_max=2.897e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.144s actor=2.213s critic=0.304s disc=1.464s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1817 phase0_frac=0.0528 p50=200.0 p95=275.0 target_count=95 target_nonzero=0 curriculum_p50=211.0
+[PROGRESS] env_steps=84738048 iteration=13.179s throughput=14918.2
+[UPDATE] 440/500 amp=0.67611 done=0.00947 ep_len=108.20
+[FCAMP] policy=-0.00887 kl=0.015489 ratio=0.9991 clip=0.2118 grad=1.1789 lr=0.000133
+[SAMPLER_PHASE] start_mean=219.20 start_min=0 start_max=323 top_bin=5 top_prob=0.39065 entropy=0.81246 failed_sum=38.113
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=198.5 curr_fail_p50=279.0 phase0_inflight_p50=104.0 phase0_success_cum=0.00861 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.13402 disc_quota=1
+[AMP_CREDIT] raw=0.67611 credit=0.01352 amp_raw_std=0.06774 actor_std=1.00029
+[CRITIC] loss=0.09683 V=0.5267 target=0.5249 rmse=0.0678 ev=0.9472 grad=0.5700 grad_clip=0.0500
+[DISC] loss=0.62224 bce=0.32054 gp=0.01369 accE=1.000 accP=0.946 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00616 expert_uniform_max=0.00230 current_expert_tv=0.29846 replay_expert_tv=0.13663 norm_expert_n=32768 norm_expert_uniform_tv=0.00799
+[FCAMP_CONTRACT] fk_max=2.980e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.113s actor=2.194s critic=0.303s disc=1.501s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1862 phase0_frac=0.0526 p50=193.0 p95=273.0 target_count=97 target_nonzero=0 curriculum_p50=203.0
+[PROGRESS] env_steps=86704128 iteration=13.170s throughput=14928.5
+[UPDATE] 450/500 amp=0.67721 done=0.00939 ep_len=100.04
+[FCAMP] policy=-0.00876 kl=0.015463 ratio=0.9996 clip=0.2127 grad=1.2757 lr=0.000133
+[SAMPLER_PHASE] start_mean=220.55 start_min=0 start_max=323 top_bin=5 top_prob=0.39345 entropy=0.80991 failed_sum=36.554
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=196.0 curr_fail_p50=256.5 phase0_inflight_p50=96.0 phase0_success_cum=0.00941 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.10280 disc_quota=1
+[AMP_CREDIT] raw=0.67721 credit=0.01354 amp_raw_std=0.06412 actor_std=1.00024
+[CRITIC] loss=0.09321 V=0.5100 target=0.5120 rmse=0.0641 ev=0.9506 grad=0.6784 grad_clip=0.1500
+[DISC] loss=0.61455 bce=0.32001 gp=0.01355 accE=1.000 accP=0.947 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00811 expert_uniform_max=0.00224 current_expert_tv=0.30194 replay_expert_tv=0.14166 norm_expert_n=32768 norm_expert_uniform_tv=0.00609
+[FCAMP_CONTRACT] fk_max=2.980e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.064s actor=2.187s critic=0.304s disc=1.463s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1846 phase0_frac=0.0590 p50=202.0 p95=276.0 target_count=107 target_nonzero=0 curriculum_p50=212.0
+[PROGRESS] env_steps=88670208 iteration=13.070s throughput=15042.7
+[VALIDATION_START] update=450 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.025s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.217s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.961s
+[VALIDATION_PROGRESS] step=100/500 done=0.00085 alive=0.99915 elapsed=15.682s
+[VALIDATION_PROGRESS] step=150/500 done=0.00452 alive=0.99548 elapsed=23.342s
+[VALIDATION_PROGRESS] step=200/500 done=0.01941 alive=0.98059 elapsed=31.122s
+[VALIDATION_PROGRESS] step=250/500 done=0.71887 alive=0.28113 elapsed=39.418s
+[VALIDATION_PROGRESS] step=300/500 done=0.72742 alive=0.27258 elapsed=47.941s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=51.991s
+[VALIDATION_DONE] update=450 time=52.047s
+[VAL] steps_mean=252.19 steps_min=74 steps_p50=231 steps_p95=324 steps_max=324 fail_phase_mean=237.2 done=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.00037 anchor_ori_bad=0.00110 ee_body_bad=0.82654 pose_fail=nan time_out=0.00000 anchor_z=0.06560 anchor_grav=0.49891 ee_z_max=0.25709 ee_z_mean=0.13134
+[VAL_FAIL] act_abs=1.02199 act_max=3.89269 root_pos=0.27814 root_ori=52.887deg anchor_pos=0.28052 anchor_ori=54.794deg joint_pos=0.24617 joint_vel=1.18329 body_pos=0.32676 body_pos_top=left_shoulder:0.40849 body_z=0.11381 body_z_top=left_wrist:0.25093
+[VAL_OUTCOME] failure=0.8276 motion_complete=0.1724 time_out=0.0000 steps_p50=231
+[VAL_PHASE] failure_p50=230.0 failure_p95=310.0 anchor_pos_p50=239.0 anchor_ori_p50=165.0 ee_body_p50=230.0 motion_complete_p50=324.0
+[VAL_MOTION] window_mmd2_w16=0.2775034 window_mmd2_w32=0.1961986 raw_w16=0.2775034 raw_w32=0.1961986 pairs_w16=14766 pairs_w32=13503 gap_w16=16 gap_w32=32 phase_mean_w16=139.13 phase_max_w16=323.00 phase_mean_w32=147.40 phase_max_w32=323.00 progress_max_w16=0.9969 progress_max_w32=0.9969 progress_span_w16=0.9475 progress_span_w32=0.8981 samples_w16=30689 samples_w32=28641 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.461209 delta_internal=0.146128 delta_ratio=3.1562 delta_boundary_p95=0.680224 delta_boundary_p99=0.765266 delta_internal_p95=0.222462 delta_internal_p99=0.267254 d2_boundary=0.543854 d2_internal=0.233469 d2_ratio=2.3295 d2_boundary_p95=0.759685 d2_boundary_p99=0.858927 d2_internal_p95=0.598470 d2_internal_p99=0.716946
+[VAL_CHUNK_STATE] joint_vel_boundary=1.148205 joint_vel_internal=0.557149 joint_vel_ratio=2.0609 joint_vel_boundary_p95=1.859725 joint_vel_boundary_p99=2.278465 joint_vel_internal_p95=1.000315 joint_vel_internal_p99=1.600444 root_ang_boundary=0.866464 root_ang_internal=0.429832 root_ang_ratio=2.0158 root_ang_boundary_p95=1.802980 root_ang_boundary_p99=2.272217 root_ang_internal_p95=0.903489 root_ang_internal_p99=1.433096
+[VAL_CHUNK_RESET] action_delta=0.847769 action_delta_p95=0.853342 joint_vel_jump=1.586575 joint_vel_jump_p95=1.724320 root_ang_vel_jump=0.841845 root_ang_vel_jump_p95=1.028684 joint_pos_error=0.025751 joint_vel_error=1.645325 root_ang_vel_error=0.841845
+[VAL_OFFSET0] joint_pos=0.130203 joint_pos_p95=0.226490 joint_vel=1.048853 joint_vel_p95=1.682351 root_ang_vel=0.923553 root_ang_vel_p95=2.055182 count=518977
+[VAL_OFFSET1] joint_pos=0.130800 joint_pos_p95=0.226020 joint_vel=1.001679 joint_vel_p95=1.626679 root_ang_vel=0.930551 root_ang_vel_p95=2.028279 count=517214
+[VAL_OFFSET2] joint_pos=0.132286 joint_pos_p95=0.227791 joint_vel=0.934322 joint_vel_p95=1.538915 root_ang_vel=0.891299 root_ang_vel_p95=1.968639 count=515643
+[VAL_OFFSET3] joint_pos=0.134343 joint_pos_p95=0.231147 joint_vel=0.980150 joint_vel_p95=1.602462 root_ang_vel=0.904315 root_ang_vel_p95=1.942472 count=514071
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/checkpoints/update_0450.pt
+[UPDATE] 460/500 amp=0.67634 done=0.00939 ep_len=108.07
+[FCAMP] policy=-0.00999 kl=0.015791 ratio=0.9999 clip=0.2174 grad=1.1698 lr=0.000133
+[SAMPLER_PHASE] start_mean=221.72 start_min=0 start_max=323 top_bin=5 top_prob=0.39680 entropy=0.80674 failed_sum=35.035
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=194.0 curr_fail_p50=269.0 phase0_inflight_p50=104.0 phase0_success_cum=0.01027 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.13000 disc_quota=1
+[AMP_CREDIT] raw=0.67634 credit=0.01353 amp_raw_std=0.06821 actor_std=1.00025
+[CRITIC] loss=0.09747 V=0.5332 target=0.5280 rmse=0.0684 ev=0.9484 grad=0.9859 grad_clip=0.3500
+[DISC] loss=0.60757 bce=0.32028 gp=0.01337 accE=1.000 accP=0.948 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.01090 expert_uniform_max=0.00337 current_expert_tv=0.30472 replay_expert_tv=0.14764 norm_expert_n=32768 norm_expert_uniform_tv=0.00963
+[FCAMP_CONTRACT] fk_max=3.088e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=8.934s actor=2.217s critic=0.307s disc=1.485s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1847 phase0_frac=0.0552 p50=197.0 p95=274.0 target_count=100 target_nonzero=0 curriculum_p50=206.0
+[PROGRESS] env_steps=90636288 iteration=12.995s throughput=15130.0
+[UPDATE] 470/500 amp=0.67891 done=0.00889 ep_len=108.86
+[FCAMP] policy=-0.00978 kl=0.016036 ratio=0.9997 clip=0.2228 grad=1.1678 lr=0.000133
+[SAMPLER_PHASE] start_mean=220.36 start_min=0 start_max=323 top_bin=5 top_prob=0.39911 entropy=0.80472 failed_sum=33.726
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=200.0 curr_fail_p50=278.0 phase0_inflight_p50=104.0 phase0_success_cum=0.01124 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.10377 disc_quota=1
+[AMP_CREDIT] raw=0.67891 credit=0.01358 amp_raw_std=0.06607 actor_std=1.00030
+[CRITIC] loss=0.09375 V=0.5376 target=0.5362 rmse=0.0661 ev=0.9505 grad=0.5018 grad_clip=0.0000
+[DISC] loss=0.60117 bce=0.32019 gp=0.01327 accE=1.000 accP=0.949 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00976 expert_uniform_max=0.00279 current_expert_tv=0.29770 replay_expert_tv=0.15112 norm_expert_n=32768 norm_expert_uniform_tv=0.00965
+[FCAMP_CONTRACT] fk_max=2.897e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.068s actor=2.182s critic=0.305s disc=1.438s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1748 phase0_frac=0.0612 p50=195.0 p95=275.0 target_count=106 target_nonzero=0 curriculum_p50=205.0
+[PROGRESS] env_steps=92602368 iteration=13.046s throughput=15070.2
+[UPDATE] 480/500 amp=0.67337 done=0.00937 ep_len=112.93
+[FCAMP] policy=-0.00936 kl=0.016354 ratio=0.9999 clip=0.2234 grad=1.2180 lr=0.000133
+[SAMPLER_PHASE] start_mean=221.50 start_min=0 start_max=323 top_bin=5 top_prob=0.40179 entropy=0.80240 failed_sum=32.618
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=212.0 curr_fail_p50=259.5 phase0_inflight_p50=104.0 phase0_success_cum=0.01223 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.11957 disc_quota=1
+[AMP_CREDIT] raw=0.67337 credit=0.01347 amp_raw_std=0.06491 actor_std=1.00026
+[CRITIC] loss=0.09226 V=0.5354 target=0.5332 rmse=0.0650 ev=0.9534 grad=0.3724 grad_clip=0.0000
+[DISC] loss=0.59389 bce=0.31903 gp=0.01317 accE=1.000 accP=0.952 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.01204 expert_uniform_max=0.00315 current_expert_tv=0.29254 replay_expert_tv=0.15341 norm_expert_n=32768 norm_expert_uniform_tv=0.00725
+[FCAMP_CONTRACT] fk_max=2.795e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.165s actor=2.180s critic=0.304s disc=1.454s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1842 phase0_frac=0.0505 p50=203.0 p95=274.0 target_count=92 target_nonzero=0 curriculum_p50=210.0
+[PROGRESS] env_steps=94568448 iteration=13.154s throughput=14946.4
+[UPDATE] 490/500 amp=0.68012 done=0.00951 ep_len=114.35
+[FCAMP] policy=-0.00981 kl=0.015967 ratio=0.9995 clip=0.2185 grad=1.1879 lr=0.000133
+[SAMPLER_PHASE] start_mean=224.21 start_min=0 start_max=323 top_bin=5 top_prob=0.40293 entropy=0.80084 failed_sum=31.315
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=207.0 curr_fail_p50=272.5 phase0_inflight_p50=104.0 phase0_success_cum=0.01330 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.12037 disc_quota=1
+[AMP_CREDIT] raw=0.68012 credit=0.01360 amp_raw_std=0.06210 actor_std=1.00024
+[CRITIC] loss=0.08827 V=0.5185 target=0.5208 rmse=0.0621 ev=0.9552 grad=0.6129 grad_clip=0.0000
+[DISC] loss=0.58794 bce=0.31866 gp=0.01310 accE=1.000 accP=0.949 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00864 expert_uniform_max=0.00252 current_expert_tv=0.30869 replay_expert_tv=0.16669 norm_expert_n=32768 norm_expert_uniform_tv=0.00816
+[FCAMP_CONTRACT] fk_max=3.031e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.031s actor=2.251s critic=0.310s disc=1.446s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1869 phase0_frac=0.0589 p50=202.0 p95=275.0 target_count=108 target_nonzero=0 curriculum_p50=211.0
+[PROGRESS] env_steps=96534528 iteration=13.089s throughput=15020.6
+[UPDATE] 500/500 amp=0.67879 done=0.00927 ep_len=119.99
+[FCAMP] policy=-0.00836 kl=0.015962 ratio=0.9994 clip=0.2161 grad=1.2589 lr=0.000133
+[SAMPLER_PHASE] start_mean=223.91 start_min=0 start_max=323 top_bin=5 top_prob=0.40431 entropy=0.79930 failed_sum=29.959
+[FCAMP_STREAM] phase0_env=0.100 phase0_valid_share=0.101 phase0_actor_w=0.100 phase0_critic_w=0.100 phase0_fail_p50=208.0 curr_fail_p50=278.0 phase0_inflight_p50=112.0 phase0_success_cum=0.01442 disc_buffer_phase0=0.100 disc_train_phase0=0.100 phase0_complete=0.14737 disc_quota=1
+[AMP_CREDIT] raw=0.67879 credit=0.01358 amp_raw_std=0.06162 actor_std=1.00029
+[CRITIC] loss=0.08685 V=0.5260 target=0.5253 rmse=0.0616 ev=0.9573 grad=0.5387 grad_clip=0.0500
+[DISC] loss=0.58196 bce=0.31846 gp=0.01299 accE=1.000 accP=0.953 reward_clamp=0.00000 replay=200000
+[DISC_ENDPOINT] expert_n=32768 expert_uniform_tv=0.00796 expert_uniform_max=0.00194 current_expert_tv=0.31885 replay_expert_tv=0.17249 norm_expert_n=32768 norm_expert_uniform_tv=0.01080
+[FCAMP_CONTRACT] fk_max=3.046e-05 policy_action_violation=0.000e+00 dirty_excluded=0 credit_gap=0 replay_dirty=0 push_edges=0 replay_phase0=20000/20000 replay_curr=180000/180000
+[TIME] collect=9.062s actor=2.201s critic=0.306s disc=1.495s gpu_peak=4.31GiB
+[TRAIN_RESET] count=1822 phase0_frac=0.0549 p50=210.0 p95=275.0 target_count=95 target_nonzero=0 curriculum_p50=218.0
+[PROGRESS] env_steps=98500608 iteration=13.121s throughput=14984.8
+[VALIDATION_START] update=500 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.025s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.215s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.952s
+[VALIDATION_PROGRESS] step=100/500 done=0.00037 alive=0.99963 elapsed=15.730s
+[VALIDATION_PROGRESS] step=150/500 done=0.00989 alive=0.99011 elapsed=23.601s
+[VALIDATION_PROGRESS] step=200/500 done=0.01917 alive=0.98083 elapsed=31.609s
+[VALIDATION_PROGRESS] step=250/500 done=0.65393 alive=0.34607 elapsed=39.947s
+[VALIDATION_PROGRESS] step=300/500 done=0.65735 alive=0.34265 elapsed=48.478s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=52.524s
+[VALIDATION_DONE] update=500 time=52.581s
+[VAL] steps_mean=258.25 steps_min=83 steps_p50=233 steps_p95=324 steps_max=324 fail_phase_mean=243.7 done=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.00049 anchor_ori_bad=0.00378 ee_body_bad=0.81604 pose_fail=nan time_out=0.00000 anchor_z=0.07307 anchor_grav=0.48323 ee_z_max=0.25683 ee_z_mean=0.13189
+[VAL_FAIL] act_abs=1.04302 act_max=4.34359 root_pos=0.30179 root_ori=52.637deg anchor_pos=0.30218 anchor_ori=52.911deg joint_pos=0.23666 joint_vel=1.10950 body_pos=0.34158 body_pos_top=left_shoulder:0.40316 body_z=0.11687 body_z_top=left_wrist:0.25262
+[VAL_OUTCOME] failure=0.8185 motion_complete=0.1815 time_out=0.0000 steps_p50=233
+[VAL_PHASE] failure_p50=231.0 failure_p95=310.0 anchor_pos_p50=206.5 anchor_ori_p50=149.0 ee_body_p50=231.0 motion_complete_p50=324.0
+[VAL_MOTION] window_mmd2_w16=0.2771685 window_mmd2_w32=0.1923683 raw_w16=0.2771685 raw_w32=0.1923683 pairs_w16=14964 pairs_w32=13567 gap_w16=16 gap_w32=32 phase_mean_w16=140.55 phase_max_w16=323.00 phase_mean_w32=148.83 phase_max_w32=323.00 progress_max_w16=0.9969 progress_max_w32=0.9969 progress_span_w16=0.9475 progress_span_w32=0.8981 samples_w16=30972 samples_w32=28924 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.454382 delta_internal=0.151926 delta_ratio=2.9908 delta_boundary_p95=0.689288 delta_boundary_p99=0.784035 delta_internal_p95=0.245965 delta_internal_p99=0.280973 d2_boundary=0.545206 d2_internal=0.245208 d2_ratio=2.2234 d2_boundary_p95=0.822122 d2_boundary_p99=0.922340 d2_internal_p95=0.621062 d2_internal_p99=0.747730
+[VAL_CHUNK_STATE] joint_vel_boundary=1.142700 joint_vel_internal=0.561010 joint_vel_ratio=2.0369 joint_vel_boundary_p95=1.842457 joint_vel_boundary_p99=2.190494 joint_vel_internal_p95=0.969480 joint_vel_internal_p99=1.527702 root_ang_boundary=0.925396 root_ang_internal=0.447687 root_ang_ratio=2.0671 root_ang_boundary_p95=1.809116 root_ang_boundary_p99=2.288517 root_ang_internal_p95=0.912196 root_ang_internal_p99=1.457547
+[VAL_CHUNK_RESET] action_delta=0.784232 action_delta_p95=0.789020 joint_vel_jump=1.406794 joint_vel_jump_p95=1.545178 root_ang_vel_jump=0.690402 root_ang_vel_jump_p95=0.858287 joint_pos_error=0.022615 joint_vel_error=1.491872 root_ang_vel_error=0.690402
+[VAL_OFFSET0] joint_pos=0.130472 joint_pos_p95=0.226312 joint_vel=1.042660 joint_vel_p95=1.653991 root_ang_vel=0.956485 root_ang_vel_p95=2.066244 count=531427
+[VAL_OFFSET1] joint_pos=0.130945 joint_pos_p95=0.225474 joint_vel=0.978567 joint_vel_p95=1.575643 root_ang_vel=0.928127 root_ang_vel_p95=1.978716 count=529700
+[VAL_OFFSET2] joint_pos=0.132440 joint_pos_p95=0.227537 joint_vel=0.923836 joint_vel_p95=1.531282 root_ang_vel=0.884136 root_ang_vel_p95=1.911423 count=528011
+[VAL_OFFSET3] joint_pos=0.134648 joint_pos_p95=0.231476 joint_vel=0.977176 joint_vel_p95=1.566250 root_ang_vel=0.894172 root_ang_vel_p95=1.923527 count=526415
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/fcamp_pure_amp_expertuniform_v19_u500_s0_20260729_115800/checkpoints/update_0500.pt
+[INFO] Training finished.

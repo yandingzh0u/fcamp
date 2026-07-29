@@ -125,6 +125,20 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
             device=env.device,
             clip=float(amp_cfg.normalizer_clip),
         )
+        # Expert sampling owns an isolated RNG stream. Reading initial_seed()
+        # does not advance the global CPU RNG, so expert draws cannot perturb
+        # current/replay minibatch sampling or any other policy-side randomness.
+        self.expert_sampling_seed = int(
+            (
+                int(torch.initial_seed())
+                + int(self._EXPERT_SAMPLING_SEED_OFFSET)
+            )
+            % ((1 << 63) - 1)
+        )
+        self.expert_sampling_generator = torch.Generator(device="cpu")
+        self.expert_sampling_generator.manual_seed(
+            self.expert_sampling_seed
+        )
         self.imitation_history = TemporalFeatureHistory(
             env.num_envs,
             self.imitation_history_steps,
@@ -201,6 +215,21 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                 "FCAMP checkpoints with discriminator-conditioned policies "
                 "cannot be resumed."
             )
+        if state.get("expert_sampling_seed") != self.expert_sampling_seed:
+            raise ValueError(
+                "FCAMP checkpoint expert sampling seed differs from this run"
+            )
+        expert_generator_state = state.get("expert_sampling_generator_state")
+        if (
+            not torch.is_tensor(expert_generator_state)
+            or expert_generator_state.device.type != "cpu"
+            or expert_generator_state.dtype != torch.uint8
+            or expert_generator_state.ndim != 1
+            or expert_generator_state.numel() == 0
+        ):
+            raise ValueError(
+                "FCAMP checkpoint has an invalid expert sampling generator state"
+            )
         self._validate_checkpoint_action_domain(state)
 
     def _validate_checkpoint_action_domain(self, state: dict) -> None:
@@ -232,6 +261,10 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                 "disc_optimizer": self.disc_optimizer.state_dict(),
                 "disc_version": int(self.disc_version),
                 "warmup_env_transitions": int(self.warmup_env_transitions),
+                "expert_sampling_seed": int(self.expert_sampling_seed),
+                "expert_sampling_generator_state": (
+                    self.expert_sampling_generator.get_state().clone()
+                ),
                 "action_low": self.action_low.detach().cpu(),
                 "action_high": self.action_high.detach().cpu(),
                 "disc_window_replay": self.disc_window_replay.state_dict(),
@@ -279,6 +312,9 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
         )
         if self.warmup_env_transitions < 0:
             raise ValueError("FCAMP checkpoint has invalid warmup transition count")
+        self.expert_sampling_generator.set_state(
+            payload["expert_sampling_generator_state"].to(device="cpu")
+        )
         replay_state = payload.get("disc_window_replay")
         if replay_state is None:
             raise ValueError("FCAMP checkpoint is missing complete-window replay state")

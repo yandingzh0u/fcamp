@@ -10,6 +10,9 @@ from models.style_discriminator import compute_style_discriminator_loss
 
 
 class FCAMPDiscriminatorMixin:
+    _ENDPOINT_HISTOGRAM_BINS = 16
+    _EXPERT_SAMPLING_SEED_OFFSET = 0x4643414D50
+
     def _sample_cpu_flat_with_end_times(
         self,
         windows_cpu: torch.Tensor,
@@ -97,32 +100,136 @@ class FCAMPDiscriminatorMixin:
         )
         return self.imitation_pipeline.flatten(raw)
 
+    def _sample_expert_end_times(self, sample_count: int) -> torch.Tensor:
+        """Draw demo endpoints independently of every policy-side distribution.
+
+        The expert measure is fixed by the configured demonstration interval.
+        This method deliberately accepts only a count: current/replay endpoints,
+        reset phases, curriculum state, and failure frontiers cannot be used to
+        reweight discriminator positives.
+        """
+
+        if (
+            isinstance(sample_count, bool)
+            or not isinstance(sample_count, int)
+            or sample_count <= 0
+        ):
+            raise ValueError("expert sample_count must be a positive integer")
+        endpoint_min = int(self.env.motion_start_phase)
+        endpoint_max = int(self.env.motion_end_phase)
+        motion_frames = int(self.env.motion.num_frames)
+        if (
+            endpoint_min < 0
+            or endpoint_max < endpoint_min
+            or endpoint_max >= motion_frames
+        ):
+            raise RuntimeError(
+                "configured expert endpoint interval lies outside the motion"
+            )
+        generator = getattr(self, "expert_sampling_generator", None)
+        if (
+            not isinstance(generator, torch.Generator)
+            or str(generator.device) != "cpu"
+        ):
+            raise RuntimeError(
+                "independent expert sampling requires its dedicated CPU generator"
+            )
+        return torch.randint(
+            endpoint_min,
+            endpoint_max + 1,
+            (sample_count,),
+            generator=generator,
+            device="cpu",
+            dtype=torch.long,
+        )
+
+    def _sample_expert_flat(
+        self,
+        sample_count: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return an exogenous expert batch and its independently drawn endpoints."""
+
+        end_times = self._sample_expert_end_times(sample_count)
+        return self._expert_flat_at_end_times(end_times), end_times
+
+    def _endpoint_histogram(self, end_times: torch.Tensor) -> torch.Tensor:
+        """Count endpoints in fixed bins over the configured demo interval."""
+
+        endpoints = end_times.detach().to(device="cpu", dtype=torch.long).reshape(-1)
+        endpoint_min = int(self.env.motion_start_phase)
+        endpoint_max = int(self.env.motion_end_phase)
+        support_size = endpoint_max - endpoint_min + 1
+        if support_size <= 0:
+            raise RuntimeError("configured endpoint histogram interval is empty")
+        if endpoints.numel() and (
+            bool((endpoints < endpoint_min).any())
+            or bool((endpoints > endpoint_max).any())
+        ):
+            raise RuntimeError(
+                "discriminator endpoint lies outside the configured demo interval"
+            )
+        num_bins = min(self._ENDPOINT_HISTOGRAM_BINS, support_size)
+        bin_ids = torch.div(
+            (endpoints - endpoint_min) * num_bins,
+            support_size,
+            rounding_mode="floor",
+        )
+        return torch.bincount(bin_ids, minlength=num_bins)
+
+    def _uniform_expert_endpoint_histogram(self) -> torch.Tensor:
+        """Return exact bin masses for the discrete-uniform demo measure."""
+
+        return self._endpoint_histogram(
+            torch.arange(
+                int(self.env.motion_start_phase),
+                int(self.env.motion_end_phase) + 1,
+                device="cpu",
+                dtype=torch.long,
+            )
+        )
+
     @torch.no_grad()
-    def _record_matched_disc_normalizer(
+    def _record_disc_normalizer(
         self,
         current_windows_cpu: torch.Tensor,
         current_end_times_cpu: torch.Tensor,
         current_stream_ids_cpu: torch.Tensor,
         sample_count: int,
-    ) -> int:
-        """Record an exact fixed-mixture policy/expert moment update."""
+    ) -> tuple[int, torch.Tensor, torch.Tensor]:
+        """Record policy moments plus an equal, exogenous expert sample."""
 
         self.disc_normalizer.clear_pending()
         batch_size = max(1, int(self.cfg.style_prior.batch_size))
         recorded = 0
+        current_histogram: torch.Tensor | None = None
+        expert_histogram: torch.Tensor | None = None
         while recorded < int(sample_count):
             count = min(batch_size, int(sample_count) - recorded)
-            current, end_times = self._sample_balanced_current_windows(
+            current, current_end_times = self._sample_balanced_current_windows(
                 current_windows_cpu,
                 current_end_times_cpu,
                 current_stream_ids_cpu,
                 count,
             )
-            expert = self._expert_flat_at_end_times(end_times)
+            expert, expert_end_times = self._sample_expert_flat(count)
+            current_batch_histogram = self._endpoint_histogram(current_end_times)
+            expert_batch_histogram = self._endpoint_histogram(expert_end_times)
+            if expert_histogram is None:
+                current_histogram = current_batch_histogram
+                expert_histogram = expert_batch_histogram
+            else:
+                if current_histogram is None:
+                    raise RuntimeError(
+                        "normalizer current endpoint histogram was not initialized"
+                    )
+                current_histogram += current_batch_histogram
+                expert_histogram += expert_batch_histogram
             self.disc_normalizer.record(current)
             self.disc_normalizer.record(expert)
             recorded += int(current.shape[0])
-        return recorded
+        if current_histogram is None or expert_histogram is None:
+            raise RuntimeError("normalizer recorded no policy/expert samples")
+        return recorded, current_histogram, expert_histogram
 
     def _discriminator_update(
         self,
@@ -161,11 +268,17 @@ class FCAMPDiscriminatorMixin:
         # normalization snapshot that produced this rollout's rewards/history.
         # Commit only after D_old has been consumed, matching method/amp.py.
         self.disc_normalizer.freeze()
-        normalizer_samples = self._record_matched_disc_normalizer(
-            current_windows_cpu,
-            current_end_times_cpu,
-            current_stream_ids_cpu,
-            min(current_count, batch_size * update_steps),
+        (
+            normalizer_samples,
+            normalizer_current_histogram,
+            normalizer_expert_histogram,
+        ) = (
+            self._record_disc_normalizer(
+                current_windows_cpu,
+                current_end_times_cpu,
+                current_stream_ids_cpu,
+                min(current_count, batch_size * update_steps),
+            )
         )
         committed_before_training = False
         if commit_normalizer_before_training:
@@ -179,6 +292,7 @@ class FCAMPDiscriminatorMixin:
         grad_total = 0.0
         canonical_root_xy_max = {"current": 0.0, "replay": 0.0, "expert": 0.0}
         endpoint_abs_diff_total = 0.0
+        endpoint_histograms: dict[str, torch.Tensor] | None = None
         self.discriminator.train()
         for disc_step in range(update_steps):
             current_raw, current_ends = self._sample_balanced_current_windows(
@@ -201,16 +315,27 @@ class FCAMPDiscriminatorMixin:
                 dtype=torch.float32,
                 non_blocking=False,
             )
-            fake_ends = torch.cat((current_ends, replay_ends.to(dtype=torch.long)), dim=0)
-            expert_indices = torch.randint(fake_ends.shape[0], (batch_size,), device="cpu")
-            expert_end_times = fake_ends.index_select(0, expert_indices)
-            expert_raw = self._expert_flat_at_end_times(expert_end_times).to(
+            expert_raw, expert_end_times = self._sample_expert_flat(batch_size)
+            expert_raw = expert_raw.to(
                 device=self.env.device,
                 dtype=torch.float32,
             )
             endpoint_abs_diff_total += float(
                 (expert_end_times.float() - current_ends.float()).abs().mean().item()
             )
+            step_histograms = {
+                "current_train": self._endpoint_histogram(current_ends),
+                "replay_train": self._endpoint_histogram(replay_ends),
+                "expert_train": self._endpoint_histogram(expert_end_times),
+            }
+            if endpoint_histograms is None:
+                endpoint_histograms = {
+                    name: counts.clone()
+                    for name, counts in step_histograms.items()
+                }
+            else:
+                for name, counts in step_histograms.items():
+                    endpoint_histograms[name] += counts
             if disc_step == 0:
                 for name, raw in (
                     ("current", current_raw),
@@ -285,11 +410,144 @@ class FCAMPDiscriminatorMixin:
                     torch.unique(current_end_times_cpu).numel()
                 ),
                 "disc/replay_fallback_current_count": 0.0,
-                "disc/expert_endpoint_abs_diff_mean": endpoint_abs_diff_total / denom,
+                "disc/expert_sampling_contract_active": 1.0,
+                "disc/expert_sampling_uniform_integer_contract_active": 1.0,
+                "disc_norm/expert_sampling_contract_active": 1.0,
+                "disc/expert_current_endpoint_abs_diff_mean": (
+                    endpoint_abs_diff_total / denom
+                ),
                 "disc_window/current_latest_root_xy_abs_max": canonical_root_xy_max["current"],
                 "disc_window/replay_latest_root_xy_abs_max": canonical_root_xy_max["replay"],
                 "disc_window/expert_latest_root_xy_abs_max": canonical_root_xy_max["expert"],
             }
+        )
+        if endpoint_histograms is None:
+            raise RuntimeError("discriminator update produced no endpoint samples")
+        endpoint_histograms["current_pool"] = self._endpoint_histogram(
+            current_end_times_cpu
+        )
+        histogram_bins = int(endpoint_histograms["expert_train"].numel())
+        metrics["disc_endpoint/histogram_bins"] = float(histogram_bins)
+        endpoint_fractions: dict[str, torch.Tensor] = {}
+        for domain, counts in endpoint_histograms.items():
+            total = int(counts.sum().item())
+            if total <= 0:
+                raise RuntimeError(
+                    f"discriminator {domain} endpoint histogram is empty"
+                )
+            fractions = counts.to(dtype=torch.float64) / float(total)
+            endpoint_fractions[domain] = fractions
+            metrics[f"disc_endpoint/{domain}_sample_count"] = float(total)
+            for bin_index, fraction in enumerate(fractions.tolist()):
+                metrics[
+                    f"disc_endpoint/{domain}_bin_{bin_index:02d}_fraction"
+                ] = float(fraction)
+        expert_fractions = endpoint_fractions["expert_train"]
+        expected_expert_fractions = self._uniform_expert_endpoint_histogram().to(
+            dtype=torch.float64
+        )
+        expected_expert_fractions /= expected_expert_fractions.sum()
+        for bin_index, fraction in enumerate(
+            expected_expert_fractions.tolist()
+        ):
+            metrics[
+                f"disc_endpoint/expert_uniform_bin_{bin_index:02d}_fraction"
+            ] = float(fraction)
+        metrics["disc_endpoint/expert_train_max_abs_uniform_error"] = float(
+            (
+                expert_fractions
+                - expected_expert_fractions
+            )
+            .abs()
+            .max()
+            .item()
+        )
+        metrics["disc_endpoint/expert_train_uniform_tv"] = float(
+            0.5
+            * (
+                expert_fractions
+                - expected_expert_fractions
+            )
+            .abs()
+            .sum()
+            .item()
+        )
+        for left, right in (
+            ("current_train", "expert_train"),
+            ("replay_train", "expert_train"),
+            ("current_train", "replay_train"),
+        ):
+            metrics[f"disc_endpoint/{left}_{right}_tv"] = float(
+                0.5
+                * (
+                    endpoint_fractions[left]
+                    - endpoint_fractions[right]
+                )
+                .abs()
+                .sum()
+                .item()
+            )
+        normalizer_current_total = int(
+            normalizer_current_histogram.sum().item()
+        )
+        normalizer_total = int(normalizer_expert_histogram.sum().item())
+        if (
+            normalizer_current_total != normalizer_samples
+            or normalizer_total != normalizer_samples
+        ):
+            raise RuntimeError(
+                "normalizer endpoint histograms do not conserve samples"
+            )
+        normalizer_current_fractions = normalizer_current_histogram.to(
+            dtype=torch.float64
+        )
+        normalizer_current_fractions /= float(normalizer_current_total)
+        normalizer_expert_fractions = normalizer_expert_histogram.to(
+            dtype=torch.float64
+        )
+        normalizer_expert_fractions /= float(normalizer_total)
+        metrics["disc_norm/current_endpoint_sample_count"] = float(
+            normalizer_current_total
+        )
+        metrics["disc_norm/expert_endpoint_sample_count"] = float(
+            normalizer_total
+        )
+        for domain, fractions in (
+            ("current", normalizer_current_fractions),
+            ("expert", normalizer_expert_fractions),
+        ):
+            for bin_index, fraction in enumerate(fractions.tolist()):
+                metrics[
+                    f"disc_norm/{domain}_endpoint_bin_{bin_index:02d}_fraction"
+                ] = float(fraction)
+        metrics["disc_norm/expert_endpoint_max_abs_uniform_error"] = float(
+            (
+                normalizer_expert_fractions
+                - expected_expert_fractions
+            )
+            .abs()
+            .max()
+            .item()
+        )
+        metrics["disc_norm/expert_endpoint_uniform_tv"] = float(
+            0.5
+            * (
+                normalizer_expert_fractions
+                - expected_expert_fractions
+            )
+            .abs()
+            .sum()
+            .item()
+        )
+        metrics["disc_norm/current_expert_endpoint_tv"] = float(
+            0.5
+            * (
+                normalizer_current_fractions
+                - normalizer_expert_fractions
+            )
+            .abs()
+            .sum()
+            .item()
         )
         metrics.update(
             {

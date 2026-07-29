@@ -216,10 +216,14 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
     algo = object.__new__(FCAMP)
     algo.action_low = torch.tensor([-5.0, -5.0])
     algo.action_high = torch.tensor([5.0, 5.0])
+    algo.expert_sampling_seed = 123
+    expert_generator = torch.Generator(device="cpu").manual_seed(123)
 
     valid_state = {
         **FCAMP_CHECKPOINT_CONTRACT,
         "discriminator_policy_conditioning": False,
+        "expert_sampling_seed": algo.expert_sampling_seed,
+        "expert_sampling_generator_state": expert_generator.get_state(),
         "action_low": algo.action_low.clone(),
         "action_high": algo.action_high.clone(),
     }
@@ -239,7 +243,7 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
         with pytest.raises(ValueError, match=name):
             algo.validate_checkpoint_payload({"algo_state": mismatched})
 
-    for historical_schema in (8, 9, 11, 13, 14, 16, 17):
+    for historical_schema in (8, 9, 11, 13, 14, 16, 17, 18):
         historical = dict(valid_state)
         historical["fcamp_schema_version"] = historical_schema
         with pytest.raises(ValueError, match="fcamp_schema_version"):
@@ -259,11 +263,22 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
             {"algo_state": wrong_action_domain}
         )
 
+    wrong_expert_seed = dict(valid_state)
+    wrong_expert_seed["expert_sampling_seed"] += 1
+    with pytest.raises(ValueError, match="expert sampling seed"):
+        algo.validate_checkpoint_payload({"algo_state": wrong_expert_seed})
+
+    missing_expert_rng = dict(valid_state)
+    missing_expert_rng.pop("expert_sampling_generator_state")
+    with pytest.raises(ValueError, match="expert sampling generator"):
+        algo.validate_checkpoint_payload({"algo_state": missing_expert_rng})
+
 
 def test_fcamp_validates_contract_before_restoring_base_state(monkeypatch) -> None:
     algo = object.__new__(FCAMP)
     algo.action_low = torch.tensor([-5.0])
     algo.action_high = torch.tensor([5.0])
+    algo.expert_sampling_seed = 123
     base_restore_calls: list[dict] = []
 
     def record_base_restore(self, payload, reset_optimizer=False):
@@ -393,7 +408,12 @@ def test_discriminator_trains_on_old_normalizer_then_commits_next_snapshot() -> 
             return {}
 
     algo = object.__new__(FCAMP)
-    algo.env = SimpleNamespace(device=torch.device("cpu"))
+    algo.env = SimpleNamespace(
+        device=torch.device("cpu"),
+        motion_start_phase=0,
+        motion_end_phase=9,
+        motion=SimpleNamespace(num_frames=10),
+    )
     algo.cfg = SimpleNamespace(
         style_prior=SimpleNamespace(
             batch_size=2,
@@ -420,6 +440,14 @@ def test_discriminator_trains_on_old_normalizer_then_commits_next_snapshot() -> 
     algo._expert_flat_at_end_times = lambda end_times: torch.full(
         (end_times.numel(), 3), 9.0
     )
+    expert_endpoint_calls: list[torch.Tensor] = []
+
+    def sample_expert_end_times(sample_count: int) -> torch.Tensor:
+        endpoints = torch.full((sample_count,), 9, dtype=torch.long)
+        expert_endpoint_calls.append(endpoints.clone())
+        return endpoints
+
+    algo._sample_expert_end_times = sample_expert_end_times
 
     seen_inputs: list[torch.Tensor] = []
     handle = algo.discriminator.register_forward_pre_hook(
@@ -446,6 +474,175 @@ def test_discriminator_trains_on_old_normalizer_then_commits_next_snapshot() -> 
     assert metrics["disc_norm/committed_this_update"] == 1.0
     assert float(algo.disc_normalizer.count.item()) == 5.0
     assert bool(algo.disc_normalizer.frozen.item())
+    # Both the normalizer and D update must use the exogenous sampler. The
+    # current/replay endpoints are only 1 or 2, so endpoint 9 cannot have been
+    # inherited from either fake distribution.
+    assert len(expert_endpoint_calls) == 2
+    assert all(endpoints.tolist() == [9, 9] for endpoints in expert_endpoint_calls)
+    assert metrics["disc/expert_sampling_contract_active"] == 1.0
+    assert metrics["disc_endpoint/expert_train_bin_09_fraction"] == 1.0
+    assert metrics["disc_endpoint/expert_train_sample_count"] == 2.0
+    assert metrics["disc_endpoint/current_train_sample_count"] == 2.0
+    assert metrics["disc_endpoint/replay_train_sample_count"] == 2.0
+    assert metrics["disc_endpoint/current_pool_sample_count"] == 2.0
+    assert metrics["disc_endpoint/expert_train_uniform_tv"] == pytest.approx(0.9)
+    assert metrics[
+        "disc_endpoint/expert_train_max_abs_uniform_error"
+    ] == pytest.approx(0.9)
+    assert metrics[
+        "disc_endpoint/current_train_expert_train_tv"
+    ] == pytest.approx(1.0)
+    assert metrics[
+        "disc_endpoint/replay_train_expert_train_tv"
+    ] == pytest.approx(1.0)
+    assert metrics[
+        "disc_endpoint/current_train_replay_train_tv"
+    ] == pytest.approx(0.0)
+    assert metrics["disc_norm/expert_endpoint_bin_09_fraction"] == 1.0
+    assert metrics["disc_norm/expert_endpoint_sample_count"] == 2.0
+    assert metrics["disc_norm/current_endpoint_sample_count"] == 2.0
+    assert metrics["disc_norm/expert_endpoint_uniform_tv"] == pytest.approx(0.9)
+    assert metrics["disc_norm/current_expert_endpoint_tv"] == pytest.approx(1.0)
+
+
+def test_expert_endpoint_sampler_is_uniform_over_full_demo_and_policy_free() -> None:
+    algo = object.__new__(FCAMP)
+    algo.env = SimpleNamespace(
+        device=torch.device("cpu"),
+        motion_start_phase=3,
+        motion_end_phase=7,
+        motion=SimpleNamespace(num_frames=8),
+    )
+    algo.expert_sampling_generator = torch.Generator(
+        device="cpu"
+    ).manual_seed(123)
+
+    endpoints = algo._sample_expert_end_times(50_000)
+
+    assert endpoints.device.type == "cpu"
+    assert endpoints.dtype == torch.long
+    assert set(endpoints.tolist()) == {3, 4, 5, 6, 7}
+    fractions = torch.bincount(endpoints - 3, minlength=5).float() / endpoints.numel()
+    torch.testing.assert_close(
+        fractions,
+        torch.full((5,), 0.2),
+        rtol=0.0,
+        atol=0.01,
+    )
+    with pytest.raises(ValueError, match="positive integer"):
+        algo._sample_expert_end_times(0)
+    with pytest.raises(ValueError, match="positive integer"):
+        algo._sample_expert_end_times(True)
+
+
+def test_expert_sampler_has_an_isolated_rng_stream() -> None:
+    algo = object.__new__(FCAMP)
+    algo.env = SimpleNamespace(
+        device=torch.device("cpu"),
+        motion_start_phase=0,
+        motion_end_phase=324,
+        motion=SimpleNamespace(num_frames=325),
+    )
+    algo.expert_sampling_generator = torch.Generator(
+        device="cpu"
+    ).manual_seed(456)
+    same_seed_algo = object.__new__(FCAMP)
+    same_seed_algo.env = algo.env
+    same_seed_algo.expert_sampling_generator = torch.Generator(
+        device="cpu"
+    ).manual_seed(456)
+
+    torch.manual_seed(999)
+    global_rng_before = torch.random.get_rng_state().clone()
+    first = algo._sample_expert_end_times(4096)
+    global_rng_after = torch.random.get_rng_state()
+    second = same_seed_algo._sample_expert_end_times(4096)
+
+    assert torch.equal(global_rng_before, global_rng_after)
+    assert torch.equal(first, second)
+
+
+def test_expert_sampler_and_histogram_cover_full_inclusive_support() -> None:
+    algo = object.__new__(FCAMP)
+    algo.env = SimpleNamespace(
+        device=torch.device("cpu"),
+        motion_start_phase=4,
+        motion_end_phase=4,
+        motion=SimpleNamespace(num_frames=5),
+    )
+    algo.expert_sampling_generator = torch.Generator(
+        device="cpu"
+    ).manual_seed(123)
+    assert algo._sample_expert_end_times(128).tolist() == [4] * 128
+
+    algo.env.motion_start_phase = 0
+    algo.env.motion_end_phase = 324
+    algo.env.motion.num_frames = 325
+    exact_bin_counts = algo._uniform_expert_endpoint_histogram()
+
+    assert exact_bin_counts.numel() == 16
+    assert int(exact_bin_counts.sum().item()) == 325
+    assert int(exact_bin_counts.min().item()) == 20
+    assert int(exact_bin_counts.max().item()) == 21
+    assert int((exact_bin_counts == 21).sum().item()) == 5
+
+
+def test_disc_normalizer_uses_independent_expert_for_partial_batch() -> None:
+    algo = object.__new__(FCAMP)
+    algo.env = SimpleNamespace(
+        device=torch.device("cpu"),
+        motion_start_phase=0,
+        motion_end_phase=9,
+        motion=SimpleNamespace(num_frames=10),
+    )
+    algo.cfg = SimpleNamespace(
+        style_prior=SimpleNamespace(batch_size=2),
+        streams=SimpleNamespace(phase0_fraction=0.5),
+    )
+    algo.disc_normalizer = RunningNormalizer(3, device="cpu", clip=100.0)
+    expert_calls: list[int] = []
+
+    def sample_expert_flat(sample_count: int):
+        expert_calls.append(sample_count)
+        return (
+            torch.zeros(sample_count, 3),
+            torch.full((sample_count,), 9, dtype=torch.long),
+        )
+
+    algo._sample_expert_flat = sample_expert_flat
+    recorded, current_histogram, expert_histogram = (
+        algo._record_disc_normalizer(
+            torch.tensor([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]),
+            torch.tensor([1, 2], dtype=torch.long),
+            torch.tensor(
+                [PHASE0_STREAM, CURRICULUM_STREAM],
+                dtype=torch.int8,
+            ),
+            sample_count=3,
+        )
+    )
+
+    assert recorded == 3
+    assert expert_calls == [2, 1]
+    assert int(current_histogram.sum().item()) == 3
+    assert int(expert_histogram.sum().item()) == 3
+    assert expert_histogram[9].item() == 3
+
+
+def test_expert_sampler_rejects_invalid_demo_interval() -> None:
+    algo = object.__new__(FCAMP)
+    algo.env = SimpleNamespace(
+        device=torch.device("cpu"),
+        motion_start_phase=4,
+        motion_end_phase=8,
+        motion=SimpleNamespace(num_frames=8),
+    )
+    algo.expert_sampling_generator = torch.Generator(
+        device="cpu"
+    ).manual_seed(123)
+
+    with pytest.raises(RuntimeError, match="outside the motion"):
+        algo._sample_expert_end_times(1)
 
 
 def test_chunked_context_normalizer_matches_one_shot_valid_moments() -> None:
