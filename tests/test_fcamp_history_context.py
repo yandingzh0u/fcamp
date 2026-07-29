@@ -243,7 +243,7 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
         with pytest.raises(ValueError, match=name):
             algo.validate_checkpoint_payload({"algo_state": mismatched})
 
-    for historical_schema in (8, 9, 11, 13, 14, 16, 17, 18):
+    for historical_schema in (8, 9, 11, 13, 14, 16, 17, 18, 19):
         historical = dict(valid_state)
         historical["fcamp_schema_version"] = historical_schema
         with pytest.raises(ValueError, match="fcamp_schema_version"):
@@ -336,7 +336,7 @@ def test_rollout_snapshot_optimizes_actor_and_critic_before_discriminator() -> N
         "disc_version_used": 7,
         "disc_normalizer_count_used": 12.0,
         "amp_valid": torch.tensor([[[False, True]]]),
-        "credit_valid": torch.tensor([[[False, True]]]),
+        "credit_valid": torch.ones(1, 1, 2, dtype=torch.bool),
         "imitation_window_age": torch.tensor([[[-1, 16]]]),
         "valid": torch.ones(1, 1, 2, dtype=torch.bool),
         "stream_ids": torch.tensor([PHASE0_STREAM], dtype=torch.int8),
@@ -374,7 +374,7 @@ def test_no_current_disc_window_does_not_skip_actor_or_critic() -> None:
         "disc_version_used": 2,
         "disc_normalizer_count_used": 0.0,
         "amp_valid": torch.zeros(1, 1, 2, dtype=torch.bool),
-        "credit_valid": torch.zeros(1, 1, 2, dtype=torch.bool),
+        "credit_valid": torch.ones(1, 1, 2, dtype=torch.bool),
         "imitation_window_age": torch.full((1, 1, 2), -1, dtype=torch.long),
         "valid": torch.ones(1, 1, 2, dtype=torch.bool),
         "stream_ids": torch.tensor([PHASE0_STREAM], dtype=torch.int8),
@@ -505,14 +505,16 @@ def test_discriminator_trains_on_old_normalizer_then_commits_next_snapshot() -> 
     assert metrics["disc_norm/current_expert_endpoint_tv"] == pytest.approx(1.0)
 
 
-def test_expert_endpoint_sampler_is_uniform_over_full_demo_and_policy_free() -> None:
+def test_expert_endpoint_sampler_is_uniform_over_reachable_demo_and_policy_free() -> None:
     algo = object.__new__(FCAMP)
     algo.env = SimpleNamespace(
         device=torch.device("cpu"),
         motion_start_phase=3,
-        motion_end_phase=7,
-        motion=SimpleNamespace(num_frames=8),
+        motion_end_phase=9,
+        motion_frame_delta=1.0,
+        motion=SimpleNamespace(num_frames=10),
     )
+    algo.imitation_history_steps = 4
     algo.expert_sampling_generator = torch.Generator(
         device="cpu"
     ).manual_seed(123)
@@ -521,11 +523,11 @@ def test_expert_endpoint_sampler_is_uniform_over_full_demo_and_policy_free() -> 
 
     assert endpoints.device.type == "cpu"
     assert endpoints.dtype == torch.long
-    assert set(endpoints.tolist()) == {3, 4, 5, 6, 7}
-    fractions = torch.bincount(endpoints - 3, minlength=5).float() / endpoints.numel()
+    assert set(endpoints.tolist()) == {6, 7, 8, 9}
+    fractions = torch.bincount(endpoints - 6, minlength=4).float() / endpoints.numel()
     torch.testing.assert_close(
         fractions,
-        torch.full((5,), 0.2),
+        torch.full((4,), 0.25),
         rtol=0.0,
         atol=0.01,
     )
@@ -543,11 +545,13 @@ def test_expert_sampler_has_an_isolated_rng_stream() -> None:
         motion_end_phase=324,
         motion=SimpleNamespace(num_frames=325),
     )
+    algo.imitation_history_steps = 16
     algo.expert_sampling_generator = torch.Generator(
         device="cpu"
     ).manual_seed(456)
     same_seed_algo = object.__new__(FCAMP)
     same_seed_algo.env = algo.env
+    same_seed_algo.imitation_history_steps = 16
     same_seed_algo.expert_sampling_generator = torch.Generator(
         device="cpu"
     ).manual_seed(456)
@@ -562,7 +566,7 @@ def test_expert_sampler_has_an_isolated_rng_stream() -> None:
     assert torch.equal(first, second)
 
 
-def test_expert_sampler_and_histogram_cover_full_inclusive_support() -> None:
+def test_expert_sampler_and_histogram_cover_reachable_inclusive_support() -> None:
     algo = object.__new__(FCAMP)
     algo.env = SimpleNamespace(
         device=torch.device("cpu"),
@@ -573,18 +577,20 @@ def test_expert_sampler_and_histogram_cover_full_inclusive_support() -> None:
     algo.expert_sampling_generator = torch.Generator(
         device="cpu"
     ).manual_seed(123)
+    algo.imitation_history_steps = 1
     assert algo._sample_expert_end_times(128).tolist() == [4] * 128
 
     algo.env.motion_start_phase = 0
     algo.env.motion_end_phase = 324
     algo.env.motion.num_frames = 325
+    algo.imitation_history_steps = 16
     exact_bin_counts = algo._uniform_expert_endpoint_histogram()
 
     assert exact_bin_counts.numel() == 16
-    assert int(exact_bin_counts.sum().item()) == 325
-    assert int(exact_bin_counts.min().item()) == 20
-    assert int(exact_bin_counts.max().item()) == 21
-    assert int((exact_bin_counts == 21).sum().item()) == 5
+    assert int(exact_bin_counts.sum().item()) == 310
+    assert int(exact_bin_counts.min().item()) == 19
+    assert int(exact_bin_counts.max().item()) == 20
+    assert int((exact_bin_counts == 20).sum().item()) == 6
 
 
 def test_disc_normalizer_uses_independent_expert_for_partial_batch() -> None:
@@ -599,6 +605,7 @@ def test_disc_normalizer_uses_independent_expert_for_partial_batch() -> None:
         style_prior=SimpleNamespace(batch_size=2),
         streams=SimpleNamespace(phase0_fraction=0.5),
     )
+    algo.imitation_history_steps = 1
     algo.disc_normalizer = RunningNormalizer(3, device="cpu", clip=100.0)
     expert_calls: list[int] = []
 
@@ -640,6 +647,7 @@ def test_expert_sampler_rejects_invalid_demo_interval() -> None:
     algo.expert_sampling_generator = torch.Generator(
         device="cpu"
     ).manual_seed(123)
+    algo.imitation_history_steps = 1
 
     with pytest.raises(RuntimeError, match="outside the motion"):
         algo._sample_expert_end_times(1)

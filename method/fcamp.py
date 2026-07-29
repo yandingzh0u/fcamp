@@ -464,15 +464,22 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
 
     def _reset_imitation_history(
         self,
-        phase_indices: torch.Tensor,
         env_ids: torch.Tensor | None = None,
     ) -> None:
-        phases = phase_indices.to(device=self.env.device)
-        seed = self.env.motion.get_fcamp_demo_history(
-            phases,
-            self.imitation_history_steps,
+        """Start policy history from the actual post-reset simulator state.
+
+        Demonstration predecessors are valid expert data, but they are not
+        transitions produced by the policy.  Policy-side discriminator windows
+        therefore become eligible only after W-1 real simulator transitions.
+        """
+
+        reset_frame = self.env.get_imitation_policy_frame(
+            env_ids=env_ids,
         )
-        self.imitation_history.reset_seeded(seed, env_ids=env_ids)
+        self.imitation_history.reset_from_frame(
+            reset_frame,
+            env_ids=env_ids,
+        )
 
     def _reset_training_streams(
         self,
@@ -515,7 +522,7 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
             env.set_episode_age(curriculum_ids, random_age)
         self._obs = obs
         self._critic_obs = env.get_critic_observation()
-        self._reset_imitation_history(phases)
+        self._reset_imitation_history()
         self.phase0_attempts.start(self.training_streams.phase0_ids)
         return obs
 
@@ -726,9 +733,9 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                     next_obs, done, info = env.step(action_t)
                     next_critic_obs = env.get_critic_observation()
 
-                    # Reset installs a complete phase-matched demo predecessor
-                    # history.  This first post-action frame immediately forms
-                    # the same fixed-W endpoint window used everywhere else.
+                    # The reset state is the oldest policy-side history frame.
+                    # A discriminator endpoint becomes legal only after W-1
+                    # actual post-action frames have completed the window.
                     imitation_frame = info["imitation_frame"]
                     alive_ids = alive_before.nonzero(as_tuple=False).squeeze(-1)
                     intervention_edges = info["intervention_edge_mask"].bool()
@@ -962,7 +969,6 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                     obs[reset_ids] = reset_obs
                     critic_obs = env.get_critic_observation()
                     self._reset_imitation_history(
-                        phase_indices=reset_phases,
                         env_ids=reset_ids,
                     )
                     self.phase0_attempts.start(reset_ids)
@@ -1088,7 +1094,28 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
         next_values_time = chronological(rollout["next_values"])
         bootstrap_time = chronological(rollout["bootstrap_mask"])
         trace_time = chronological(rollout["trace_mask"])
-        valid_time = chronological(rollout["amp_valid"])
+        action_valid_time = chronological(rollout["valid"]).bool()
+        endpoint_valid_time = chronological(rollout["amp_valid"]).bool()
+        if bool((endpoint_valid_time & ~action_valid_time).any()):
+            raise RuntimeError(
+                "FCAMP discriminator endpoint validity must be a subset of "
+                "real alive policy actions"
+            )
+        if bool(
+            (
+                (rewards_time != 0.0)
+                & ~endpoint_valid_time
+            ).any()
+        ):
+            raise RuntimeError(
+                "FCAMP produced non-zero AMP reward without a legal "
+                "discriminator endpoint"
+            )
+        # Endpoint validity gates D evaluation and reward production only.
+        # Every real alive action remains part of PPO/critic credit; ordinary
+        # GAE carries later legal AMP rewards backward through the W-1 warm-up
+        # actions, while terminal/intervention masks remain the only trace cuts.
+        valid_time = action_valid_time
         credit = compute_amp_gae(
             rewards_time,
             values_time,
@@ -1099,6 +1126,28 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
             gamma=float(self.cfg.discount_gamma),
             gae_lambda=float(self.cfg.gae_lambda),
         )
+        if not torch.equal(credit.valid_mask, action_valid_time):
+            raise RuntimeError(
+                "FCAMP action-credit validity diverged from alive policy actions"
+            )
+        # Diagnostic only: distinguish "included in PPO/critic" from "this
+        # finite rollout contains a later non-zero AMP reward reachable through
+        # the uncut GAE trace".  The latter may be false near rollout tails and
+        # for episodes that terminate before their first W-frame endpoint.
+        delayed_amp_reachable_time = torch.zeros_like(action_valid_time)
+        reachable_later = torch.zeros(
+            n_envs,
+            dtype=torch.bool,
+            device=action_valid_time.device,
+        )
+        for time_index in range(rewards_time.shape[0] - 1, -1, -1):
+            has_amp_reward = rewards_time[time_index] != 0.0
+            reachable_now = action_valid_time[time_index] & (
+                has_amp_reward
+                | (trace_time[time_index].bool() & reachable_later)
+            )
+            delayed_amp_reachable_time[time_index] = reachable_now
+            reachable_later = reachable_now
         # Match the exact actor objective q_s * mean_s(loss): every valid sample
         # in stream s carries q_s / N_s normalization mass.  This is one global
         # scalar transform, not one transform per channel or per stream.
@@ -1128,6 +1177,9 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
         rollout["amp_advantages"] = chunk_layout(credit.advantages)
         rollout["value_targets"] = chunk_layout(credit.value_targets)
         rollout["credit_valid"] = chunk_layout(credit.valid_mask)
+        rollout["delayed_amp_reachable"] = chunk_layout(
+            delayed_amp_reachable_time
+        )
 
     # ------------------------------------------------------------------ #
     # Optimizers

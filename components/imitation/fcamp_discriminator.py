@@ -100,22 +100,19 @@ class FCAMPDiscriminatorMixin:
         )
         return self.imitation_pipeline.flatten(raw)
 
-    def _sample_expert_end_times(self, sample_count: int) -> torch.Tensor:
-        """Draw demo endpoints independently of every policy-side distribution.
+    def _expert_endpoint_support(self) -> tuple[int, int, int]:
+        """Return the demo endpoint interval reachable by a full policy window."""
 
-        The expert measure is fixed by the configured demonstration interval.
-        This method deliberately accepts only a count: current/replay endpoints,
-        reset phases, curriculum state, and failure frontiers cannot be used to
-        reweight discriminator positives.
-        """
-
-        if (
-            isinstance(sample_count, bool)
-            or not isinstance(sample_count, int)
-            or sample_count <= 0
-        ):
-            raise ValueError("expert sample_count must be a positive integer")
-        endpoint_min = int(self.env.motion_start_phase)
+        frame_delta = float(getattr(self.env, "motion_frame_delta", 1.0))
+        if not math.isfinite(frame_delta) or frame_delta <= 0.0:
+            raise RuntimeError("motion_frame_delta must be finite and positive")
+        history_span = (int(self.imitation_history_steps) - 1) * frame_delta
+        rounded_span = int(round(history_span))
+        if not math.isclose(history_span, float(rounded_span), rel_tol=0.0, abs_tol=1.0e-4):
+            raise RuntimeError(
+                "expert endpoint support requires an integer W-1 motion span"
+            )
+        endpoint_min = int(self.env.motion_start_phase) + rounded_span
         endpoint_max = int(self.env.motion_end_phase)
         motion_frames = int(self.env.motion.num_frames)
         if (
@@ -124,8 +121,28 @@ class FCAMPDiscriminatorMixin:
             or endpoint_max >= motion_frames
         ):
             raise RuntimeError(
-                "configured expert endpoint interval lies outside the motion"
+                "configured reachable expert endpoint interval lies outside "
+                "the motion"
             )
+        return endpoint_min, endpoint_max, endpoint_max - endpoint_min + 1
+
+    def _sample_expert_end_times(self, sample_count: int) -> torch.Tensor:
+        """Draw demo endpoints independently of every policy-side distribution.
+
+        The expert measure is fixed and uniform over the interval where a full
+        W-frame policy window is physically constructible.  This method
+        deliberately accepts only a count: current/replay endpoints, reset
+        phases, curriculum state, and failure frontiers cannot reweight
+        discriminator positives.
+        """
+
+        if (
+            isinstance(sample_count, bool)
+            or not isinstance(sample_count, int)
+            or sample_count <= 0
+        ):
+            raise ValueError("expert sample_count must be a positive integer")
+        endpoint_min, endpoint_max, _ = self._expert_endpoint_support()
         generator = getattr(self, "expert_sampling_generator", None)
         if (
             not isinstance(generator, torch.Generator)
@@ -153,20 +170,16 @@ class FCAMPDiscriminatorMixin:
         return self._expert_flat_at_end_times(end_times), end_times
 
     def _endpoint_histogram(self, end_times: torch.Tensor) -> torch.Tensor:
-        """Count endpoints in fixed bins over the configured demo interval."""
+        """Count endpoints in fixed bins over reachable full-window support."""
 
         endpoints = end_times.detach().to(device="cpu", dtype=torch.long).reshape(-1)
-        endpoint_min = int(self.env.motion_start_phase)
-        endpoint_max = int(self.env.motion_end_phase)
-        support_size = endpoint_max - endpoint_min + 1
-        if support_size <= 0:
-            raise RuntimeError("configured endpoint histogram interval is empty")
+        endpoint_min, endpoint_max, support_size = self._expert_endpoint_support()
         if endpoints.numel() and (
             bool((endpoints < endpoint_min).any())
             or bool((endpoints > endpoint_max).any())
         ):
             raise RuntimeError(
-                "discriminator endpoint lies outside the configured demo interval"
+                "discriminator endpoint lies outside reachable full-window support"
             )
         num_bins = min(self._ENDPOINT_HISTOGRAM_BINS, support_size)
         bin_ids = torch.div(
@@ -177,12 +190,13 @@ class FCAMPDiscriminatorMixin:
         return torch.bincount(bin_ids, minlength=num_bins)
 
     def _uniform_expert_endpoint_histogram(self) -> torch.Tensor:
-        """Return exact bin masses for the discrete-uniform demo measure."""
+        """Return exact bin masses for the reachable discrete-uniform measure."""
 
+        endpoint_min, endpoint_max, _ = self._expert_endpoint_support()
         return self._endpoint_histogram(
             torch.arange(
-                int(self.env.motion_start_phase),
-                int(self.env.motion_end_phase) + 1,
+                endpoint_min,
+                endpoint_max + 1,
                 device="cpu",
                 dtype=torch.long,
             )
@@ -293,6 +307,11 @@ class FCAMPDiscriminatorMixin:
         canonical_root_xy_max = {"current": 0.0, "replay": 0.0, "expert": 0.0}
         endpoint_abs_diff_total = 0.0
         endpoint_histograms: dict[str, torch.Tensor] | None = None
+        endpoint_samples: dict[str, list[torch.Tensor]] = {
+            "current_train": [],
+            "replay_train": [],
+            "expert_train": [],
+        }
         self.discriminator.train()
         for disc_step in range(update_steps):
             current_raw, current_ends = self._sample_balanced_current_windows(
@@ -328,6 +347,14 @@ class FCAMPDiscriminatorMixin:
                 "replay_train": self._endpoint_histogram(replay_ends),
                 "expert_train": self._endpoint_histogram(expert_end_times),
             }
+            for name, endpoints in (
+                ("current_train", current_ends),
+                ("replay_train", replay_ends),
+                ("expert_train", expert_end_times),
+            ):
+                endpoint_samples[name].append(
+                    endpoints.detach().to(device="cpu", dtype=torch.long)
+                )
             if endpoint_histograms is None:
                 endpoint_histograms = {
                     name: counts.clone()
@@ -426,6 +453,16 @@ class FCAMPDiscriminatorMixin:
         endpoint_histograms["current_pool"] = self._endpoint_histogram(
             current_end_times_cpu
         )
+        endpoint_support_min, endpoint_support_max, endpoint_support_size = (
+            self._expert_endpoint_support()
+        )
+        metrics.update(
+            {
+                "disc_endpoint/support_min": float(endpoint_support_min),
+                "disc_endpoint/support_max": float(endpoint_support_max),
+                "disc_endpoint/support_size": float(endpoint_support_size),
+            }
+        )
         histogram_bins = int(endpoint_histograms["expert_train"].numel())
         metrics["disc_endpoint/histogram_bins"] = float(histogram_bins)
         endpoint_fractions: dict[str, torch.Tensor] = {}
@@ -442,6 +479,28 @@ class FCAMPDiscriminatorMixin:
                 metrics[
                     f"disc_endpoint/{domain}_bin_{bin_index:02d}_fraction"
                 ] = float(fraction)
+        endpoint_samples["current_pool"] = [
+            current_end_times_cpu.detach().to(device="cpu", dtype=torch.long)
+        ]
+        for domain, sample_parts in endpoint_samples.items():
+            samples = torch.cat(sample_parts, dim=0).float()
+            quantiles = torch.quantile(
+                samples,
+                torch.tensor([0.05, 0.5, 0.95]),
+            )
+            metrics.update(
+                {
+                    f"disc_endpoint/{domain}_min": float(samples.min().item()),
+                    f"disc_endpoint/{domain}_max": float(samples.max().item()),
+                    f"disc_endpoint/{domain}_mean": float(samples.mean().item()),
+                    f"disc_endpoint/{domain}_p05": float(quantiles[0].item()),
+                    f"disc_endpoint/{domain}_p50": float(quantiles[1].item()),
+                    f"disc_endpoint/{domain}_p95": float(quantiles[2].item()),
+                    f"disc_endpoint/{domain}_unique_count": float(
+                        torch.unique(samples).numel()
+                    ),
+                }
+            )
         expert_fractions = endpoint_fractions["expert_train"]
         expected_expert_fractions = self._uniform_expert_endpoint_histogram().to(
             dtype=torch.float64

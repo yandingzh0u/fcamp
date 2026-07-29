@@ -35,12 +35,14 @@ class FCAMPDiagnosticsMixin:
         stream_ids = rollout["stream_ids"]
         valid = rollout["valid"]
         amp_valid = rollout["amp_valid"]
+        credit_valid = rollout["credit_valid"]
         done = rollout["done"]
         failure = rollout["failure"]
         timeout = rollout["timeout"]
         complete = rollout["motion_complete"]
         total_valid = max(int(valid.sum().item()), 1)
         total_amp_valid = max(int(amp_valid.sum().item()), 1)
+        total_credit_valid = max(int(credit_valid.sum().item()), 1)
         metrics: dict[str, float] = {}
         configured_weights = {
             "phase0": float(self.cfg.streams.phase0_fraction),
@@ -56,12 +58,18 @@ class FCAMPDiagnosticsMixin:
             transition_mask = env_mask.reshape(1, -1, 1).expand_as(valid)
             stream_valid = valid & transition_mask
             stream_amp_valid = amp_valid & transition_mask
+            stream_credit_valid = credit_valid & transition_mask
             stream_done = done & transition_mask
             stream_failure = failure & transition_mask
             stream_timeout = timeout & transition_mask
             stream_complete = complete & transition_mask
             valid_count = int(stream_valid.sum().item())
             amp_count = int(stream_amp_valid.sum().item())
+            credit_count = int(stream_credit_valid.sum().item())
+            warmup_count = int((stream_valid & ~stream_amp_valid).sum().item())
+            missing_credit_count = int(
+                (stream_valid & ~stream_credit_valid).sum().item()
+            )
             terminal_count = int(stream_done.sum().item())
             failure_count = int(stream_failure.sum().item())
             timeout_count = int(stream_timeout.sum().item())
@@ -92,6 +100,20 @@ class FCAMPDiagnosticsMixin:
                     f"{prefix}/amp_valid_window_count": float(amp_count),
                     f"{prefix}/amp_valid_window_share": float(
                         amp_count / total_amp_valid
+                    ),
+                    f"{prefix}/endpoint_coverage_fraction_alive": float(
+                        amp_count / max(valid_count, 1)
+                    ),
+                    f"{prefix}/endpoint_warmup_count": float(warmup_count),
+                    f"{prefix}/action_credit_valid_count": float(credit_count),
+                    f"{prefix}/action_credit_valid_share": float(
+                        credit_count / total_credit_valid
+                    ),
+                    f"{prefix}/action_credit_coverage_fraction_alive": float(
+                        credit_count / max(valid_count, 1)
+                    ),
+                    f"{prefix}/action_credit_missing_count": float(
+                        missing_credit_count
                     ),
                     f"{prefix}/terminal_count": float(terminal_count),
                     f"{prefix}/failure_count": float(failure_count),
@@ -253,6 +275,42 @@ class FCAMPDiagnosticsMixin:
                     frame_valid,
                 )
             )
+            frame_alive = valid[..., frame_idx]
+            frame_endpoint = amp_valid[..., frame_idx]
+            frame_credit = credit_valid[..., frame_idx]
+            frame_delayed_amp = rollout["delayed_amp_reachable"][..., frame_idx]
+            frame_alive_count = int(frame_alive.sum().item())
+            frame_endpoint_count = int(frame_endpoint.sum().item())
+            frame_credit_count = int(frame_credit.sum().item())
+            metrics.update(
+                {
+                    f"rollout/h_offset_{frame_idx}/alive_count": float(
+                        frame_alive_count
+                    ),
+                    f"rollout/h_offset_{frame_idx}/endpoint_valid_count": float(
+                        frame_endpoint_count
+                    ),
+                    f"rollout/h_offset_{frame_idx}/endpoint_coverage_fraction_alive": float(
+                        frame_endpoint_count / max(frame_alive_count, 1)
+                    ),
+                    f"rollout/h_offset_{frame_idx}/action_credit_valid_count": float(
+                        frame_credit_count
+                    ),
+                    f"rollout/h_offset_{frame_idx}/action_credit_coverage_fraction_alive": float(
+                        frame_credit_count / max(frame_alive_count, 1)
+                    ),
+                    f"rollout/h_offset_{frame_idx}/warmup_action_credited_count": float(
+                        (frame_alive & ~frame_endpoint & frame_credit).sum().item()
+                    ),
+                    f"rollout/h_offset_{frame_idx}/warmup_with_future_amp_count": float(
+                        (
+                            frame_alive
+                            & ~frame_endpoint
+                            & frame_delayed_amp
+                        ).sum().item()
+                    ),
+                }
+            )
             metrics.update(
                 _masked_stats(
                     f"credit/frame_{frame_idx}_actor_adv",
@@ -264,16 +322,66 @@ class FCAMPDiagnosticsMixin:
         metrics.update(self.imitation_history.statistics())
         valid_count = int(valid.sum().item())
         amp_valid_count = int(amp_valid.sum().item())
+        credit_valid_count = int(credit_valid.sum().item())
         intervention_count = int(rollout["intervention_edge"].sum().item())
-        credit_gap_count = valid_count - amp_valid_count
+        endpoint_warmup = valid & ~amp_valid
+        endpoint_warmup_count = int(endpoint_warmup.sum().item())
+        warmup_with_future_amp_count = int(
+            (
+                endpoint_warmup
+                & rollout["delayed_amp_reachable"]
+            ).sum().item()
+        )
+        credit_gap_count = int((valid & ~credit_valid).sum().item())
+        credit_outside_action_count = int((credit_valid & ~valid).sum().item())
+        endpoint_outside_action_count = int((amp_valid & ~valid).sum().item())
+        reward_without_endpoint_count = int(
+            ((rollout["amp_reward"] != 0.0) & ~amp_valid).sum().item()
+        )
         dirty_window_count = float(rollout["dirty_window_excluded_count"])
         metrics.update(
             {
+                "rollout/valid_count": float(valid_count),
                 "rollout/valid_fraction": float(valid.float().mean().item()),
                 "rollout/amp_valid_fraction": float(amp_valid.float().mean().item()),
+                "rollout/endpoint_valid_count": float(amp_valid_count),
+                "rollout/endpoint_coverage_fraction_alive": float(
+                    amp_valid_count / max(valid_count, 1)
+                ),
+                "rollout/endpoint_warmup_gap_count": float(
+                    endpoint_warmup_count
+                ),
+                "rollout/endpoint_warmup_gap_fraction_alive": float(
+                    endpoint_warmup_count / max(valid_count, 1)
+                ),
+                "rollout/warmup_action_credited_count": float(
+                    (endpoint_warmup & credit_valid).sum().item()
+                ),
+                "rollout/warmup_with_future_amp_count": float(
+                    warmup_with_future_amp_count
+                ),
+                "rollout/warmup_with_future_amp_fraction": float(
+                    warmup_with_future_amp_count
+                    / max(endpoint_warmup_count, 1)
+                ),
+                "rollout/action_credit_valid_count": float(
+                    credit_valid_count
+                ),
+                "rollout/action_credit_coverage_fraction_alive": float(
+                    credit_valid_count / max(valid_count, 1)
+                ),
                 "rollout/credit_gap_count": float(credit_gap_count),
                 "rollout/credit_gap_fraction_alive": float(
                     credit_gap_count / max(valid_count, 1)
+                ),
+                "rollout/credit_valid_outside_action_count": float(
+                    credit_outside_action_count
+                ),
+                "rollout/endpoint_valid_outside_action_count": float(
+                    endpoint_outside_action_count
+                ),
+                "rollout/reward_without_endpoint_count": float(
+                    reward_without_endpoint_count
                 ),
                 "rollout/done_fraction": float(rollout["done"].float().mean().item()),
                 "rollout/failure_fraction": float(rollout["failure"].float().mean().item()),
@@ -407,6 +515,20 @@ class FCAMPDiagnosticsMixin:
             flush=True,
         )
         print(
+            "[AMP_MASK] "
+            f"alive={metrics.get('rollout/valid_count', 0.0):.0f} "
+            f"endpoint={metrics.get('rollout/endpoint_valid_count', 0.0):.0f} "
+            f"endpoint_cov={metrics.get('rollout/endpoint_coverage_fraction_alive', float('nan')):.5f} "
+            f"warmup={metrics.get('rollout/endpoint_warmup_gap_count', 0.0):.0f} "
+            f"warmup_credited={metrics.get('rollout/warmup_action_credited_count', 0.0):.0f} "
+            f"warmup_future_amp={metrics.get('rollout/warmup_with_future_amp_count', 0.0):.0f} "
+            f"action_credit={metrics.get('rollout/action_credit_valid_count', 0.0):.0f} "
+            f"credit_cov={metrics.get('rollout/action_credit_coverage_fraction_alive', float('nan')):.5f} "
+            f"credit_missing={metrics.get('rollout/credit_gap_count', 0.0):.0f} "
+            f"reward_without_endpoint={metrics.get('rollout/reward_without_endpoint_count', 0.0):.0f}",
+            flush=True,
+        )
+        print(
             f"[CRITIC] loss={metrics.get('critic/flow_loss', float('nan')):.5f} "
             f"V={metrics.get('critic/value/mean', float('nan')):.4f} "
             f"target={metrics.get('critic/target/mean', float('nan')):.4f} "
@@ -428,6 +550,16 @@ class FCAMPDiagnosticsMixin:
         )
         print(
             "[DISC_ENDPOINT] "
+            f"support=[{metrics.get('disc_endpoint/support_min', -1.0):.0f},"
+            f"{metrics.get('disc_endpoint/support_max', -1.0):.0f}] "
+            f"current_p05/50/95="
+            f"{metrics.get('disc_endpoint/current_train_p05', -1.0):.1f}/"
+            f"{metrics.get('disc_endpoint/current_train_p50', -1.0):.1f}/"
+            f"{metrics.get('disc_endpoint/current_train_p95', -1.0):.1f} "
+            f"expert_p05/50/95="
+            f"{metrics.get('disc_endpoint/expert_train_p05', -1.0):.1f}/"
+            f"{metrics.get('disc_endpoint/expert_train_p50', -1.0):.1f}/"
+            f"{metrics.get('disc_endpoint/expert_train_p95', -1.0):.1f} "
             f"expert_n={metrics.get('disc_endpoint/expert_train_sample_count', 0.0):.0f} "
             f"expert_uniform_tv={metrics.get('disc_endpoint/expert_train_uniform_tv', float('nan')):.5f} "
             f"expert_uniform_max={metrics.get('disc_endpoint/expert_train_max_abs_uniform_error', float('nan')):.5f} "
@@ -442,6 +574,7 @@ class FCAMPDiagnosticsMixin:
             f"fk_max={metrics.get('disc_contract/fk_alignment_abs_max', float('nan')):.3e} "
             f"policy_action_violation={metrics.get('act/policy_bound_violation_max', float('nan')):.3e} "
             f"dirty_excluded={metrics.get('disc_contract/dirty_window_excluded_count', 0.0):.0f} "
+            f"endpoint_gap={metrics.get('rollout/endpoint_warmup_gap_count', 0.0):.0f} "
             f"credit_gap={metrics.get('rollout/credit_gap_count', 0.0):.0f} "
             f"replay_dirty={metrics.get('disc_contract/replay_dirty_insert_count', -1.0):.0f} "
             f"push_edges={metrics.get('intervention/edge_count', 0.0):.0f} "
@@ -476,7 +609,8 @@ class FCAMPDiagnosticsMixin:
             flush=True,
         )
         print(
-            "[CREDIT] head=amp credit=causal_frame advantage_norm=global "
+            "[CREDIT] head=amp endpoint_gate=discriminator_only "
+            "action_credit=all_alive delayed_gae=True advantage_norm=global "
             "ratio_mode=joint_path task_weight=0 disc_weight=1 amp_dt=True",
             flush=True,
         )
@@ -491,6 +625,8 @@ class FCAMPDiagnosticsMixin:
             f"reward_contract={FCAMP_CHECKPOINT_CONTRACT['reward_contract']} "
             f"critic_contract={FCAMP_CHECKPOINT_CONTRACT['critic_contract']} "
             f"reset_contract={FCAMP_CHECKPOINT_CONTRACT['reset_contract']} "
+            f"policy_history_contract={FCAMP_CHECKPOINT_CONTRACT['policy_history_contract']} "
+            f"credit_contract={FCAMP_CHECKPOINT_CONTRACT['credit_contract']} "
             f"expert_velocity_contract={FCAMP_CHECKPOINT_CONTRACT['expert_velocity_contract']} "
             f"expert_sampling_contract={FCAMP_CHECKPOINT_CONTRACT['expert_sampling_contract']} "
             f"expert_sampling_seed={self.expert_sampling_seed} "

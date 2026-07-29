@@ -75,9 +75,10 @@ def compute_amp_gae(
 
     ``bootstrap_mask`` controls the value after each transition, while
     ``trace_mask`` controls whether later TD errors flow across that transition.
-    Callers therefore cut both masks at intervention edges and mark dirty
-    discriminator windows invalid. Invalid windows neither produce targets nor
-    connect otherwise clean AMP segments.
+    ``valid_mask`` describes real trainable actions, not whether a
+    discriminator window happened to be available at that endpoint. Callers
+    gate invalid discriminator endpoints by supplying zero reward, and cut
+    temporal credit only at genuine terminal or intervention edges.
     """
 
     _validate_gae_inputs(

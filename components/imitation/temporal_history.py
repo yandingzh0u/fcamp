@@ -13,6 +13,12 @@ class TemporalFeatureHistory:
     post-action frame replaces its oldest predecessor and immediately produces
     a fixed-width window.  Incoming frame edges also carry an explicit causal
     flag so windows crossing an exogenous intervention fail closed.
+
+    ``reset_from_frame`` is the policy-side reset contract.  It installs only
+    the actual simulator reset state and keeps the history ineligible until
+    ``W-1`` post-action transitions have replaced every placeholder.  Thus a
+    policy window never contains a demonstration prefix or a repeated reset
+    placeholder.
     """
 
     def __init__(
@@ -59,6 +65,16 @@ class TemporalFeatureHistory:
         self._cursor = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self._initialized = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._age = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
+        self._minimum_ready_age = torch.ones(
+            self.num_envs,
+            device=self.device,
+            dtype=torch.long,
+        )
+        self._demo_seeded = torch.zeros(
+            self.num_envs,
+            device=self.device,
+            dtype=torch.bool,
+        )
 
     @property
     def ages(self) -> torch.Tensor:
@@ -66,7 +82,7 @@ class TemporalFeatureHistory:
 
     @property
     def ready(self) -> torch.Tensor:
-        return self._initialized & (self._age >= 1)
+        return self._initialized & (self._age >= self._minimum_ready_age)
 
     def _ordered_incoming_edge_clean(self, ids: torch.Tensor) -> torch.Tensor:
         offsets = torch.arange(self.history_len, device=self.device)
@@ -148,6 +164,37 @@ class TemporalFeatureHistory:
         self._cursor[ids] = 0
         self._initialized[ids] = True
         self._age[ids] = 0
+        self._minimum_ready_age[ids] = 1
+        self._demo_seeded[ids] = True
+
+    @torch.no_grad()
+    def reset_from_frame(
+        self,
+        reset_frames: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> None:
+        """Reset from one actual simulator state per environment.
+
+        Repeated storage values are placeholders only: ``ready`` remains false
+        until the ring contains the reset state followed by exactly ``W-1``
+        actual post-action frames.
+        """
+
+        ids = self._ids(env_ids)
+        frames = self._check_frames("reset_frames", reset_frames, ids.numel())
+        if ids.numel() == 0:
+            return
+        self._data[ids] = frames[:, None, :].expand(-1, self.history_len, -1)
+        self._slot_ages[ids] = torch.arange(
+            1 - self.history_len, 1, device=self.device, dtype=torch.long
+        )
+        self._incoming_edge_clean[ids] = True
+        self._pending_intervention[ids] = False
+        self._cursor[ids] = 0
+        self._initialized[ids] = True
+        self._age[ids] = 0
+        self._minimum_ready_age[ids] = max(1, self.history_len - 1)
+        self._demo_seeded[ids] = False
 
     @torch.no_grad()
     def push(
@@ -228,8 +275,13 @@ class TemporalFeatureHistory:
         causal_ready = self.causal_ready
         dirty = ready & ~causal_ready
         seed_frames_remaining = torch.where(
-            initialized,
+            initialized & self._demo_seeded,
             torch.clamp(self.history_len - self._age, min=0, max=self.history_len),
+            torch.zeros_like(self._age),
+        )
+        policy_steps_until_ready = torch.where(
+            initialized & ~self._demo_seeded,
+            torch.clamp(self._minimum_ready_age - self._age, min=0),
             torch.zeros_like(self._age),
         )
         metrics = {
@@ -243,9 +295,12 @@ class TemporalFeatureHistory:
             "history/pending_intervention_count": float(self._pending_intervention.sum().item()),
             "history/age0_count": float((initialized & (self._age == 0)).sum().item()),
             "history/age0_in_legal_window_count": 0.0,
-            "history/seeded_fraction": float(initialized.float().mean().item()),
-            "history/seeded_count": float(initialized.sum().item()),
+            "history/seeded_fraction": float(self._demo_seeded.float().mean().item()),
+            "history/seeded_count": float(self._demo_seeded.sum().item()),
             "history/seed_frames_remaining_mean": float(seed_frames_remaining.float().mean().item()),
+            "history/policy_steps_until_ready_mean": float(
+                policy_steps_until_ready.float().mean().item()
+            ),
         }
         if bool(initialized.any()):
             ages = self._age[initialized]
