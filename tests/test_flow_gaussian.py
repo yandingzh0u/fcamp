@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import math
+import pytest
 import torch
 from torch import nn
 
-from components.rollout.flow_cps_base import FlowCPSBase
-from models.flow_cps_policy import FlowMatchingPolicy, flow_ode_mean
+from components.rollout.flow_gaussian_base import FlowGaussianBase
+from models.flow_chunk_policy import FlowMatchingPolicy, flow_ode_mean
 
 
 def _policy() -> FlowMatchingPolicy:
@@ -123,33 +125,40 @@ def test_residual_actions_use_symmetric_command_domain() -> None:
     )
 
 
-def test_sampled_cps_density_recomputes_exactly_with_finite_gradients() -> None:
+def test_sampled_gaussian_density_recomputes_exactly_with_finite_gradients() -> None:
     torch.manual_seed(23)
     policy = _policy()
-    steps = 3
-    rank = 2
-    policy.cps_diag_raw = nn.Parameter(
-        torch.full((steps, policy.chunk_dim), 0.5)
-    )
-    policy.cps_lowrank_raw = nn.Parameter(
-        1.0e-3 * torch.randn(steps, policy.chunk_dim, rank)
+    policy.action_path_log_std = nn.Parameter(
+        torch.full(
+            (policy.horizon, policy.action_dim),
+            math.log(0.5),
+        )
     )
 
-    flow = FlowCPSBase.__new__(FlowCPSBase)
-    flow.cfg = SimpleNamespace(flow_steps=steps)
+    flow = FlowGaussianBase.__new__(FlowGaussianBase)
+    flow.cfg = SimpleNamespace(flow_steps=3)
     flow._policy = policy
     flow.num_act = policy.action_dim
     flow.horizon_h = policy.horizon
     flow.chunk_dim = policy.chunk_dim
-    flow._cps_flat_dim = policy.chunk_dim
-    flow.cps_cov_rank = rank
-    flow.cps_noise_level = 0.35
+    flow.action_path_std_min = 0.02
+    flow.action_path_std_max = 1.5
 
     observations = torch.randn(5, policy.obs_dim)
-    _, latent_path, sampled_log_probs, _ = flow._sample_cps_path(observations)
-    recomputed = flow._recompute_cps_path_stats(
+    (
+        sampled_residual,
+        sampled_path,
+        sampled_log_probs,
+        old_mean_path,
+        old_log_std,
+    ) = flow._sample_gaussian_action_path(observations)
+    recomputed, analytic_kl, entropy = (
+        flow._recompute_gaussian_action_path_stats(
         observations,
-        latent_path.detach(),
+        sampled_path.detach(),
+        old_mean_path.detach(),
+        old_log_std.detach(),
+        )
     )
 
     torch.testing.assert_close(
@@ -158,6 +167,13 @@ def test_sampled_cps_density_recomputes_exactly_with_finite_gradients() -> None:
         atol=3.0e-6,
         rtol=1.0e-6,
     )
+    torch.testing.assert_close(
+        analytic_kl,
+        torch.zeros_like(analytic_kl),
+        atol=1.0e-7,
+        rtol=0.0,
+    )
+    assert entropy.shape == sampled_log_probs.shape
     recomputed.sum().backward()
     gradients = [
         parameter.grad
@@ -166,3 +182,112 @@ def test_sampled_cps_density_recomputes_exactly_with_finite_gradients() -> None:
     ]
     assert gradients
     assert all(bool(torch.isfinite(gradient).all()) for gradient in gradients)
+    assert policy.action_path_log_std.grad is not None
+    assert float(policy.action_path_log_std.grad.abs().sum().item()) > 0.0
+    torch.testing.assert_close(
+        torch.cumsum(
+            sampled_residual.view_as(sampled_path),
+            dim=1,
+        ),
+        sampled_path,
+    )
+
+
+def test_gaussian_has_one_trainable_path_std_per_horizon_joint() -> None:
+    torch.manual_seed(29)
+    policy = _policy()
+    policy.action_path_log_std = nn.Parameter(
+        torch.full(
+            (policy.horizon, policy.action_dim),
+            math.log(0.5),
+        )
+    )
+    flow = FlowGaussianBase.__new__(FlowGaussianBase)
+    flow.cfg = SimpleNamespace(flow_steps=2)
+    flow._policy = policy
+    flow.num_act = policy.action_dim
+    flow.horizon_h = policy.horizon
+    flow.chunk_dim = policy.chunk_dim
+    flow.action_path_std_min = 0.02
+    flow.action_path_std_max = 1.5
+
+    observations = torch.randn(20_000, policy.obs_dim)
+    with torch.no_grad():
+        (
+            sampled_residual,
+            sampled_path,
+            _,
+            mean_path,
+            log_std,
+        ) = flow._sample_gaussian_action_path(observations)
+    path_noise = sampled_path - mean_path
+    empirical = path_noise.std(dim=0, unbiased=False)
+    torch.testing.assert_close(
+        empirical,
+        torch.full_like(empirical, 0.5),
+        atol=0.015,
+        rtol=0.0,
+    )
+    per_h_rms = path_noise.square().mean(dim=(0, 2)).sqrt()
+    assert float(per_h_rms[-1] / per_h_rms[0]) == pytest.approx(
+        1.0,
+        abs=0.025,
+    )
+    torch.testing.assert_close(
+        torch.cumsum(
+            sampled_residual.view_as(sampled_path),
+            dim=1,
+        ),
+        sampled_path,
+        atol=2.0e-6,
+        rtol=0.0,
+    )
+    assert tuple(policy.action_path_log_std.shape) == (
+        policy.horizon,
+        policy.action_dim,
+    )
+    torch.testing.assert_close(
+        log_std,
+        policy.action_path_log_std,
+    )
+
+
+def test_sampled_path_maps_directly_to_each_absolute_action_offset() -> None:
+    torch.manual_seed(31)
+    policy = _policy()
+    policy.action_path_log_std = nn.Parameter(
+        torch.full(
+            (policy.horizon, policy.action_dim),
+            math.log(0.8),
+        )
+    )
+    flow = FlowGaussianBase.__new__(FlowGaussianBase)
+    flow.cfg = SimpleNamespace(flow_steps=2)
+    flow._policy = policy
+    flow.num_act = policy.action_dim
+    flow.horizon_h = policy.horizon
+    flow.chunk_dim = policy.chunk_dim
+    flow.action_path_std_min = 0.02
+    flow.action_path_std_max = 1.5
+
+    observations = torch.randn(32, policy.obs_dim)
+    previous_action = torch.empty(32, policy.action_dim).uniform_(-3.5, 3.5)
+    with torch.no_grad():
+        sampled_residual, sampled_path, _, _, _ = (
+            flow._sample_gaussian_action_path(observations)
+        )
+        transformed = policy._action_transform(
+            sampled_residual,
+            prev_action=previous_action,
+        ).view(32, policy.horizon, policy.action_dim)
+    scale = policy.action_squash_scale
+    initial_path = scale * torch.atanh(previous_action / scale)
+    direct = scale * torch.tanh(
+        (initial_path[:, None, :] + sampled_path) / scale
+    )
+    torch.testing.assert_close(
+        transformed,
+        direct,
+        atol=2.0e-6,
+        rtol=1.0e-6,
+    )

@@ -132,6 +132,9 @@ class Checkpointer:
         # Load through CPU so a large discriminator replay sidecar does not
         # transiently consume GPU memory before being copied back to its CPU ring.
         payload = torch.load(checkpoint_path, map_location="cpu")
+        preflight = getattr(t.algo, "validate_checkpoint_payload", None)
+        if callable(preflight):
+            preflight(payload)
         saved_config = payload.get("config")
         if saved_config is not None:
             current_signature = _resume_signature(asdict(t.cfg))
@@ -154,9 +157,6 @@ class Checkpointer:
                 "[CHECKPOINT] WARN: legacy checkpoint has no dataset/robot/action-schema hashes.",
                 flush=True,
             )
-        preflight = getattr(t.algo, "validate_checkpoint_payload", None)
-        if callable(preflight):
-            preflight(payload)
         t.algo.policy.load_state_dict(payload["policy"])
         reset_optimizer = bool(t.train_cfg.reset_optimizer_on_resume)
         if reset_optimizer:

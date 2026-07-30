@@ -1,1 +1,1 @@
-"""Rollout utilities and Flow-CPS internals."""
+"""Rollout utilities for FC-AMP training."""

@@ -9,9 +9,8 @@ ADAPTIVE_SAMPLER_VERSION = 5
 class AdaptiveTimestepsSampler:
     """Failure-biased sampler restored for the existing mimic environment.
 
-    The sampler keeps the historical behaviour of the last Flow-CPS-compatible
-    implementation: failures are accumulated per simulation step, folded into
-    an EMA, and sampling is biased towards predecessor bins.
+    Failures are accumulated per simulation step, folded into an EMA, and
+    sampling is biased towards predecessor bins.
     """
 
     def __init__(

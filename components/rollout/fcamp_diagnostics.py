@@ -28,7 +28,85 @@ def _masked_stats(prefix: str, values: torch.Tensor, mask: torch.Tensor | None =
     }
 
 
+def _gaussian_noise_statistics(
+    delta: torch.Tensor,
+    executed: torch.Tensor,
+    *,
+    prefix: str,
+) -> dict[str, float]:
+    if delta.ndim != 4:
+        raise ValueError(
+            "Gaussian noise delta must have shape "
+            "[chunks, envs, horizon, actions]"
+        )
+    if executed.shape != delta.shape[:-1]:
+        raise ValueError(
+            "Gaussian executed mask must match noise delta "
+            "without its action axis"
+        )
+    metrics: dict[str, float] = {}
 
+    def record(prefix: str, values: torch.Tensor) -> None:
+        flat = values.detach().float().reshape(-1)
+        if flat.numel() == 0:
+            metrics[f"{prefix}/component_count"] = 0.0
+            return
+        abs_flat = flat.abs()
+        metrics.update(
+            {
+                f"{prefix}/component_count": float(flat.numel()),
+                f"{prefix}/signed_mean": float(flat.mean().item()),
+                f"{prefix}/rms": float(
+                    flat.square().mean().sqrt().item()
+                ),
+                f"{prefix}/abs_mean": float(abs_flat.mean().item()),
+                f"{prefix}/abs_p95": float(
+                    torch.quantile(abs_flat, 0.95).item()
+                ),
+                f"{prefix}/abs_max": float(abs_flat.max().item()),
+            }
+        )
+
+    mask = executed.bool().unsqueeze(-1).expand_as(delta)
+    record(prefix, delta[mask])
+    for frame_idx in range(delta.shape[2]):
+        frame_mask = executed[..., frame_idx].bool()
+        record(
+            f"{prefix}_h{frame_idx}",
+            delta[..., frame_idx, :][frame_mask],
+        )
+    first_rms = metrics.get(f"{prefix}_h0/rms", 0.0)
+    last_index = delta.shape[2] - 1
+    last_rms = metrics.get(
+        f"{prefix}_h{last_index}/rms",
+        0.0,
+    )
+    metrics[f"{prefix}/last_to_first_rms_ratio"] = float(
+        last_rms / max(first_rms, 1.0e-12)
+    )
+    return metrics
+
+
+def gaussian_action_noise_statistics(
+    action_delta: torch.Tensor,
+    executed: torch.Tensor,
+) -> dict[str, float]:
+    return _gaussian_noise_statistics(
+        action_delta,
+        executed,
+        prefix="gaussian/action_noise",
+    )
+
+
+def gaussian_action_path_noise_statistics(
+    path_delta: torch.Tensor,
+    executed: torch.Tensor,
+) -> dict[str, float]:
+    return _gaussian_noise_statistics(
+        path_delta,
+        executed,
+        prefix="gaussian/action_path_noise",
+    )
 class FCAMPDiagnosticsMixin:
     @torch.no_grad()
     def _stream_rollout_metrics(self, rollout: dict) -> dict[str, float]:
@@ -215,6 +293,18 @@ class FCAMPDiagnosticsMixin:
         metrics.update(disc_metrics)
         metrics.update(reward_metrics)
         metrics.update(self._stream_rollout_metrics(rollout))
+        metrics.update(
+            gaussian_action_path_noise_statistics(
+                rollout["gaussian_action_path_noise_delta"],
+                rollout["valid"],
+            )
+        )
+        metrics.update(
+            gaussian_action_noise_statistics(
+                rollout["gaussian_action_noise_delta"],
+                rollout["valid"],
+            )
+        )
         metrics.update(self.phase0_attempts.metrics())
         metrics.update(_masked_stats("reward/amp", rollout["amp_reward"], amp_valid))
         metrics.update(
@@ -473,10 +563,57 @@ class FCAMPDiagnosticsMixin:
         print(
             f"[FCAMP] policy={metrics.get('fcamp/policy_loss', float('nan')):.5f} "
             f"kl={metrics.get('fcamp/kl', float('nan')):.6f} "
+            f"sample_kl={metrics.get('fcamp/sample_kl', float('nan')):.6f} "
             f"ratio={metrics.get('fcamp/ratio', float('nan')):.4f} "
             f"clip={metrics.get('fcamp/clip_fraction', float('nan')):.4f} "
             f"grad={metrics.get('fcamp/actor_grad_norm', float('nan')):.4f} "
             f"lr={metrics.get('fcamp/actor_lr', float('nan')):.6f}",
+            flush=True,
+        )
+        print(
+            "[GAUSSIAN_PATH_EXPLORATION] "
+            f"std={metrics.get('gaussian/action_path_std_min', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_path_std_mean', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_path_std_max', float('nan')):.5f} "
+            f"std_h="
+            f"{metrics.get('gaussian/action_path_frame_0_std_mean', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_path_frame_1_std_mean', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_path_frame_2_std_mean', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_path_frame_3_std_mean', float('nan')):.5f} "
+            f"entropy={metrics.get('fcamp/latent_entropy', float('nan')):.5f} "
+            f"path_rms={metrics.get('gaussian/action_path_noise/rms', float('nan')):.5f} "
+            f"path_h="
+            f"{metrics.get('gaussian/action_path_noise_h0/rms', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_path_noise_h1/rms', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_path_noise_h2/rms', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_path_noise_h3/rms', float('nan')):.5f} "
+            f"path_h3_h0={metrics.get('gaussian/action_path_noise/last_to_first_rms_ratio', float('nan')):.4f} "
+            f"command_rms={metrics.get('gaussian/action_noise/rms', float('nan')):.5f} "
+            f"command_h="
+            f"{metrics.get('gaussian/action_noise_h0/rms', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_noise_h1/rms', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_noise_h2/rms', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_noise_h3/rms', float('nan')):.5f} "
+            f"command_h3_h0={metrics.get('gaussian/action_noise/last_to_first_rms_ratio', float('nan')):.4f} "
+            f"bound_frac="
+            f"{metrics.get('gaussian/action_path_std_at_min_fraction', float('nan')):.5f}/"
+            f"{metrics.get('gaussian/action_path_std_at_max_fraction', float('nan')):.5f}",
+            flush=True,
+        )
+        print(
+            "[GAUSSIAN_PPO_H] "
+            f"kl={metrics.get('fcamp/frame_0_kl', float('nan')):.6f}/"
+            f"{metrics.get('fcamp/frame_1_kl', float('nan')):.6f}/"
+            f"{metrics.get('fcamp/frame_2_kl', float('nan')):.6f}/"
+            f"{metrics.get('fcamp/frame_3_kl', float('nan')):.6f} "
+            f"clip={metrics.get('fcamp/frame_0_clip', float('nan')):.4f}/"
+            f"{metrics.get('fcamp/frame_1_clip', float('nan')):.4f}/"
+            f"{metrics.get('fcamp/frame_2_clip', float('nan')):.4f}/"
+            f"{metrics.get('fcamp/frame_3_clip', float('nan')):.4f} "
+            f"ratio={metrics.get('fcamp/frame_0_ratio', float('nan')):.4f}/"
+            f"{metrics.get('fcamp/frame_1_ratio', float('nan')):.4f}/"
+            f"{metrics.get('fcamp/frame_2_ratio', float('nan')):.4f}/"
+            f"{metrics.get('fcamp/frame_3_ratio', float('nan')):.4f}",
             flush=True,
         )
         print(
@@ -595,7 +732,7 @@ class FCAMPDiagnosticsMixin:
 
     def log_banner(self) -> None:
         print(
-            "[METHOD] name=fcamp actor=causal_flow_cps prior=temporal_discriminator "
+            "[METHOD] name=fcamp actor=causal_flow_gaussian prior=temporal_discriminator "
             "reward=pure_amp credit=causal_frame critic=scalar_flow",
             flush=True,
         )
@@ -611,7 +748,8 @@ class FCAMPDiagnosticsMixin:
         print(
             "[CREDIT] head=amp endpoint_gate=discriminator_only "
             "action_credit=all_alive delayed_gae=True advantage_norm=global "
-            "ratio_mode=joint_path task_weight=0 disc_weight=1 amp_dt=True",
+            "ratio_mode=action_path_gaussian_offset "
+            "task_weight=0 disc_weight=1 amp_dt=True",
             flush=True,
         )
         print(
@@ -621,7 +759,9 @@ class FCAMPDiagnosticsMixin:
             f"replay_mode=complete_window_stratified "
             f"fcamp_schema={FCAMP_CHECKPOINT_CONTRACT['fcamp_schema_version']} "
             f"action_contract={FCAMP_CHECKPOINT_CONTRACT['action_contract']} "
+            f"actor_architecture_contract={FCAMP_CHECKPOINT_CONTRACT['actor_architecture_contract']} "
             f"actor_observation_contract={FCAMP_CHECKPOINT_CONTRACT['actor_observation_contract']} "
+            f"exploration_contract={FCAMP_CHECKPOINT_CONTRACT['exploration_contract']} "
             f"reward_contract={FCAMP_CHECKPOINT_CONTRACT['reward_contract']} "
             f"critic_contract={FCAMP_CHECKPOINT_CONTRACT['critic_contract']} "
             f"reset_contract={FCAMP_CHECKPOINT_CONTRACT['reset_contract']} "

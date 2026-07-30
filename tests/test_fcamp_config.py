@@ -5,7 +5,7 @@ import pytest
 
 from engine.config import (
     FCAMPConfig,
-    FlowCPSConfig,
+    FlowGaussianConfig,
     TrainingConfig,
     load_config,
 )
@@ -15,7 +15,7 @@ from envs.tasks import TASKS
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_fcamp_config_is_h4_w16_flow_cps() -> None:
+def test_fcamp_config_is_h4_w16_trainable_gaussian() -> None:
     cfg = load_config(ROOT / "configs" / "fcamp_largebox.yaml")
     assert cfg.method == "fcamp"
     assert not cfg.environment.interval_pushes
@@ -26,8 +26,9 @@ def test_fcamp_config_is_h4_w16_flow_cps() -> None:
     assert cfg.parameters.rollout_env_steps % cfg.parameters.horizon == 0
     assert cfg.parameters.flow_steps == 4
     assert cfg.parameters.action_squash_scale == 5.0
-    assert cfg.parameters.cps_noise_level == 0.8
-    assert cfg.parameters.cps_cov_rank == 8
+    assert cfg.parameters.gaussian_path_init_std == 0.8
+    assert cfg.parameters.gaussian_path_std_min == 0.02
+    assert cfg.parameters.gaussian_path_std_max == 1.5
     assert cfg.parameters.desired_kl == 0.01
     assert cfg.parameters.policy_lr == 0.0003
     assert cfg.parameters.value_lr == 0.0003
@@ -83,13 +84,36 @@ def test_validation_has_no_fractional_early_stop() -> None:
         load_config(ROOT / "configs" / name)
 
 
-def test_flow_cps_config_has_no_legacy_algorithm_fields() -> None:
-    fields_by_name = {field.name for field in fields(FlowCPSConfig)}
+def test_flow_gaussian_config_has_no_legacy_algorithm_fields() -> None:
+    fields_by_name = {
+        field.name for field in fields(FlowGaussianConfig)
+    }
     assert "init_noise_std" not in fields_by_name
     assert "num_generations" not in fields_by_name
     assert "tail_bootstrap_steps" not in fields_by_name
     assert "actor_density" not in fields_by_name
     assert "failure_penalty" not in fields_by_name
+    assert "cps_noise_level" not in fields_by_name
+    assert "cps_cov_rank" not in fields_by_name
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "parameters.gaussian_path_init_std=0.0",
+        "parameters.gaussian_path_init_std=.nan",
+        "parameters.gaussian_path_std_min=-0.1",
+        "parameters.gaussian_path_std_max=.inf",
+        "parameters.gaussian_path_std_min=0.9",
+        "parameters.gaussian_path_std_max=0.7",
+    ],
+)
+def test_fcamp_rejects_invalid_gaussian_std(override: str) -> None:
+    with pytest.raises(ValueError, match="Gaussian|gaussian"):
+        load_config(
+            ROOT / "configs" / "fcamp_largebox.yaml",
+            [override],
+        )
 
 
 def test_task_binds_motion_and_terrain() -> None:

@@ -1,4 +1,4 @@
-"""KL-based adaptive learning-rate controller for clipped Flow-CPS updates."""
+"""KL-based adaptive learning-rate controller for clipped policy updates."""
 from __future__ import annotations
 
 import math

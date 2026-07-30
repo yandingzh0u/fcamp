@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+import math
 from pathlib import Path
 from typing import Any
 
@@ -32,16 +33,17 @@ class EnvironmentConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class FlowCPSConfig:
-    """Shared Flow-CPS actor settings used by FCAMP."""
+class FlowGaussianConfig:
+    """Shared deterministic-flow Gaussian actor settings used by FCAMP."""
 
     horizon: int
     actor_hidden_dims: tuple[int, ...]
     activation: str
     action_squash_scale: float
     flow_steps: int
-    cps_noise_level: float
-    cps_cov_rank: int
+    gaussian_path_init_std: float
+    gaussian_path_std_min: float
+    gaussian_path_std_max: float
     rollout_env_steps: int
     discount_gamma: float
     gae_lambda: float
@@ -95,8 +97,8 @@ class FCAMPStreamsConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class FCAMPConfig(FlowCPSConfig):
-    """Full causal Flow-CPS + temporal discriminator training path."""
+class FCAMPConfig(FlowGaussianConfig):
+    """Causal Gaussian flow actor plus temporal discriminator prior."""
 
     style_prior: StylePriorConfig
     critic: FlowCriticConfig
@@ -279,21 +281,41 @@ def _validate(config: ExperimentConfig) -> None:
 
 def _validate_fcamp(params: FCAMPConfig) -> None:
     if params.horizon < 1:
-        raise ValueError("Flow-CPS requires parameters.horizon >= 1")
+        raise ValueError("FCAMP Gaussian actor requires parameters.horizon >= 1")
     if params.flow_steps < 1:
-        raise ValueError("Flow-CPS requires parameters.flow_steps >= 1")
+        raise ValueError("FCAMP flow mean requires parameters.flow_steps >= 1")
     if params.rollout_env_steps <= 0:
-        raise ValueError("Flow-CPS requires parameters.rollout_env_steps > 0")
+        raise ValueError("FCAMP requires parameters.rollout_env_steps > 0")
     if params.rollout_env_steps % params.horizon:
         raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
-    if not (0.0 < params.cps_noise_level < 1.0):
-        raise ValueError("Flow-CPS requires parameters.cps_noise_level in (0, 1)")
-    if params.cps_cov_rank < 0:
-        raise ValueError("Flow-CPS requires parameters.cps_cov_rank >= 0")
+    gaussian_path_std_values = (
+        params.gaussian_path_init_std,
+        params.gaussian_path_std_min,
+        params.gaussian_path_std_max,
+    )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+        for value in gaussian_path_std_values
+    ):
+        raise ValueError(
+            "FCAMP action-path Gaussian std values must be finite and positive"
+        )
+    if not (
+        params.gaussian_path_std_min
+        <= params.gaussian_path_init_std
+        <= params.gaussian_path_std_max
+    ):
+        raise ValueError(
+            "FCAMP requires gaussian_path_std_min <= "
+            "gaussian_path_init_std <= gaussian_path_std_max"
+        )
     if params.policy_lr <= 0.0:
-        raise ValueError("Flow-CPS requires parameters.policy_lr > 0")
+        raise ValueError("FCAMP requires parameters.policy_lr > 0")
     if params.value_lr <= 0.0:
-        raise ValueError("Flow-CPS requires parameters.value_lr > 0")
+        raise ValueError("FCAMP requires parameters.value_lr > 0")
 
     style = params.style_prior
     critic = params.critic

@@ -22,14 +22,18 @@ environment:
   root_velocity_mode: link
 
 parameters:
-  # Causal Flow-CPS chunk actor (kept aligned with the Flow-CPS actor).
+  # Causal deterministic-flow mean with trainable Gaussian chunk exploration.
   horizon: 4
   actor_hidden_dims: [512, 256, 128]
   activation: elu
   action_squash_scale: 5.0
   flow_steps: 4
-  cps_noise_level: 0.8
-  cps_cov_rank: 8
+  # Exploration is sampled in the cumulative pre-tanh action-path space.
+  # 0.80 matches the established CPS action-path noise scale. Every
+  # [horizon, joint] log-std remains independently trainable by PPO.
+  gaussian_path_init_std: 0.80
+  gaussian_path_std_min: 0.02
+  gaussian_path_std_max: 1.50
   rollout_env_steps: 24
   discount_gamma: 0.99
   gae_lambda: 0.95

@@ -9,7 +9,7 @@ import torch
 from components.imitation.style_reward import discriminator_style_reward
 from components.imitation.window_pipeline import TemporalWindowPipeline
 from components.normalization.running_stats import RunningNormalizer
-from components.rollout.flow_cps_base import FlowCPSBase
+from components.rollout.flow_gaussian_base import FlowGaussianBase
 from components.rollout.fcamp_diagnostics import FCAMPDiagnosticsMixin
 from components.rollout.training_streams import (
     CURRICULUM_STREAM,
@@ -30,12 +30,13 @@ class _RecordingSGD(torch.optim.SGD):
         return super().step(closure)
 
 
-def test_fcamp_actor_adapts_lr_from_masked_joint_path_kl_before_step() -> None:
+def test_fcamp_actor_adapts_lr_from_masked_gaussian_kl_before_step() -> None:
     algo = object.__new__(FCAMP)
     algo.env = SimpleNamespace(device=torch.device("cpu"))
     algo.horizon_h = 2
     algo.chunk_dim = 2
     algo.actor_obs_dim = 1
+    algo.num_act = 1
     algo.cfg = SimpleNamespace(
         flow_steps=2,
         clip_range=0.2,
@@ -48,6 +49,10 @@ def test_fcamp_actor_adapts_lr_from_masked_joint_path_kl_before_step() -> None:
         streams=SimpleNamespace(phase0_fraction=0.1),
     )
     algo._policy = torch.nn.Linear(1, 1, bias=False)
+    algo.action_path_std_min = 0.02
+    algo.action_path_std_max = 1.5
+    algo._bounded_action_path_log_std = lambda: torch.zeros(2, 1)
+    algo._clamp_action_path_log_std_ = lambda: None
     algo.learning_rate = 3.0e-4
     algo.min_lr = 1.0e-5
     algo.max_lr = 1.0e-3
@@ -55,21 +60,26 @@ def test_fcamp_actor_adapts_lr_from_masked_joint_path_kl_before_step() -> None:
         algo._policy.parameters(), lr=algo.learning_rate
     )
 
-    delta = torch.tensor(
+    gaussian_kl = torch.tensor(
         [
-            [[0.20, 0.20], [0.20, 0.20]],
-            [[0.10, 0.30], [0.10, 0.30]],
+            [0.20, 0.20],
+            [0.10, 0.30],
         ]
     )
     actor_obs = torch.arange(2, dtype=torch.float32).unsqueeze(-1)
 
-    def recompute(obs, _latent_path):
+    def recompute(obs, _sample, _old_mean, _old_log_std):
         indices = obs[:, 0].long()
-        return delta.index_select(0, indices) + 0.0 * algo._policy.weight.sum()
+        selected = gaussian_kl.index_select(0, indices)
+        new_log_prob = (
+            selected
+            + 0.0 * algo._policy.weight.sum()
+        )
+        return new_log_prob, selected, torch.zeros_like(selected)
 
-    algo._recompute_cps_path_stats = recompute
+    algo._recompute_gaussian_action_path_stats = recompute
     observed: list[float] = []
-    inherited_controller = FlowCPSBase._update_adaptive_learning_rates.__get__(
+    inherited_controller = FlowGaussianBase._update_adaptive_learning_rates.__get__(
         algo, FCAMP
     )
 
@@ -81,8 +91,10 @@ def test_fcamp_actor_adapts_lr_from_masked_joint_path_kl_before_step() -> None:
     valid = torch.tensor([[[True, True], [True, False]]])
     rollout = {
         "actor_obs": actor_obs.view(1, 2, 1),
-        "latents": torch.zeros(1, 2, 3, 2),
-        "old_log_probs": torch.zeros(1, 2, 2, 2),
+        "sampled_action_paths": torch.zeros(1, 2, 2, 1),
+        "old_action_path_means": torch.zeros(1, 2, 2, 1),
+        "old_log_std": torch.zeros(2, 1),
+        "old_log_probs": torch.zeros(1, 2, 2),
         "advantages": torch.ones(1, 2, 2),
         "valid": valid,
         "credit_valid": valid,
@@ -95,9 +107,8 @@ def test_fcamp_actor_adapts_lr_from_masked_joint_path_kl_before_step() -> None:
 
     metrics = algo._actor_update(rollout)
     mask = valid.reshape(2, 2).float()
-    joint_path_delta = delta.sum(dim=1)
     expected_kl = float(
-        (0.5 * joint_path_delta.square() * mask).sum().item() / mask.sum().item()
+        (gaussian_kl * mask).sum().item() / mask.sum().item()
     )
 
     assert observed == [pytest.approx(expected_kl)]
@@ -216,6 +227,10 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
     algo = object.__new__(FCAMP)
     algo.action_low = torch.tensor([-5.0, -5.0])
     algo.action_high = torch.tensor([5.0, 5.0])
+    algo.horizon_h = 4
+    algo.num_act = 2
+    algo.action_path_std_min = 0.02
+    algo.action_path_std_max = 1.5
     algo.expert_sampling_seed = 123
     expert_generator = torch.Generator(device="cpu").manual_seed(123)
 
@@ -227,13 +242,23 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
         "action_low": algo.action_low.clone(),
         "action_high": algo.action_high.clone(),
     }
-    algo.validate_checkpoint_payload({"algo_state": valid_state})
+    valid_policy = {
+        "actor.action_path_log_std": torch.full(
+            (algo.horizon_h, algo.num_act),
+            -0.5,
+        )
+    }
+
+    def payload(state, policy=valid_policy):
+        return {"algo_state": state, "policy": policy}
+
+    algo.validate_checkpoint_payload(payload(valid_state))
 
     for name in FCAMP_CHECKPOINT_CONTRACT:
         missing = dict(valid_state)
         missing.pop(name)
         with pytest.raises(ValueError, match=name):
-            algo.validate_checkpoint_payload({"algo_state": missing})
+            algo.validate_checkpoint_payload(payload(missing))
 
     for name, expected in FCAMP_CHECKPOINT_CONTRACT.items():
         mismatched = dict(valid_state)
@@ -241,37 +266,75 @@ def test_fcamp_checkpoint_contract_is_strict_before_load() -> None:
             expected + 1 if isinstance(expected, int) else f"{expected}_mismatch"
         )
         with pytest.raises(ValueError, match=name):
-            algo.validate_checkpoint_payload({"algo_state": mismatched})
+            algo.validate_checkpoint_payload(payload(mismatched))
 
-    for historical_schema in (8, 9, 11, 13, 14, 16, 17, 18, 19):
+    for historical_schema in (
+        8,
+        9,
+        11,
+        13,
+        14,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+    ):
         historical = dict(valid_state)
         historical["fcamp_schema_version"] = historical_schema
         with pytest.raises(ValueError, match="fcamp_schema_version"):
-            algo.validate_checkpoint_payload({"algo_state": historical})
+            algo.validate_checkpoint_payload(payload(historical))
 
     discriminator_conditioned = dict(valid_state)
     discriminator_conditioned["discriminator_policy_conditioning"] = True
     with pytest.raises(ValueError, match="discriminator-conditioned"):
         algo.validate_checkpoint_payload(
-            {"algo_state": discriminator_conditioned}
+            payload(discriminator_conditioned)
         )
 
     wrong_action_domain = dict(valid_state)
     wrong_action_domain["action_high"] = algo.action_high + 0.01
     with pytest.raises(ValueError, match="action_high differs"):
         algo.validate_checkpoint_payload(
-            {"algo_state": wrong_action_domain}
+            payload(wrong_action_domain)
         )
 
     wrong_expert_seed = dict(valid_state)
     wrong_expert_seed["expert_sampling_seed"] += 1
     with pytest.raises(ValueError, match="expert sampling seed"):
-        algo.validate_checkpoint_payload({"algo_state": wrong_expert_seed})
+        algo.validate_checkpoint_payload(payload(wrong_expert_seed))
 
     missing_expert_rng = dict(valid_state)
     missing_expert_rng.pop("expert_sampling_generator_state")
     with pytest.raises(ValueError, match="expert sampling generator"):
-        algo.validate_checkpoint_payload({"algo_state": missing_expert_rng})
+        algo.validate_checkpoint_payload(payload(missing_expert_rng))
+
+    with pytest.raises(ValueError, match="Gaussian log_std"):
+        algo.validate_checkpoint_payload(payload(valid_state, {}))
+    with pytest.raises(ValueError, match="Gaussian log_std"):
+        algo.validate_checkpoint_payload(
+            payload(
+                valid_state,
+                {
+                    "actor.action_path_log_std": torch.zeros(
+                        algo.num_act
+                    )
+                },
+            )
+        )
+    with pytest.raises(ValueError, match="non-finite"):
+        bad_policy = {
+            "actor.action_path_log_std": valid_policy[
+                "actor.action_path_log_std"
+            ].clone()
+        }
+        bad_policy["actor.action_path_log_std"][0, 0] = float("nan")
+        algo.validate_checkpoint_payload(
+            payload(valid_state, bad_policy)
+        )
 
 
 def test_fcamp_validates_contract_before_restoring_base_state(monkeypatch) -> None:
@@ -286,7 +349,7 @@ def test_fcamp_validates_contract_before_restoring_base_state(monkeypatch) -> No
         base_restore_calls.append(payload)
 
     monkeypatch.setattr(
-        FlowCPSBase,
+        FlowGaussianBase,
         "load_extra_checkpoint_state",
         record_base_restore,
     )

@@ -1,7 +1,9 @@
 FCAMP_CHECKPOINT_CONTRACT = {
-    "fcamp_schema_version": 20,
+    "fcamp_schema_version": 24,
     "action_contract": "residual_absolute_v1",
+    "actor_architecture_contract": "causal_flow_mean_gru_v1",
     "actor_observation_contract": "self_state_last_action_v1",
+    "exploration_contract": "trainable_action_path_diagonal_gaussian_v2",
     "reward_contract": "pure_amp_dt_v1",
     "critic_contract": "scalar_amp_flow_v1",
     "reset_contract": "phase_reference_link_velocity_v2",
@@ -10,5 +12,5 @@ FCAMP_CHECKPOINT_CONTRACT = {
     "expert_velocity_contract": "npz_root_link_world_v1",
     "expert_sampling_contract": "independent_uniform_reachable_disc_and_norm_v2",
     "validation_contract": "tracking_primary_v1",
-    "ppo_contract": "fcamp_joint_flow_path_sum_v1",
+    "ppo_contract": "action_path_gaussian_offset_logprob_analytic_kl_v2",
 }

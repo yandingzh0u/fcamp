@@ -1,4 +1,4 @@
-"""FC-AMP: causal Flow-chunk policy optimization with temporal discriminator prior.
+"""FC-AMP: causal flow-chunk Gaussian policy with temporal discriminator prior.
 
 The discriminator remains an independent MimicKit-style reward model.  Its
 online representation is never part of the actor or critic observation; only
@@ -8,6 +8,7 @@ conditional.
 
 from __future__ import annotations
 
+import math
 import time
 
 import torch
@@ -18,7 +19,7 @@ from components.credit.temporal_credit import (
     normalize_amp_advantage,
     resolve_terminal_masks,
 )
-from components.rollout.flow_cps_base import FlowCPSBase
+from components.rollout.flow_gaussian_base import FlowGaussianBase
 from components.rollout.fcamp_contract import FCAMP_CHECKPOINT_CONTRACT
 from components.rollout.fcamp_diagnostics import FCAMPDiagnosticsMixin
 from components.imitation.fcamp_discriminator import FCAMPDiscriminatorMixin
@@ -43,8 +44,8 @@ from models.flow_critic import FlowCritic
 
 
 
-class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
-    """Full H=4 causal Flow-CPS policy with W=16 temporal discriminator prior."""
+class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowGaussianBase):
+    """H=4 causal flow-mean Gaussian policy with W=16 style prior."""
 
     def build(self) -> None:
         cfg = self.cfg
@@ -253,6 +254,35 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
     def validate_checkpoint_payload(self, payload: dict) -> None:
         state = payload.get("algo_state") if isinstance(payload, dict) else None
         self._validate_checkpoint_contract(state)
+        policy_state = (
+            payload.get("policy") if isinstance(payload, dict) else None
+        )
+        if not isinstance(policy_state, dict):
+            raise ValueError("FCAMP checkpoint is missing policy state")
+        saved_log_std = policy_state.get(
+            "actor.action_path_log_std"
+        )
+        expected_shape = (self.horizon_h, self.num_act)
+        if (
+            not torch.is_tensor(saved_log_std)
+            or tuple(saved_log_std.shape) != expected_shape
+            or not bool(torch.isfinite(saved_log_std).all())
+        ):
+            raise ValueError(
+                "FCAMP checkpoint action-path Gaussian log_std is missing, "
+                "non-finite, "
+                f"or not shaped {expected_shape}"
+            )
+        minimum = math.log(self.action_path_std_min)
+        maximum = math.log(self.action_path_std_max)
+        if bool(
+            (saved_log_std < minimum - 1.0e-6).any()
+            or (saved_log_std > maximum + 1.0e-6).any()
+        ):
+            raise ValueError(
+                "FCAMP checkpoint action-path Gaussian log_std is outside "
+                "configured bounds"
+            )
 
     def extra_checkpoint_state(self) -> dict:
         payload = super().extra_checkpoint_state()
@@ -620,7 +650,6 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
         n_envs = env.num_envs
         chunks = self._chunks_per_update()
         h = self.horizon_h
-        flow_steps = int(self.cfg.flow_steps)
         # One rollout is generated, history-conditioned and rewarded by one
         # immutable committed discriminator snapshot.  As in the local
         # MimicKit AMP implementation, policy/value optimization consumes these
@@ -632,10 +661,24 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
 
         actor_obs_buf = torch.zeros(chunks, n_envs, self.actor_obs_dim, device=device)
         actor_obs_raw_buf = torch.zeros_like(actor_obs_buf)
-        latent_path_buf = torch.zeros(
-            chunks, n_envs, flow_steps + 1, self.chunk_dim, device=device
+        sampled_action_path_buf = torch.zeros(
+            chunks, n_envs, h, self.num_act, device=device
         )
-        old_log_probs_buf = torch.zeros(chunks, n_envs, flow_steps, h, device=device)
+        old_mean_path_buf = torch.zeros(
+            chunks, n_envs, h, self.num_act, device=device
+        )
+        old_log_probs_buf = torch.zeros(
+            chunks, n_envs, h, device=device
+        )
+        action_noise_delta_buf = torch.zeros(
+            chunks, n_envs, h, self.num_act, device=device
+        )
+        action_path_noise_delta_buf = torch.zeros_like(
+            action_noise_delta_buf
+        )
+        rollout_old_log_std = (
+            self._bounded_action_path_log_std().detach().clone()
+        )
         context_buf = torch.zeros(
             chunks, n_envs, h, self.prefix_context_dim, device=device
         )
@@ -698,10 +741,36 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                 chunk_critic_raw = critic_obs.clone()
                 actor_obs_n = self.actor_obs_normalizer(chunk_actor_raw)
                 previous_action = chunk_actor_raw[..., -self.num_act :].detach()
-                final_latent, latent_path, old_log_probs, _ = self._sample_cps_path(actor_obs_n)
+                (
+                    final_latent,
+                    sampled_action_path,
+                    old_log_probs,
+                    old_mean_path,
+                    sampled_log_std,
+                ) = self._sample_gaussian_action_path(actor_obs_n)
+                if not torch.equal(
+                    sampled_log_std,
+                    rollout_old_log_std,
+                ):
+                    raise RuntimeError(
+                        "Gaussian log_std changed during one rollout"
+                    )
                 action_chunk = self._policy._action_transform(
                     final_latent, prev_action=previous_action
                 ).view(n_envs, h, self.num_act)
+                old_mean_residual = self._residual_from_path(
+                    old_mean_path
+                )
+                mean_action_chunk = self._policy._action_transform(
+                    old_mean_residual.reshape(n_envs, self.chunk_dim),
+                    prev_action=previous_action,
+                ).view(n_envs, h, self.num_act)
+                action_path_noise_delta_buf[chunk_idx] = (
+                    sampled_action_path - old_mean_path
+                )
+                action_noise_delta_buf[chunk_idx] = (
+                    action_chunk - mean_action_chunk
+                )
                 action_abs_max = max(action_abs_max, float(action_chunk.abs().max().item()))
                 below = (self.action_low - action_chunk).clamp_min(0.0)
                 above = (action_chunk - self.action_high).clamp_min(0.0)
@@ -712,7 +781,10 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
 
                 actor_obs_buf[chunk_idx] = actor_obs_n
                 actor_obs_raw_buf[chunk_idx] = chunk_actor_raw
-                latent_path_buf[chunk_idx] = latent_path
+                sampled_action_path_buf[chunk_idx] = (
+                    sampled_action_path
+                )
+                old_mean_path_buf[chunk_idx] = old_mean_path
                 old_log_probs_buf[chunk_idx] = old_log_probs
 
                 alive = torch.ones(n_envs, dtype=torch.bool, device=device)
@@ -1016,8 +1088,14 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
         rollout = {
             "actor_obs": actor_obs_buf,
             "actor_obs_raw": actor_obs_raw_buf,
-            "latents": latent_path_buf,
+            "sampled_action_paths": sampled_action_path_buf,
+            "old_action_path_means": old_mean_path_buf,
+            "old_log_std": rollout_old_log_std,
             "old_log_probs": old_log_probs_buf,
+            "gaussian_action_path_noise_delta": (
+                action_path_noise_delta_buf
+            ),
+            "gaussian_action_noise_delta": action_noise_delta_buf,
             "contexts": context_buf,
             "contexts_raw": context_raw_buf,
             "next_contexts_raw": next_context_raw_buf,
@@ -1213,12 +1291,26 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
         chunks, n_envs = rollout["valid"].shape[:2]
         batch_size = chunks * n_envs
         h = self.horizon_h
-        flow_steps = int(self.cfg.flow_steps)
         actor_obs = rollout["actor_obs"].reshape(batch_size, self.actor_obs_dim)
-        latent_path = rollout["latents"].reshape(
-            batch_size, flow_steps + 1, self.chunk_dim
+        sampled_action_path = rollout[
+            "sampled_action_paths"
+        ].reshape(
+            batch_size,
+            h,
+            self.num_act,
         )
-        old_log_probs = rollout["old_log_probs"].reshape(batch_size, flow_steps, h)
+        old_mean_paths = rollout[
+            "old_action_path_means"
+        ].reshape(
+            batch_size,
+            h,
+            self.num_act,
+        )
+        old_log_std = rollout["old_log_std"]
+        old_log_probs = rollout["old_log_probs"].reshape(
+            batch_size,
+            h,
+        )
         advantages = rollout["advantages"].reshape(batch_size, h)
         valid = rollout["credit_valid"].reshape(batch_size, h)
         env_stream_ids = rollout["stream_ids"]
@@ -1248,8 +1340,9 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
         totals = {
             "policy_loss": 0.0,
             "kl": 0.0,
-            "per_factor_kl": 0.0,
-            "full_chunk_path_kl": 0.0,
+            "sample_kl": 0.0,
+            "full_chunk_sample_kl": 0.0,
+            "latent_entropy": 0.0,
             "ratio": 0.0,
             "clip": 0.0,
             "grad_norm": 0.0,
@@ -1258,8 +1351,9 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
         metric_names = (
             "policy_loss",
             "kl",
-            "per_factor_kl",
-            "full_chunk_path_kl",
+            "sample_kl",
+            "full_chunk_sample_kl",
+            "latent_entropy",
             "ratio",
             "clip",
         )
@@ -1325,12 +1419,12 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                     stream_sums = {
                         "policy_loss": 0.0,
                         "kl": 0.0,
-                        "per_factor_kl": 0.0,
-                        "full_chunk_path_kl": 0.0,
+                        "sample_kl": 0.0,
+                        "full_chunk_sample_kl": 0.0,
+                        "latent_entropy": 0.0,
                         "ratio": 0.0,
                         "clip": 0.0,
                     }
-                    factor_denominator = valid_denominator * flow_steps
                     chunk_denominator = float(
                         (
                             valid.index_select(0, idx).sum(dim=1) > 0
@@ -1342,14 +1436,20 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                         sub = idx[
                             micro_start : micro_start + micro_batch_size
                         ]
-                        new_log_probs = self._recompute_cps_path_stats(
+                        (
+                            new_log_probs,
+                            analytic_kl,
+                            latent_entropy,
+                        ) = self._recompute_gaussian_action_path_stats(
                             actor_obs[sub],
-                            latent_path[sub],
+                            sampled_action_path[sub],
+                            old_mean_paths[sub],
+                            old_log_std,
                         )
                         delta = new_log_probs - old_log_probs[sub]
                         adv = advantages[sub]
                         mask = valid[sub].to(dtype=delta.dtype)
-                        log_ratio = delta.sum(dim=1)
+                        log_ratio = delta
                         ratio = torch.exp(log_ratio)
                         unclipped = -adv * ratio
                         clipped = -adv * torch.clamp(
@@ -1366,11 +1466,10 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                         ).backward()
 
                         with torch.no_grad():
-                            kl = 0.5 * log_ratio.square()
+                            sample_kl = 0.5 * log_ratio.square()
                             clipped_flag = (
                                 (ratio < clip_low) | (ratio > clip_high)
                             ).to(ratio.dtype)
-                            factor_mask = mask.unsqueeze(1).expand_as(delta)
                             full_chunk_log_ratio = (
                                 log_ratio * mask
                             ).sum(dim=1)
@@ -1381,22 +1480,27 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                                 policy_sum.item()
                             )
                             stream_sums["kl"] += float(
-                                (kl * mask).sum().item()
+                                (analytic_kl * mask).sum().item()
                             )
-                            stream_sums["per_factor_kl"] += float(
+                            stream_sums["sample_kl"] += float(
                                 (
-                                    0.5
-                                    * delta.square()
-                                    * factor_mask
+                                    sample_kl
+                                    * mask
                                 ).sum().item()
                             )
                             stream_sums[
-                                "full_chunk_path_kl"
+                                "full_chunk_sample_kl"
                             ] += float(
                                 (
                                     0.5
                                     * full_chunk_log_ratio.square()
                                     * chunk_active
+                                ).sum().item()
+                            )
+                            stream_sums["latent_entropy"] += float(
+                                (
+                                    latent_entropy
+                                    * mask
                                 ).sum().item()
                             )
                             stream_sums["ratio"] += float(
@@ -1405,12 +1509,20 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                             stream_sums["clip"] += float(
                                 (clipped_flag * mask).sum().item()
                             )
-                            totals["joint_log_ratio_abs_max"] = max(
-                                totals["joint_log_ratio_abs_max"],
-                                float(log_ratio.abs().max().item()),
-                            )
+                            valid_log_ratio = log_ratio[
+                                mask.bool()
+                            ]
+                            if valid_log_ratio.numel() > 0:
+                                totals["joint_log_ratio_abs_max"] = max(
+                                    totals[
+                                        "joint_log_ratio_abs_max"
+                                    ],
+                                    float(
+                                        valid_log_ratio.abs().max().item()
+                                    ),
+                                )
                             frame_totals[name]["kl"] += (
-                                kl * mask
+                                analytic_kl * mask
                             ).sum(dim=0)
                             frame_totals[name]["ratio"] += (
                                 ratio * mask
@@ -1427,13 +1539,17 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                             / valid_denominator
                         ),
                         "kl": stream_sums["kl"] / valid_denominator,
-                        "per_factor_kl": (
-                            stream_sums["per_factor_kl"]
-                            / max(factor_denominator, 1.0)
+                        "sample_kl": (
+                            stream_sums["sample_kl"]
+                            / valid_denominator
                         ),
-                        "full_chunk_path_kl": (
-                            stream_sums["full_chunk_path_kl"]
+                        "full_chunk_sample_kl": (
+                            stream_sums["full_chunk_sample_kl"]
                             / max(chunk_denominator, 1.0)
+                        ),
+                        "latent_entropy": (
+                            stream_sums["latent_entropy"]
+                            / valid_denominator
                         ),
                         "ratio": stream_sums["ratio"] / valid_denominator,
                         "clip": stream_sums["clip"] / valid_denominator,
@@ -1456,6 +1572,7 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
                     self._policy.parameters(), float(self.cfg.max_grad_norm)
                 )
                 self.actor_optimizer.step()
+                self._clamp_action_path_log_std_()
                 for key in metric_names:
                     totals[key] += combined_metrics[key]
                 totals["grad_norm"] += float(grad_norm)
@@ -1475,8 +1592,13 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
         metrics = {
             "fcamp/policy_loss": totals["policy_loss"] / denom,
             "fcamp/kl": totals["kl"] / denom,
-            "fcamp/per_factor_kl": totals["per_factor_kl"] / denom,
-            "fcamp/full_chunk_path_kl": totals["full_chunk_path_kl"] / denom,
+            "fcamp/sample_kl": totals["sample_kl"] / denom,
+            "fcamp/full_chunk_sample_kl": (
+                totals["full_chunk_sample_kl"] / denom
+            ),
+            "fcamp/latent_entropy": (
+                totals["latent_entropy"] / denom
+            ),
             "fcamp/ratio": totals["ratio"] / denom,
             "fcamp/clip_fraction": totals["clip"] / denom,
             "fcamp/actor_grad_norm": totals["grad_norm"] / denom,
@@ -1490,8 +1612,49 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
             "fcamp/actor_optimizer_steps": float(steps),
             "fcamp/actor_early_stop_epoch": float(early_stop_epoch),
             "fcamp/joint_log_ratio_abs_max": totals["joint_log_ratio_abs_max"],
-            "fcamp/ratio_mode": 2.0,
+            "fcamp/ratio_mode": 4.0,
         }
+        with torch.no_grad():
+            bounded_log_std = (
+                self._bounded_action_path_log_std()
+            )
+            bounded_std = torch.exp(bounded_log_std)
+            metrics.update(
+                {
+                    "gaussian/action_path_log_std_min": float(
+                        bounded_log_std.min().item()
+                    ),
+                    "gaussian/action_path_log_std_mean": float(
+                        bounded_log_std.mean().item()
+                    ),
+                    "gaussian/action_path_log_std_max": float(
+                        bounded_log_std.max().item()
+                    ),
+                    "gaussian/action_path_std_min": float(
+                        bounded_std.min().item()
+                    ),
+                    "gaussian/action_path_std_mean": float(
+                        bounded_std.mean().item()
+                    ),
+                    "gaussian/action_path_std_max": float(
+                        bounded_std.max().item()
+                    ),
+                    "gaussian/action_path_std_at_min_fraction": float(
+                        (
+                            bounded_std
+                            <= self.action_path_std_min
+                            * (1.0 + 1.0e-6)
+                        ).float().mean().item()
+                    ),
+                    "gaussian/action_path_std_at_max_fraction": float(
+                        (
+                            bounded_std
+                            >= self.action_path_std_max
+                            * (1.0 - 1.0e-6)
+                        ).float().mean().item()
+                    ),
+                }
+            )
         objective_weights = {
             name: weight for name, _, weight, _ in stream_specs
         }
@@ -1527,6 +1690,21 @@ class FCAMP(FCAMPDiagnosticsMixin, FCAMPDiscriminatorMixin, FlowCPSBase):
             )
             metrics[f"fcamp/frame_{frame_idx}_clip"] = float(
                 frame_values["clip"]
+            )
+            metrics[
+                f"gaussian/action_path_frame_{frame_idx}_std_mean"
+            ] = float(
+                bounded_std[frame_idx].mean().item()
+            )
+            metrics[
+                f"gaussian/action_path_frame_{frame_idx}_std_min"
+            ] = float(
+                bounded_std[frame_idx].min().item()
+            )
+            metrics[
+                f"gaussian/action_path_frame_{frame_idx}_std_max"
+            ] = float(
+                bounded_std[frame_idx].max().item()
             )
         return metrics
 
