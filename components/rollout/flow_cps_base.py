@@ -27,19 +27,10 @@ from models.flow_cps_policy import FlowMatchingPolicy, flow_ode_mean
 class FlowCPSBase:
     FLOW_CRITIC_SAMPLES = 4
     FLOW_CRITIC_FM_SAMPLES = 1
-    REPLACED_CRITIC_HIDDEN_DIMS = (512, 256, 128)
 
     def __init__(self, cfg, env):
         self.cfg = cfg
         self.env = env
-
-    @staticmethod
-    def _burn_replaced_critic_rng(obs_dim: int, hidden_dims: tuple[int, ...]) -> None:
-        """Preserve a833's seeded initialization after removing its dead critic."""
-
-        dims = (int(obs_dim) + 2, *map(int, hidden_dims), 1)
-        for input_dim, output_dim in zip(dims, dims[1:]):
-            nn.Linear(input_dim, output_dim)
 
     def build(self) -> None:
         cfg = self.cfg
@@ -67,12 +58,6 @@ class FlowCPSBase:
         )
         self._policy.cps_lowrank_raw = nn.Parameter(
             1.0e-3 * torch.randn(steps, self._cps_flat_dim, self.cps_cov_rank, device=env.device)
-        )
-        # a833 built a scalar critic here and FCAMP immediately replaced it with
-        # the real dual critic. Only its seeded Linear initialization mattered.
-        self._burn_replaced_critic_rng(
-            self.critic_obs_dim,
-            self.REPLACED_CRITIC_HIDDEN_DIMS,
         )
         self.chunk_dim = self._policy.chunk_dim
 
@@ -471,5 +456,8 @@ class FlowCPSBase:
         stats = self.env.adaptive_sampling_stats()
         for key, value in stats.items():
             value = float(value)
-            if math.isfinite(value):
-                metrics[f"sampler/{key}"] = value
+            if not math.isfinite(value):
+                raise FloatingPointError(
+                    f"adaptive sampler statistic {key!r} is non-finite"
+                )
+            metrics[f"sampler/{key}"] = value

@@ -80,3 +80,24 @@ def test_resume_hook_runs_after_sampler_and_rng_restore(tmp_path) -> None:
     assert events == ["algorithm", "sampler", "reset_after_resume"]
     assert trainer.current_observation is resumed_observation
     assert trainer.start_update == 8
+
+
+def test_target_reached_uses_directional_validation_key() -> None:
+    trainer = SimpleNamespace(
+        train_cfg=SimpleNamespace(target_validation_steps=100),
+        env=SimpleNamespace(max_episode_steps=500),
+    )
+    checkpointer = Checkpointer(trainer)
+
+    assert checkpointer.target_reached(
+        {
+            "validation/steps_min": 101.0,
+            "validation_directional/steps_min": 101.0,
+        }
+    )
+    assert not checkpointer.target_reached(
+        {
+            "validation/steps_min": 101.0,
+            "validation_directional/steps_min": 100.0,
+        }
+    )

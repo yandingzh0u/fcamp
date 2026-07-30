@@ -1,1 +1,1 @@
-"""Neural network modules."""
+"""Flow-CPS actor and scalar task-value models."""

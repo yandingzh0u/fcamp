@@ -1,1 +1,1 @@
-"""Temporal credit assignment utilities."""
+"""Scalar task credit assignment utilities."""

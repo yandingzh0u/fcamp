@@ -1,4 +1,4 @@
-method: fcamp
+method: fixed_reward
 environment:
   platform_profile: g1_largebox_50hz
   task: largebox_plane
@@ -21,10 +21,9 @@ environment:
   adaptive_predecessor_ratio: 0.8
   adaptive_predecessor_lookback_bins: 1
   action_rate_weight: 0.1
-  root_velocity_mode: com
+  root_velocity_mode: link
 
 parameters:
-  # Causal Flow-CPS chunk actor (kept aligned with the Flow-CPS actor).
   horizon: 4
   actor_hidden_dims: [512, 256, 128]
   activation: elu
@@ -48,38 +47,10 @@ parameters:
   max_grad_norm: 1.0
   kl_early_stop_factor: 4.0
 
-  style_prior:
-    # 16 states at 50 Hz span 0.30 s (15 transitions).
-    obs_steps: 16
-    hidden_dims: [1024, 512]
-    reward_scale: 2.0
-    reward_epsilon: 0.0001
-    learning_rate: 0.00025
-    weight_decay: 0.0001
-    epochs: 2
-    # Absolute batch size; deliberately independent of num_envs for GP memory.
-    batch_size: 1024
-    current_buffer_size: 65536
-    replay_size: 200000
-    replay_samples: 1000
-    grad_penalty: 10.0
-    logit_reg: 0.01
-    normalizer_clip: 10.0
-    reward_eval_batch_size: 4096
-    max_updates_per_iteration: 32
-  credit:
-    task_weight: 1.0
-    amp_weight: 1.0
-
-  critics:
+  critic:
     encoder_hidden_dims: [512, 256, 128]
     head_hidden_dims: [128, 64]
-    task_loss_weight: 1.0
-    amp_loss_weight: 1.0
 
-  # Ten percent of the interaction/optimizer budget persistently attempts full
-  # episodes from phase 0.  A trajectory is counted complete only when the
-  # environment emits motion_complete; reset-at-zero is never called success.
   streams:
     phase0_fraction: 0.10
 

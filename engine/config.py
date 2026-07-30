@@ -35,7 +35,7 @@ class EnvironmentConfig:
 
 @dataclass(frozen=True, slots=True)
 class FlowCPSConfig:
-    """Shared Flow-CPS actor settings used by FCAMP."""
+    """Shared Flow-CPS actor and optimizer settings."""
 
     horizon: int
     actor_hidden_dims: tuple[int, ...]
@@ -62,56 +62,24 @@ class FlowCPSConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class StylePriorConfig:
-    """Temporal discriminator prior configuration used by FCAMP."""
-
-    obs_steps: int
-    hidden_dims: tuple[int, ...]
-    reward_scale: float
-    reward_epsilon: float
-    learning_rate: float
-    weight_decay: float
-    epochs: int
-    batch_size: int
-    current_buffer_size: int
-    replay_size: int
-    replay_samples: int
-    grad_penalty: float
-    logit_reg: float
-    normalizer_clip: float
-    reward_eval_batch_size: int
-    max_updates_per_iteration: int
-
-
-@dataclass(frozen=True, slots=True)
-class FCAMPCreditConfig:
-    task_weight: float
-    amp_weight: float
-
-
-@dataclass(frozen=True, slots=True)
-class FCAMPCriticConfig:
+class FixedRewardCriticConfig:
     encoder_hidden_dims: tuple[int, ...]
     head_hidden_dims: tuple[int, ...]
-    task_loss_weight: float
-    amp_loss_weight: float
 
 
 @dataclass(frozen=True, slots=True)
-class FCAMPStreamsConfig:
-    """Fixed phase-zero trajectory-attempt/curriculum mixture used by FCAMP."""
+class FixedRewardStreamsConfig:
+    """Fixed phase-zero trajectory-attempt/curriculum mixture."""
 
     phase0_fraction: float
 
 
 @dataclass(frozen=True, slots=True)
-class FCAMPConfig(FlowCPSConfig):
-    """Full causal Flow-CPS + temporal discriminator training path."""
+class FixedRewardConfig(FlowCPSConfig):
+    """Task-only fixed-pose-reward Flow-CPS training configuration."""
 
-    style_prior: StylePriorConfig
-    credit: FCAMPCreditConfig
-    critics: FCAMPCriticConfig
-    streams: FCAMPStreamsConfig
+    critic: FixedRewardCriticConfig
+    streams: FixedRewardStreamsConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,8 +103,9 @@ class TrainingConfig:
 class ExperimentConfig:
     method: str
     environment: EnvironmentConfig
-    parameters: FCAMPConfig
+    parameters: FixedRewardConfig
     training: TrainingConfig
+
 
 def _construct(cls, values: dict[str, Any]):
     names = {field.name for field in fields(cls)}
@@ -149,7 +118,6 @@ def _construct(cls, values: dict[str, Any]):
     converted = dict(values)
     for name in (
         "actor_hidden_dims",
-        "hidden_dims",
         "encoder_hidden_dims",
         "head_hidden_dims",
     ):
@@ -158,17 +126,22 @@ def _construct(cls, values: dict[str, Any]):
     return cls(**converted)
 
 
-def _construct_fcamp(values: dict[str, Any]) -> FCAMPConfig:
+def _construct_fixed_reward(values: dict[str, Any]) -> FixedRewardConfig:
     nested = dict(values)
     try:
-        style_prior = dict(nested["style_prior"])
-        nested["style_prior"] = _construct(StylePriorConfig, style_prior)
-        nested["credit"] = _construct(FCAMPCreditConfig, dict(nested["credit"]))
-        nested["critics"] = _construct(FCAMPCriticConfig, dict(nested["critics"]))
-        nested["streams"] = _construct(FCAMPStreamsConfig, dict(nested["streams"]))
+        nested["critic"] = _construct(
+            FixedRewardCriticConfig,
+            dict(nested["critic"]),
+        )
+        nested["streams"] = _construct(
+            FixedRewardStreamsConfig,
+            dict(nested["streams"]),
+        )
     except KeyError as exc:
-        raise KeyError(f"FCAMPConfig missing nested section: {exc.args[0]}") from exc
-    return _construct(FCAMPConfig, nested)
+        raise KeyError(
+            f"FixedRewardConfig missing nested section: {exc.args[0]}"
+        ) from exc
+    return _construct(FixedRewardConfig, nested)
 
 
 def _apply_overrides(tree: dict[str, Any], overrides: list[str]) -> None:
@@ -196,7 +169,10 @@ def _resolve_path(value: str, config_path: Path) -> str:
     return str(path.resolve())
 
 
-def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> ExperimentConfig:
+def config_from_dict(
+    tree: dict[str, Any],
+    source: str | Path = ".",
+) -> ExperimentConfig:
     normalized = dict(tree)
     required = {"method", "environment", "parameters", "training"}
     missing = required - normalized.keys()
@@ -205,17 +181,27 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
         raise KeyError(f"ExperimentConfig missing keys: {sorted(missing)}")
     if unknown:
         raise KeyError(f"ExperimentConfig unknown keys: {sorted(unknown)}")
+
     method = str(normalized["method"])
-    if method != "fcamp":
-        raise ValueError(f"method must be 'fcamp', got {method!r}")
+    if method != "fixed_reward":
+        raise ValueError(
+            "Only method='fixed_reward' is supported; legacy checkpoints and "
+            "configurations must start a fresh run."
+        )
+
     source_path = Path(source).expanduser().resolve()
-    environment_values = dict(normalized["environment"])
     training_values = dict(normalized["training"])
-    training_values["resume"] = _resolve_path(str(training_values["resume"]), source_path)
+    training_values["resume"] = _resolve_path(
+        str(training_values["resume"]),
+        source_path,
+    )
     config = ExperimentConfig(
         method=method,
-        environment=_construct(EnvironmentConfig, environment_values),
-        parameters=_construct_fcamp(dict(normalized["parameters"])),
+        environment=_construct(
+            EnvironmentConfig,
+            dict(normalized["environment"]),
+        ),
+        parameters=_construct_fixed_reward(dict(normalized["parameters"])),
         training=_construct(TrainingConfig, training_values),
     )
     _validate(config)
@@ -226,115 +212,22 @@ def config_from_checkpoint_dict(
     tree: dict[str, Any],
     source: str | Path = ".",
 ) -> ExperimentConfig:
-    """Load the active FCAMP fields from an a833-compatible checkpoint."""
+    """Load a fixed-reward checkpoint configuration without legacy coercion."""
 
-    def require_removed(
-        section: str,
-        values: dict[str, Any],
-        expected: dict[str, Any],
-    ) -> None:
-        for name, required in expected.items():
-            if name not in values:
-                continue
-            actual = values[name]
-            if isinstance(required, tuple):
-                actual = tuple(actual)
-            if type(actual) is not type(required) or actual != required:
-                raise ValueError(
-                    f"checkpoint {section}.{name}={values[name]!r} is incompatible "
-                    f"with the fixed FCAMP value {required!r}"
-                )
-
-    def select(cls, values: dict[str, Any]) -> dict[str, Any]:
-        return {field.name: values[field.name] for field in fields(cls)}
-
-    environment_raw = dict(tree["environment"])
-    parameters_raw = dict(tree["parameters"])
-    style_raw = dict(parameters_raw["style_prior"])
-    credit_raw = dict(parameters_raw["credit"])
-    critics_raw = dict(parameters_raw["critics"])
-    training_raw = dict(tree["training"])
-    require_removed(
-        "environment",
-        environment_raw,
-        {
-            "adaptive_motion_sampling": environment_raw["reset_phase_sampling"]
-            == "adaptive",
-            "motion_reference_mode": "frame",
-            "policy_observation_mode": "tracking",
-            "physics_material_combine_mode": "average",
-            "contact_sensor_update_period": "control",
-        },
-    )
-    require_removed(
-        "parameters",
-        parameters_raw,
-        {
-            "critic_hidden_dims": (512, 256, 128),
-            "cps_trainable": True,
-            "value_loss_coef": 1.0,
-            "empirical_normalization": True,
-            "advantage_normalization": "global",
-        },
-    )
-    require_removed(
-        "parameters.style_prior",
-        style_raw,
-        {
-            "enabled": True,
-            "optimizer": "sgd",
-            "replay_dtype": "float32",
-            "replay_device": "cpu",
-            "discriminator_warmup_rollouts": 1,
-        },
-    )
-    require_removed(
-        "parameters.credit",
-        credit_raw,
-        {
-            "mode": "causal_frame",
-            "integrate_amp_reward_dt": True,
-            "advantage_normalization": "global",
-            "ratio_mode": "joint_path",
-        },
-    )
-    require_removed(
-        "parameters.critics",
-        critics_raw,
-        {"sharing": "encoder"},
-    )
-    require_removed(
-        "training",
-        training_raw,
-        {"official_reset_every": 0},
-    )
-    parameters = select(FCAMPConfig, parameters_raw)
-    parameters["style_prior"] = select(
-        StylePriorConfig,
-        style_raw,
-    )
-    parameters["credit"] = select(
-        FCAMPCreditConfig,
-        credit_raw,
-    )
-    parameters["critics"] = select(
-        FCAMPCriticConfig,
-        critics_raw,
-    )
-    parameters["streams"] = select(
-        FCAMPStreamsConfig,
-        dict(parameters_raw["streams"]),
-    )
-    active = {
-        "method": tree["method"],
-        "environment": select(EnvironmentConfig, environment_raw),
-        "parameters": parameters,
-        "training": select(TrainingConfig, training_raw),
-    }
-    return config_from_dict(active, source)
+    if not isinstance(tree, dict):
+        raise ValueError("Checkpoint config must be a mapping.")
+    if tree.get("method") != "fixed_reward":
+        raise ValueError(
+            "Legacy checkpoints are incompatible with fixed_reward; "
+            "start a fresh run."
+        )
+    return config_from_dict(tree, source)
 
 
-def load_config(config_path: str | Path, overrides: list[str] | None = None) -> ExperimentConfig:
+def load_config(
+    config_path: str | Path,
+    overrides: list[str] | None = None,
+) -> ExperimentConfig:
     path = Path(config_path).expanduser().resolve()
     with path.open("r", encoding="utf-8") as handle:
         tree = yaml.safe_load(handle) or {}
@@ -348,14 +241,20 @@ def _validate(config: ExperimentConfig) -> None:
 
     env = config.environment
     train = config.training
-    if env.num_envs < 1:
-        raise ValueError("environment.num_envs must be positive")
+    params = config.parameters
+
+    if env.num_envs < 2:
+        raise ValueError(
+            "fixed_reward requires at least two environments for two streams"
+        )
     if env.sim_dt <= 0.0:
         raise ValueError("environment.sim_dt must be positive")
     if env.decimation < 1:
         raise ValueError("environment.decimation must be positive")
     if env.platform_profile not in {"custom", "g1_largebox_50hz"}:
-        raise ValueError("environment.platform_profile must be custom or g1_largebox_50hz")
+        raise ValueError(
+            "environment.platform_profile must be custom or g1_largebox_50hz"
+        )
     if env.reset_phase_sampling not in {
         "adaptive",
         "uniform",
@@ -368,27 +267,44 @@ def _validate(config: ExperimentConfig) -> None:
         )
     if env.rsi_keyframe_count < 1:
         raise ValueError("environment.rsi_keyframe_count must be positive")
-    if env.root_velocity_mode not in {"com", "link"}:
-        raise ValueError("environment.root_velocity_mode must be com or link")
+    if abs(float(env.action_rate_weight) - 0.1) > 1.0e-12:
+        raise ValueError(
+            "fixed_reward requires environment.action_rate_weight=0.1"
+        )
+    if env.root_velocity_mode != "link":
+        raise ValueError("fixed_reward requires environment.root_velocity_mode=link")
     if env.platform_profile == "g1_largebox_50hz":
         if env.task != "largebox_plane":
-            raise ValueError("g1_largebox_50hz requires environment.task=largebox_plane")
+            raise ValueError(
+                "g1_largebox_50hz requires environment.task=largebox_plane"
+            )
         if abs(float(env.sim_dt) - 0.02) > 1.0e-12 or env.decimation != 4:
-            raise ValueError("g1_largebox_50hz requires 50 Hz control / 200 Hz simulation")
+            raise ValueError(
+                "g1_largebox_50hz requires 50 Hz control / 200 Hz simulation"
+            )
         if env.fix_root_link:
             raise ValueError("g1_largebox_50hz requires a free root link")
         if int(env.max_episode_steps) != 500:
-            raise ValueError("g1_largebox_50hz uses a 10 second, 500-step episode limit")
+            raise ValueError(
+                "g1_largebox_50hz uses a 10 second, 500-step episode limit"
+            )
+
     if train.max_updates < 1:
         raise ValueError("training.max_updates must be positive")
     if train.log_every < 1:
         raise ValueError("training.log_every must be positive")
-    resolve_task(env.task)
-    if env.num_envs < 2:
-        raise ValueError("FCAMP requires at least two environments for two streams")
-    _validate_fcamp(config.parameters)
+    if train.save_every < 0:
+        raise ValueError("training.save_every must be non-negative")
+    if train.validation_every < 0:
+        raise ValueError("training.validation_every must be non-negative")
+    if train.validation_max_steps < 1:
+        raise ValueError("training.validation_max_steps must be positive")
 
-def _validate_fcamp(params: FCAMPConfig) -> None:
+    resolve_task(env.task)
+    _validate_fixed_reward(params)
+
+
+def _validate_fixed_reward(params: FixedRewardConfig) -> None:
     if params.horizon < 1:
         raise ValueError("Flow-CPS requires parameters.horizon >= 1")
     if params.flow_steps < 1:
@@ -396,67 +312,30 @@ def _validate_fcamp(params: FCAMPConfig) -> None:
     if params.rollout_env_steps <= 0:
         raise ValueError("Flow-CPS requires parameters.rollout_env_steps > 0")
     if params.rollout_env_steps % params.horizon:
-        raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
+        raise ValueError(
+            "parameters.rollout_env_steps must be divisible by parameters.horizon"
+        )
     if not (0.0 < params.cps_noise_level < 1.0):
-        raise ValueError("Flow-CPS requires parameters.cps_noise_level in (0, 1)")
+        raise ValueError(
+            "Flow-CPS requires parameters.cps_noise_level in (0, 1)"
+        )
     if params.cps_cov_rank < 0:
         raise ValueError("Flow-CPS requires parameters.cps_cov_rank >= 0")
     if params.policy_lr <= 0.0:
         raise ValueError("Flow-CPS requires parameters.policy_lr > 0")
     if params.value_lr <= 0.0:
         raise ValueError("Flow-CPS requires parameters.value_lr > 0")
-
-    style = params.style_prior
-    credit = params.credit
-    critics = params.critics
-    streams = params.streams
-    if not (0.0 < streams.phase0_fraction < 1.0):
-        raise ValueError("FCAMP streams.phase0_fraction must be in (0, 1)")
-    if style.obs_steps < 2:
-        raise ValueError("FCAMP requires style_prior.obs_steps >= 2")
-    if not style.hidden_dims:
-        raise ValueError("FCstyle discriminator hidden_dims cannot be empty")
-    if style.reward_scale <= 0.0 or not (0.0 < style.reward_epsilon < 1.0):
-        raise ValueError("FCAMP style reward scale/epsilon are invalid")
-    if style.learning_rate <= 0.0 or style.batch_size < 2 or style.epochs < 1:
-        raise ValueError("FCstyle discriminator optimizer/batch/epoch settings are invalid")
-    if style.max_updates_per_iteration < 1:
-        raise ValueError("FCAMP max_updates_per_iteration must be positive")
-    if style.current_buffer_size < style.batch_size:
-        raise ValueError("FCAMP style_prior.current_buffer_size must be >= batch_size")
-    current_phase0 = int(
-        round(style.current_buffer_size * streams.phase0_fraction)
-    )
-    if not 0 < current_phase0 < style.current_buffer_size:
+    if abs(float(params.streams.phase0_fraction) - 0.10) > 1.0e-12:
         raise ValueError(
-            "FCAMP current discriminator buffer cannot realize both streams"
+            "fixed_reward requires streams.phase0_fraction=0.10"
         )
+    critic = params.critic
     if (
-        style.replay_size < style.batch_size
-        or style.replay_samples <= 0
-        or style.replay_samples > style.replay_size
-    ):
-        raise ValueError("FCAMP complete-window replay settings are invalid")
-    phase0_capacity = int(round(style.replay_size * streams.phase0_fraction))
-    phase0_replace = int(round(style.replay_samples * streams.phase0_fraction))
-    if not (
-        0 < phase0_capacity < style.replay_size
-        and 0 < phase0_replace < style.replay_samples
-        and phase0_replace <= phase0_capacity
-        and style.replay_samples - phase0_replace
-        <= style.replay_size - phase0_capacity
+        not critic.encoder_hidden_dims
+        or not critic.head_hidden_dims
+        or any(width < 1 for width in critic.encoder_hidden_dims)
+        or any(width < 1 for width in critic.head_hidden_dims)
     ):
         raise ValueError(
-            "FCAMP replay size/replacement quotas cannot realize both streams"
+            "fixed_reward critic encoder/head dimensions must be positive"
         )
-    if credit.task_weight < 0.0 or credit.amp_weight < 0.0:
-        raise ValueError("FCstyle reward weights must be non-negative")
-    if credit.task_weight == 0.0 and credit.amp_weight == 0.0:
-        raise ValueError("FCAMP requires at least one non-zero reward weight")
-    if (
-        not critics.encoder_hidden_dims
-        or not critics.head_hidden_dims
-        or any(width < 1 for width in critics.encoder_hidden_dims)
-        or any(width < 1 for width in critics.head_hidden_dims)
-    ):
-        raise ValueError("FCAMP critic encoder/head dimensions must be positive")

@@ -5,11 +5,6 @@ import time
 import torch
 from isaaclab.utils.math import quat_error_magnitude
 
-from components.evaluation import (
-    DemoFeatureNormalizer,
-    PhaseMatchedWindowMMD,
-    sanitize_reference_phases,
-)
 from envs.spec import EE_Z_TERMINATION_THRESHOLD
 from .env_state import restore_env_state, snapshot_env_state
 from .validation_metrics import ChunkBoundaryDiagnostics, terminal_phase_metrics
@@ -64,11 +59,9 @@ def _reset_alignment_metrics(env, prefix: str) -> dict[str, float]:
     body_pos_top_idx = int(torch.argmax(body_pos_err_mean_by_body).item())
     body_ori_top_idx = int(torch.argmax(body_ori_deg_mean_by_body).item())
     joint_pos, joint_vel = env.get_action_joint_state()
-    # FCAMP writes and discriminates root-link velocity even though the shared
-    # task configuration retains COM semantics for its ordinary observations.
-    # Read the same frame here so the reset diagnostic is not a COM-vs-link
-    # comparison artifact.
-    root_velocity = env.get_mimic_root_velocity_w(velocity_frame="link")
+    # The environment configuration owns the root-link velocity contract for
+    # reset, training, evaluation, and diagnostics alike.
+    root_velocity = env.get_mimic_root_velocity_w()
     root_ori_deg = (
         quat_error_magnitude(reference["root_quat_w"], env.robot.data.root_quat_w)
         * (180.0 / 3.141592653589793)
@@ -162,19 +155,6 @@ def run_validation_rollout(
         initial_root_ang_vel=initial_root_ang_vel,
     )
 
-    demo_frame_indices = torch.arange(
-        env.motion.num_frames, dtype=torch.long, device=env.device
-    )
-    motion_metric = PhaseMatchedWindowMMD(
-        num_envs=num_envs,
-        normalizer=DemoFeatureNormalizer.fit(
-            env.motion.get_imitation_frame_at_times(demo_frame_indices.float())
-        ),
-        device=env.device,
-        reference_phase_start=float(max(0, int(start_phase))),
-        reference_phase_end=float(env.motion_end_phase),
-    )
-
     cached_chunk: torch.Tensor | None = None
     chunk_index = horizon
     done = torch.zeros(num_envs, dtype=torch.bool, device=env.device)
@@ -225,9 +205,6 @@ def run_validation_rollout(
         "diag_torso_ori_deg", "diag_left_wrist_ori_deg", "diag_right_wrist_ori_deg",
         "diag_left_elbow_ori_deg", "diag_right_elbow_ori_deg",
         "diag_left_shoulder_ori_deg", "diag_right_shoulder_ori_deg",
-        "diag_torso_ang_vel", "diag_left_wrist_ang_vel", "diag_right_wrist_ang_vel",
-        "diag_left_elbow_ang_vel", "diag_right_elbow_ang_vel",
-        "diag_left_shoulder_ang_vel", "diag_right_shoulder_ang_vel",
     ]
     diag_accum = {key: torch.zeros(num_envs, device=env.device) for key in diag_keys}
     diag_steps = torch.zeros(num_envs, device=env.device)
@@ -263,27 +240,6 @@ def run_validation_rollout(
                     reference_joint_pos=reference_post["joint_pos"],
                     reference_joint_vel=reference_post["joint_vel"],
                     reference_root_ang_vel=reference_post["root_ang_vel_w"],
-                )
-                metric_env_ids = motion_metric.env_ids
-                policy_imitation_frame = env.get_evaluator_imitation_policy_frame(
-                    metric_env_ids
-                )
-                metric_phases_raw = info["imitation_frame_phase_steps"].index_select(
-                    0, metric_env_ids
-                )
-                metric_phases, phase_valid = sanitize_reference_phases(
-                    metric_phases_raw,
-                    num_frames=env.motion.num_frames,
-                )
-                demo_imitation_frame = env.motion.get_imitation_frame_at_times(metric_phases)
-                # Terminal post-action states are excluded. Every legal window
-                # therefore contains W consecutive states that remained alive,
-                # in range, and on the same unwrapped motion trajectory.
-                motion_metric.update_selected(
-                    policy_imitation_frame,
-                    demo_imitation_frame,
-                    (active_mask & ~step_done).index_select(0, metric_env_ids) & phase_valid,
-                    metric_phases,
                 )
                 latest_phase_steps = info["termination_phase_steps"].float().clone()
                 ref_now = env.motion.get_frame(info["phase_start_steps"])["joint_pos"]
@@ -413,7 +369,6 @@ def run_validation_rollout(
         "validation/reference_progress_p95": float(torch.quantile(reference_progress, 0.95).item()),
         "validation/full_motion_control_steps": float(env.full_motion_control_steps()),
     }
-    metrics.update(motion_metric.metrics())
     metrics.update(chunk_diagnostics.metrics())
     metrics.update(reset_metrics)
     timeout, motion_complete, failure = classify_mimickit_done_terms(done, done_term_record)

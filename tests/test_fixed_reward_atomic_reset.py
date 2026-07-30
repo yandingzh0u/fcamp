@@ -56,21 +56,11 @@ def mimic_env_type(monkeypatch):
     )
     monkeypatch.setitem(
         sys.modules,
-        "envs.imitation_data",
-        _module(
-            "envs.imitation_data",
-            G1_IMITATION_FRAME_DIM=1,
-            G1_IMITATION_KEY_BODY_NAMES=(),
-        ),
-    )
-    monkeypatch.setitem(
-        sys.modules,
         "envs.spec",
         _module(
             "envs.spec",
             CRITIC_OBS_DIM=2,
             OBS_DIM=2,
-            PROJECT_ROOT=Path("."),
             RESET_JOINT_POSITION_RANGE=(0.0, 0.0),
             RESET_ROOT_POSE_RANGE=((0.0, 0.0),) * 6,
             VELOCITY_RANGE=((0.0, 0.0),) * 6,
@@ -109,7 +99,6 @@ def mimic_env_type(monkeypatch):
         _module(
             "envs.robot",
             G1Env=_Robot,
-            RootVelocityFrame=str,
         ),
     )
     monkeypatch.setitem(
@@ -190,6 +179,8 @@ def _make_env(
     env.device = torch.device("cpu")
     env.physics_dt = 0.005
     env.motion = _Motion(reference_joint_pos)
+    env.motion_start_phase = 0
+    env.motion_end_phase = int(reference_joint_pos.shape[0] - 1)
     env.phase_steps = torch.full((4,), -1.0)
     env.episode_steps = torch.full((4,), 17, dtype=torch.long)
     env.episode_ids = torch.full((4,), -1, dtype=torch.long)
@@ -317,3 +308,46 @@ def test_pre_contract_reset_is_finite_and_does_not_clamp(
     env.action_scale[0, 0] = 0.0
     with pytest.raises(RuntimeError, match="non-finite reset policy command"):
         env.reset_envs(env_ids, phase_indices=torch.tensor([0]))
+
+
+def test_reset_clamps_evaluation_phase_to_configured_motion_interval(
+    mimic_env_type,
+) -> None:
+    references = torch.tensor(
+        [
+            [0.0, 0.0],
+            [0.5, -0.25],
+            [1.0, -0.5],
+        ]
+    )
+    env = _make_env(
+        mimic_env_type,
+        reference_joint_pos=references,
+        contract_installed=False,
+        reset_noise=False,
+    )
+    env.motion_start_phase = 1
+    env.motion_end_phase = 1
+
+    observation = env.reset_envs(
+        torch.tensor([0]),
+        phase_indices=torch.tensor([2]),
+    )
+
+    torch.testing.assert_close(env.phase_steps[0], torch.tensor(1.0))
+    expected_action = (
+        references[1] - env.default_action_joint_pos[0]
+    ) / env.action_scale.squeeze(0)
+    torch.testing.assert_close(observation, expected_action.unsqueeze(0))
+
+
+def test_shortened_motion_end_also_bounds_curriculum_reset_phases(
+    mimic_env_type,
+) -> None:
+    env = object.__new__(mimic_env_type)
+    env.motion_start_phase = 0
+    env.motion_end_phase = 100
+    env.motion = SimpleNamespace(num_frames=325, fps=50.0)
+    env.dt = 0.02
+
+    assert env._adaptive_phase_range(horizon=24) == (0, 77)

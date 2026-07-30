@@ -17,11 +17,7 @@ from .spec import (
 )
 from .robots.g1 import G1_29DOF_ACTION_NAMES, make_g1_cfg
 from .tasks import TaskSpec
-from .contracts import (
-    RootVelocityFrame,
-    resolve_root_velocity_frame,
-    validate_actions_in_bounds,
-)
+from .contracts import require_finite_tensors, validate_actions_in_bounds
 from engine.config import EnvironmentConfig
 
 
@@ -37,6 +33,10 @@ class G1Env:
     ):
         if cfg.decimation < 1:
             raise ValueError(f"decimation must be >= 1, got {cfg.decimation}")
+        if str(cfg.root_velocity_mode) != "link":
+            raise ValueError(
+                "Fixed-reward G1 requires environment.root_velocity_mode='link'"
+            )
         self.dt = cfg.sim_dt
         self.decimation = int(cfg.decimation)
         self.physics_dt = cfg.sim_dt / float(self.decimation)
@@ -114,7 +114,7 @@ class G1Env:
             dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)
-        # FCAMP explicitly installs its algorithmic command domain after the
+        # Flow-CPS explicitly installs its algorithmic command domain after the
         # policy is built.  Joint-position metadata never defines that domain:
         # normalized actions are PD target commands, not physical joint poses.
         self._policy_action_low: torch.Tensor | None = None
@@ -157,7 +157,7 @@ class G1Env:
         low: torch.Tensor,
         high: torch.Tensor,
     ) -> None:
-        """Install the policy-owned command domain used by FCAMP.
+        """Install the policy-owned command domain used by fixed-reward Flow-CPS.
 
         This domain is deliberately independent of URDF joint-position limits.
         The simulator writer maps the command to a PD target without projection.
@@ -241,35 +241,20 @@ class G1Env:
         joint_pos, joint_vel = self.get_action_joint_state()
         return torch.cat([joint_pos, joint_vel], dim=-1)
 
-    def _resolve_root_velocity_frame(
-        self, velocity_frame: RootVelocityFrame | None
-    ) -> RootVelocityFrame:
-        return resolve_root_velocity_frame(
-            str(self.config.root_velocity_mode), velocity_frame
-        )
-
-    def get_mimic_root_velocity_w(
-        self, *, velocity_frame: RootVelocityFrame | None = None
-    ) -> torch.Tensor:
-        if self._resolve_root_velocity_frame(velocity_frame) == "link":
-            return self.robot.data.root_link_vel_w
-        return self.robot.data.root_vel_w
+    def get_mimic_root_velocity_w(self) -> torch.Tensor:
+        return self.robot.data.root_link_vel_w
 
     def write_mimic_root_velocity_to_sim(
         self,
         root_velocity: torch.Tensor,
         env_ids: torch.Tensor,
-        *,
-        velocity_frame: RootVelocityFrame | None = None,
     ) -> None:
-        """Write velocity using an explicit COM/link semantic contract."""
-
-        if self._resolve_root_velocity_frame(velocity_frame) == "link":
-            self.robot.write_root_link_velocity_to_sim(
-                root_velocity, env_ids=env_ids
-            )
-        else:
-            self.robot.write_root_velocity_to_sim(root_velocity, env_ids=env_ids)
+        """Write the configured world root-link velocity without conversion."""
+        require_finite_tensors(
+            {"root_velocity": root_velocity},
+            context="Root-link velocity writer",
+        )
+        self.robot.write_root_link_velocity_to_sim(root_velocity, env_ids=env_ids)
 
     def _write_robot_state(
         self,
@@ -280,13 +265,20 @@ class G1Env:
         joint_pos: torch.Tensor,
         joint_vel: torch.Tensor,
         env_ids: torch.Tensor | None = None,
-        *,
-        root_velocity_frame: RootVelocityFrame | None = None,
     ) -> None:
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         if env_ids.ndim != 1:
             raise ValueError(f"env_ids must be a 1-D tensor, got {tuple(env_ids.shape)}")
+        state_fields = {
+            "root_pos": root_pos,
+            "root_quat": root_quat,
+            "root_lin_vel": root_lin_vel,
+            "root_ang_vel": root_ang_vel,
+            "joint_pos": joint_pos,
+            "joint_vel": joint_vel,
+        }
+        require_finite_tensors(state_fields, context="Robot state writer")
 
         root_state = self.default_root_state.index_select(0, env_ids).clone()
         root_state[:, :3] = root_pos + self.scene.env_origins.index_select(0, env_ids)
@@ -303,7 +295,6 @@ class G1Env:
         self.write_mimic_root_velocity_to_sim(
             root_state[:, 7:],
             env_ids,
-            velocity_frame=root_velocity_frame,
         )
         self.robot.write_joint_state_to_sim(sim_joint_pos, sim_joint_vel, env_ids=env_ids)
         self.robot.set_joint_position_target(sim_joint_pos, env_ids=env_ids)

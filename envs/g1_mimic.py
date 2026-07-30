@@ -9,11 +9,9 @@ from components.rollout.reset_diagnostics import ResetPhaseRecorder
 from engine.config import EnvironmentConfig
 
 from .adaptive_sampling import AdaptiveTimestepsSampler
-from .imitation_data import G1_IMITATION_FRAME_DIM, G1_IMITATION_KEY_BODY_NAMES
 from .spec import (
     CRITIC_OBS_DIM,
     OBS_DIM,
-    PROJECT_ROOT,
     RESET_JOINT_POSITION_RANGE,
     RESET_ROOT_POSE_RANGE,
     VELOCITY_RANGE,
@@ -31,7 +29,7 @@ from .motion import (
 )
 from .observation import MimicObservationMixin
 from .reward import MimicRewardMixin
-from .robot import G1Env, RootVelocityFrame
+from .robot import G1Env
 from .robots.g1 import G1_29DOF_ACTION_NAMES
 from .step import MimicStepMixin
 from .terminal import MimicTerminationMixin
@@ -66,14 +64,6 @@ class G1MimicEnv(
         track_body_ids, track_body_names = self.robot.find_bodies(list(MIMIC_BODY_NAMES), preserve_order=True)
         self.track_body_ids = torch.tensor(track_body_ids, dtype=torch.long, device=self.device)
         self.track_body_names = list(track_body_names)
-        missing_imitation_bodies = [name for name in G1_IMITATION_KEY_BODY_NAMES if name not in self.robot.body_names]
-        if missing_imitation_bodies:
-            raise ValueError(f"imitation key bodies are missing from the robot asset: {missing_imitation_bodies}")
-        self.imitation_key_body_ids = torch.tensor(
-            [self.robot.body_names.index(name) for name in G1_IMITATION_KEY_BODY_NAMES],
-            dtype=torch.long,
-            device=self.device,
-        )
         self.anchor_body_id = self.robot.body_names.index(MIMIC_ANCHOR_BODY_NAME)
         self.ee_body_names = list(MIMIC_EE_BODY_NAMES)
         self.ee_body_indices = [self.track_body_names.index(name) for name in MIMIC_EE_BODY_NAMES]
@@ -123,7 +113,6 @@ class G1MimicEnv(
             robot_body_names=list(self.robot.body_names),
             action_joint_names=list(G1_29DOF_ACTION_NAMES),
             root_body_name="pelvis",
-            kinematic_urdf_file=PROJECT_ROOT / "assets" / "robots" / "holosoma_g1" / "g1_29dof.urdf",
         )
         self._init_adaptive_motion_sampling()
 
@@ -165,10 +154,6 @@ class G1MimicEnv(
         return self._push_interval_step_range
 
     @property
-    def imitation_frame_dim(self) -> int:
-        return G1_IMITATION_FRAME_DIM
-
-    @property
     def motion_frame_delta(self) -> float:
         return mimickit_frame_delta(self.motion.fps, self.dt)
 
@@ -186,7 +171,7 @@ class G1MimicEnv(
         min_phase = self.motion_start_phase
         max_phase = min(
             self.motion_end_phase,
-            max(0, self.motion.num_frames - max(horizon, 2)),
+            max(0, self.motion_end_phase + 1 - max(horizon, 2)),
         )
         return int(min_phase), int(max_phase)
 
@@ -224,15 +209,12 @@ class G1MimicEnv(
         self,
         phase_indices: torch.Tensor | None = None,
         reset_stream_ids: torch.Tensor | None = None,
-        *,
-        root_velocity_frame: RootVelocityFrame | None = None,
     ) -> torch.Tensor:
         env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         return self.reset_envs(
             env_ids=env_ids,
             phase_indices=phase_indices,
             reset_stream_ids=reset_stream_ids,
-            root_velocity_frame=root_velocity_frame,
         )
 
     def reset_envs(
@@ -240,14 +222,11 @@ class G1MimicEnv(
         env_ids: torch.Tensor,
         phase_indices: torch.Tensor | None = None,
         reset_stream_ids: torch.Tensor | None = None,
-        *,
-        root_velocity_frame: RootVelocityFrame | None = None,
     ) -> torch.Tensor:
         self._reset_env_state(
             env_ids,
             phase_indices=phase_indices,
             reset_stream_ids=reset_stream_ids,
-            root_velocity_frame=root_velocity_frame,
         )
         if env_ids.numel() == 0:
             return torch.empty(0, self.observation_dim, device=self.device)
@@ -278,8 +257,6 @@ class G1MimicEnv(
         env_ids: torch.Tensor,
         phase_indices: torch.Tensor | None = None,
         reset_stream_ids: torch.Tensor | None = None,
-        *,
-        root_velocity_frame: RootVelocityFrame | None = None,
     ) -> None:
         if env_ids.ndim != 1:
             raise ValueError(f"env_ids must have shape (N,), got {tuple(env_ids.shape)}")
@@ -292,7 +269,11 @@ class G1MimicEnv(
                 f"phase_indices must have shape {(env_ids.numel(),)}, got {tuple(phase_indices.shape)}"
             )
 
-        phase_indices = self.motion.clamp_time_steps(phase_indices)
+        phase_indices = torch.clamp(
+            self.motion.clamp_time_steps(phase_indices),
+            min=self.motion_start_phase,
+            max=self.motion_end_phase,
+        )
         if reset_stream_ids is not None and reset_stream_ids.shape != phase_indices.shape:
             raise ValueError("reset_stream_ids must match phase_indices")
         self.reset_phase_recorder.record(phase_indices, reset_stream_ids)
@@ -331,7 +312,6 @@ class G1MimicEnv(
             joint_pos=joint_pos,
             joint_vel=joint_vel,
             env_ids=env_ids,
-            root_velocity_frame=root_velocity_frame,
         )
         # The reset pose and the actor's continuation anchor are one atomic
         # controller state.  Use the clean reference target, not the noised

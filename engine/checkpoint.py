@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict
 import hashlib
 import json
@@ -10,6 +11,146 @@ import shutil
 import torch
 
 from .config import config_from_checkpoint_dict
+
+
+FIXED_REWARD_SCHEMA_VERSION = 1
+_CHECKPOINT_TOP_LEVEL_KEYS = frozenset(
+    {
+        "update_idx",
+        "config",
+        "policy",
+        "optimizer",
+        "metrics",
+        "algo_state",
+        "env_transitions_total",
+        "train_wall_seconds_total",
+        "platform_identity",
+        "adaptive_sampler_state",
+        "torch_rng_state",
+        "cuda_rng_state",
+    }
+)
+_CHECKPOINT_REQUIRED_KEYS = _CHECKPOINT_TOP_LEVEL_KEYS - {"cuda_rng_state"}
+_POLICY_MODULE_NAMES = frozenset(
+    {
+        "actor",
+        "actor_obs_normalizer",
+        "critic",
+        "prefix_context_normalizer",
+    }
+)
+_ALGO_STATE_KEYS = frozenset(
+    {
+        "critic_optimizer",
+        "learning_rate",
+        "critic_learning_rate",
+        "actor_obs_normalizer",
+        "fixed_reward_schema_version",
+        "stream_ids",
+        "phase0_stream_count",
+        "phase0_stream_fraction",
+        "phase0_attempt_tracker",
+    }
+)
+_REMOVED_STATE_KEY_MARKERS = (
+    "amp_",
+    "disc_",
+    "discriminator",
+    "mixed_reward",
+    "channel_",
+    "history",
+    "replay",
+    "mmd",
+)
+
+
+def _removed_state_key_paths(
+    value,
+    prefix: str = "",
+) -> list[str]:
+    found: list[str] = []
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            key_text = str(key)
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            lowered = key_text.lower()
+            if any(marker in lowered for marker in _REMOVED_STATE_KEY_MARKERS):
+                found.append(path)
+            found.extend(_removed_state_key_paths(nested, path))
+    elif isinstance(value, (list, tuple)):
+        for index, nested in enumerate(value):
+            path = f"{prefix}[{index}]"
+            found.extend(_removed_state_key_paths(nested, path))
+    return found
+
+
+def audit_fixed_reward_checkpoint_payload(payload: dict) -> None:
+    """Reject schema drift and removed subsystem state before restoration."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("Checkpoint payload must be a mapping.")
+    config = payload.get("config")
+    algo_state = payload.get("algo_state")
+    is_new_schema = (
+        isinstance(config, dict)
+        and config.get("method") == "fixed_reward"
+    ) or (
+        isinstance(algo_state, dict)
+        and "fixed_reward_schema_version" in algo_state
+    )
+    if not is_new_schema:
+        # Legacy payloads are rejected by config/method preflight. Keeping this
+        # audit scoped to the new schema preserves a clear legacy error.
+        return
+
+    top_level_keys = set(payload)
+    missing = _CHECKPOINT_REQUIRED_KEYS - top_level_keys
+    unknown = top_level_keys - _CHECKPOINT_TOP_LEVEL_KEYS
+    if missing or unknown:
+        raise ValueError(
+            "fixed_reward checkpoint top-level schema mismatch: "
+            f"missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+
+    removed_paths = _removed_state_key_paths(payload)
+    if removed_paths:
+        raise ValueError(
+            "fixed_reward checkpoint contains removed subsystem state: "
+            f"{removed_paths}"
+        )
+
+    policy_state = payload.get("policy")
+    if not isinstance(policy_state, Mapping):
+        raise ValueError("fixed_reward checkpoint policy must be a state dict.")
+    policy_modules = {
+        str(key).split(".", 1)[0]
+        for key in policy_state
+    }
+    if policy_modules != _POLICY_MODULE_NAMES:
+        raise ValueError(
+            "fixed_reward checkpoint policy modules mismatch: "
+            f"expected={sorted(_POLICY_MODULE_NAMES)}, "
+            f"actual={sorted(policy_modules)}"
+        )
+
+    if not isinstance(algo_state, dict):
+        raise ValueError("fixed_reward checkpoint algo_state must be a mapping.")
+    if set(algo_state) != _ALGO_STATE_KEYS:
+        raise ValueError(
+            "fixed_reward checkpoint algo_state schema mismatch: "
+            f"expected={sorted(_ALGO_STATE_KEYS)}, "
+            f"actual={sorted(algo_state)}"
+        )
+    schema_version = algo_state.get("fixed_reward_schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version != FIXED_REWARD_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "fixed_reward checkpoint schema version mismatch: "
+            f"expected={FIXED_REWARD_SCHEMA_VERSION}, "
+            f"actual={schema_version!r}"
+        )
 
 
 _RESUME_ENV_KEYS = (
@@ -86,15 +227,15 @@ class Checkpointer:
         target = float(tcfg.target_validation_steps)
         max_episode_steps = float(self.t.env.max_episode_steps)
         random_min = metrics.get("validation/steps_min")
-        fixed_min = metrics.get("val_fixed/steps_min")
+        directional_min = metrics.get("validation_directional/steps_min")
         if random_min is None:
             return False
 
         def reached(steps: float) -> bool:
             return steps > target if target < max_episode_steps else steps >= target
 
-        if fixed_min is not None:
-            return reached(random_min) and reached(fixed_min)
+        if directional_min is not None:
+            return reached(random_min) and reached(directional_min)
         return reached(random_min)
 
     def save(self, update_idx: int, metrics: dict[str, float], filename: str | None = None) -> None:
@@ -114,11 +255,12 @@ class Checkpointer:
         payload["torch_rng_state"] = torch.random.get_rng_state()
         if torch.device(t.env.device).type == "cuda":
             payload["cuda_rng_state"] = torch.cuda.get_rng_state(t.env.device)
+        audit_fixed_reward_checkpoint_payload(payload)
         step_path = t.checkpoint_dir / (filename if filename is not None else f"update_{update_idx:04d}.pt")
         torch.save(payload, step_path)
         if filename is None:
-            # Replay-complete FC-AMP checkpoints can exceed 1 GiB. Keep last.pt
-            # as a hard link instead of serializing the same payload twice.
+            # Keep last.pt as a hard link instead of serializing the same
+            # training state twice.
             last_path = t.checkpoint_dir / "last.pt"
             last_path.unlink(missing_ok=True)
             try:
@@ -131,9 +273,10 @@ class Checkpointer:
         t = self.t
         if not checkpoint_path.is_file():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-        # Load through CPU so a large discriminator replay sidecar does not
-        # transiently consume GPU memory before being copied back to its CPU ring.
+        # Load through CPU so checkpoint restoration has predictable GPU memory
+        # use before individual modules are copied to their target device.
         payload = torch.load(checkpoint_path, map_location="cpu")
+        audit_fixed_reward_checkpoint_payload(payload)
         saved_config = payload.get("config")
         if saved_config is not None:
             current_signature = _resume_signature(asdict(t.cfg))

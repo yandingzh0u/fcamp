@@ -38,9 +38,10 @@ simulation_app = app_launcher.app
 
 import torch
 
+from engine.checkpoint import audit_fixed_reward_checkpoint_payload
 from engine.config import config_from_checkpoint_dict
 from envs.g1_mimic import G1MimicEnv
-from method.fcamp import FCAMP
+from method.fixed_reward import FixedRewardFlowCPS
 
 
 def main() -> None:
@@ -50,6 +51,7 @@ def main() -> None:
     device = torch.device(args_cli.device)
     load_device = device if (device.type != "cuda" or torch.cuda.is_available()) else torch.device("cpu")
     payload = torch.load(checkpoint_path, map_location=load_device, weights_only=False)
+    audit_fixed_reward_checkpoint_payload(payload)
     if "policy" not in payload:
         raise KeyError("Checkpoint must contain a 'policy' state dict.")
     cfg = config_from_checkpoint_dict(payload["config"], checkpoint_path)
@@ -80,8 +82,9 @@ def main() -> None:
         render=not args_cli.headless,
         render_every=args_cli.render_every,
     )
-    algo = FCAMP(cfg.parameters, env)
+    algo = FixedRewardFlowCPS(cfg.parameters, env)
     algo.build()
+    algo.validate_checkpoint_payload(payload)
     algo.policy.load_state_dict(payload["policy"])
     algo.policy.eval()
 
@@ -156,7 +159,9 @@ def main() -> None:
         reason = ""
         if args_cli.reset_on_done and bool(done.any()):
             need_reset, reason = True, "termination"
-        if args_cli.loop_motion and bool(torch.any(env.phase_steps >= env.motion.num_frames - 1)):
+        if args_cli.loop_motion and bool(
+            torch.any(env.phase_steps >= env.motion_end_phase)
+        ):
             need_reset, reason = True, "motion_end"
         if need_reset:
             print(f"[INFO] Reset at step {total_steps} ({reason}). phase={float(env.phase_steps[0].item()):.2f}", flush=True)

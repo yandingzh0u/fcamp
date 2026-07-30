@@ -1,23 +1,26 @@
 from __future__ import annotations
 
-from typing import Literal
-
 import torch
 
 
-RootVelocityFrame = Literal["com", "link"]
-
-
-def resolve_root_velocity_frame(
-    configured_frame: str,
-    explicit_frame: RootVelocityFrame | None,
-) -> RootVelocityFrame:
-    resolved = str(configured_frame if explicit_frame is None else explicit_frame)
-    if resolved not in {"com", "link"}:
-        raise ValueError(
-            f"root velocity frame must be 'com' or 'link', got {resolved!r}"
+def require_finite_tensors(
+    tensors: dict[str, torch.Tensor],
+    *,
+    context: str,
+) -> None:
+    """Fail with field names using one device synchronization on the healthy path."""
+    if not tensors:
+        return
+    names = tuple(tensors)
+    invalid = torch.stack(
+        tuple(~torch.isfinite(tensors[name]).all() for name in names)
+    )
+    if bool(invalid.any()):
+        invalid_cpu = invalid.detach().cpu().tolist()
+        bad_names = [name for name, is_bad in zip(names, invalid_cpu) if is_bad]
+        raise RuntimeError(
+            f"{context} contains non-finite values in fields: {bad_names}"
         )
-    return resolved  # type: ignore[return-value]
 
 
 def validate_actions_in_bounds(

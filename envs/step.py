@@ -29,11 +29,9 @@ class MimicStepMixin:
         )
         next_phase_steps = phase_start_steps + reference_frame_delta.to(dtype=phase_start_steps.dtype)
         self.episode_steps += 1
-        self._motion_end_mask = next_phase_steps >= (
-            self.motion.num_frames - 1
-        )
+        self._motion_end_mask = next_phase_steps >= self.motion_end_phase
         reference_phase_steps = torch.clamp(
-            next_phase_steps, max=self.motion.num_frames - 1
+            next_phase_steps, max=self.motion_end_phase
         )
         self.phase_steps = reference_phase_steps
 
@@ -43,7 +41,6 @@ class MimicStepMixin:
         )
         done, done_terms, debug_terms = self.compute_termination()
         self.last_action.copy_(applied_actions)
-        imitation_frame = self.get_imitation_policy_frame()
 
         tracking_failure = done_terms["anchor_pos_bad"] | done_terms["anchor_ori_bad"] | done_terms["ee_body_bad"]
         self._record_adaptive_failures(tracking_failure, termination_phase_steps)
@@ -63,11 +60,9 @@ class MimicStepMixin:
             "phase_start_steps": phase_start_steps,
             "reference_phase_steps": reference_phase_steps,
             "termination_phase_steps": termination_phase_steps,
-            "imitation_frame_phase_steps": reference_phase_steps,
             "reference_frame_delta": reference_frame_delta,
             "interval_push_mask": self._last_interval_push_mask.clone(),
             "intervention_edge_mask": intervention_edge_mask,
-            "imitation_frame": imitation_frame,
         }
         return observation, reward, done, info
 

@@ -11,10 +11,10 @@ from .validation_logging import log_validation_metrics
 from .validation import run_validation_rollout, validation_max_steps
 from .metrics_logger import MetricsLogger
 from envs.g1_mimic import G1MimicEnv
-from method.fcamp import FCAMP
+from method.fixed_reward import FixedRewardFlowCPS
 
 
-VALIDATION_PROTOCOL_VERSION = 5.0
+VALIDATION_PROTOCOL_VERSION = 6.0
 
 
 class CoreTrainer:
@@ -27,7 +27,6 @@ class CoreTrainer:
         self.start_update = 1
         self.env_transitions_total = 0
         self.train_wall_seconds_total = 0.0
-        self._pre_training_warmup_ran = False
 
         torch.manual_seed(cfg.training.seed)
         if torch.cuda.is_available():
@@ -38,7 +37,7 @@ class CoreTrainer:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_logger = MetricsLogger(self.checkpoint_dir.parent / "logs")
 
-        self.algo = FCAMP(self.algo_cfg, self.env)
+        self.algo = FixedRewardFlowCPS(self.algo_cfg, self.env)
         self.algo.build()
         self.checkpointer = Checkpointer(self)
 
@@ -53,8 +52,6 @@ class CoreTrainer:
         print(f"[INFO] checkpoint_dir={self.checkpoint_dir}", flush=True)
         if tcfg.resume:
             print(f"[INFO] resumed_from={tcfg.resume}", flush=True)
-
-        warmup_metrics, warmup_transitions, warmup_seconds = self._run_pre_training_warmup()
 
         for update_idx in range(self.start_update, tcfg.max_updates + 1):
             if not self.simulation_app.is_running():
@@ -72,11 +69,10 @@ class CoreTrainer:
             metrics.update(reset_metrics)
             formal_iteration_s = time.perf_counter() - t0
             formal_transitions = int(self.env_cfg.num_envs) * int(self.algo_cfg.rollout_env_steps)
-            transitions_update = formal_transitions + warmup_transitions
-            iteration_s = formal_iteration_s + warmup_seconds
+            transitions_update = formal_transitions
+            iteration_s = formal_iteration_s
             self.env_transitions_total += formal_transitions
             self.train_wall_seconds_total += formal_iteration_s
-            metrics.update(warmup_metrics)
             metrics.update(
                 {
                     "samples/env_transitions_update": float(transitions_update),
@@ -91,11 +87,6 @@ class CoreTrainer:
                     "health/parameters_finite": float(metrics.get("system/parameters_finite", 1.0)),
                 }
             )
-            # Warm-up belongs only to the first fresh-run accounting interval.
-            warmup_metrics = {}
-            warmup_transitions = 0
-            warmup_seconds = 0.0
-
 
             del rollout
             if torch.cuda.is_available():
@@ -151,11 +142,12 @@ class CoreTrainer:
                 print(f"[VALIDATION_DONE] update={update_idx} time={metrics['timing/validation_s']:.3f}s", flush=True)
                 if update_idx % tcfg.log_every == 0:
                     log_validation_metrics(self.env, metrics)
-                self.metrics_logger.write_validation_summary(update_idx, metrics)
 
             # Structured metrics are written every iteration, after optional
             # validation has appended its metrics.
             self.metrics_logger.write(update_idx, metrics)
+            if "validation/steps_mean" in metrics:
+                self.metrics_logger.write_validation_summary(update_idx, metrics)
 
             if (
                 update_idx == tcfg.max_updates or (tcfg.save_every > 0 and update_idx % tcfg.save_every == 0)
@@ -172,50 +164,6 @@ class CoreTrainer:
         print("[INFO] Training finished.", flush=True)
         self.metrics_logger.close()
 
-    def _run_pre_training_warmup(self) -> tuple[dict[str, float], int, float]:
-        """Run the optional warm-up once on a fresh run and account its cost."""
-        if (
-            self._pre_training_warmup_ran
-            or self.start_update != 1
-            or bool(self.train_cfg.resume)
-        ):
-            return {}, 0, 0.0
-        started = time.perf_counter()
-        result = self.algo.pre_training_warmup(self.current_observation)
-        elapsed = time.perf_counter() - started
-        if not isinstance(result, tuple) or len(result) != 3:
-            raise TypeError(
-                "pre_training_warmup must return "
-                "(observation, metrics, env_transition_count)"
-            )
-        observation, method_metrics, transition_count = result
-        if not isinstance(method_metrics, dict):
-            raise TypeError("pre_training_warmup metrics must be a dict")
-        if isinstance(transition_count, bool) or not isinstance(transition_count, int):
-            raise TypeError("pre_training_warmup transition count must be an int")
-        if transition_count < 0:
-            raise ValueError("pre_training_warmup transition count must be >= 0")
-
-        self._pre_training_warmup_ran = True
-        self.current_observation = observation
-        if transition_count == 0 and not method_metrics:
-            return {}, 0, 0.0
-
-        self.env_transitions_total += transition_count
-        self.train_wall_seconds_total += elapsed
-        metrics = {f"warmup/{key}": value for key, value in method_metrics.items()}
-        metrics.update(
-            {
-                "samples/warmup_env_transitions": float(transition_count),
-                "timing/warmup_s": float(elapsed),
-            }
-        )
-        print(
-            f"[WARMUP] env_transitions={transition_count} time={elapsed:.3f}s",
-            flush=True,
-        )
-        return metrics, transition_count, elapsed
-
     def validate_only(self) -> None:
         fixed_seed = (
             self.train_cfg.validation_fixed_seed
@@ -227,6 +175,6 @@ class CoreTrainer:
         metrics["validation/protocol_version"] = VALIDATION_PROTOCOL_VERSION
         metrics["validation/max_steps"] = float(validation_max_steps(self.train_cfg, self.env))
         log_validation_metrics(self.env, metrics)
-        self.metrics_logger.write_validation_summary(self.start_update - 1, metrics)
         self.metrics_logger.write(self.start_update - 1, metrics)
+        self.metrics_logger.write_validation_summary(self.start_update - 1, metrics)
         self.metrics_logger.close()

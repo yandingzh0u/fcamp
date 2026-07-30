@@ -1,1 +1,1 @@
-"""FCAMP training method."""
+"""Fixed-reward Flow-CPS training method."""

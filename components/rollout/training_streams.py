@@ -1,4 +1,4 @@
-"""Deterministic phase-zero attempt/curriculum stream support for FCAMP."""
+"""Deterministic phase-zero attempt/curriculum stream support."""
 
 from __future__ import annotations
 
@@ -209,7 +209,9 @@ class Phase0AttemptTracker:
 
     def load_state_dict(self, payload: dict | None) -> None:
         if not isinstance(payload, dict):
-            raise ValueError("FCAMP checkpoint has no phase0 attempt tracker")
+            raise ValueError(
+                "fixed_reward checkpoint has no phase0 attempt tracker"
+            )
         saved_mask = payload.get("phase0_mask")
         saved_active = payload.get("active")
         saved_ages = payload.get("ages")
@@ -225,7 +227,9 @@ class Phase0AttemptTracker:
                 self.phase0_mask.detach().to("cpu"),
             )
         ):
-            raise ValueError("FCAMP phase0 attempt tracker is incompatible")
+            raise ValueError(
+                "fixed_reward phase0 attempt tracker is incompatible"
+            )
         self.active.copy_(
             saved_active.to(device=self.active.device, dtype=torch.bool)
         )
@@ -235,7 +239,9 @@ class Phase0AttemptTracker:
         cumulative = payload.get("cumulative")
         required = {"started", *self._OUTCOMES}
         if not isinstance(cumulative, dict) or set(cumulative) != required:
-            raise ValueError("FCAMP phase0 attempt counters are incompatible")
+            raise ValueError(
+                "fixed_reward phase0 attempt counters are incompatible"
+            )
         self.cumulative = {
             name: int(cumulative[name])
             for name in ("started", *self._OUTCOMES)

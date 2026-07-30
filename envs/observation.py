@@ -12,90 +12,10 @@ from isaaclab.utils.math import (
 )
 
 from .spec import CRITIC_OBS_DIM, OBS_DIM
-from .imitation_data import build_g1_imitation_frame
+from .contracts import require_finite_tensors
 
 
 class MimicObservationMixin:
-    def get_imitation_policy_frame(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-        """Return the native method-specific post-action imitation frame."""
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
-        if env_ids.ndim != 1:
-            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
-        joint_pos, joint_vel = self.get_action_joint_state()
-        root_pos = self.robot.data.root_link_pos_w.index_select(0, env_ids)
-        env_origins = self.scene.env_origins.index_select(0, env_ids)
-        key_body_pos = self.robot.data.body_pos_w.index_select(0, env_ids)[..., self.imitation_key_body_ids, :]
-        # Scene origins are translations only.  Subtracting them from both root
-        # and key bodies keeps root-relative key features invariant and removes
-        # the vectorized-environment grid from the discriminator input.
-        root_pos_local = root_pos - env_origins
-        key_body_pos_local = key_body_pos - env_origins.unsqueeze(-2)
-        root_velocity = self.robot.data.root_link_vel_w.index_select(0, env_ids)
-        return build_g1_imitation_frame(
-            root_pos=root_pos_local,
-            root_quat_wxyz=self.robot.data.root_link_quat_w.index_select(0, env_ids),
-            joint_pos=joint_pos.index_select(0, env_ids),
-            key_body_pos=key_body_pos_local,
-            root_lin_vel=root_velocity[:, :3],
-            root_ang_vel=root_velocity[:, 3:],
-            joint_vel=joint_vel.index_select(0, env_ids),
-        )
-
-    def get_fcamp_fk_aligned_policy_frame(
-        self, env_ids: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """Rebuild the same simulator state through FCAMP's expert FK path."""
-
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
-        if env_ids.ndim != 1:
-            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
-        joint_pos, joint_vel = self.get_action_joint_state()
-        origins = self.scene.env_origins.index_select(0, env_ids)
-        return self.motion.build_fcamp_frame_from_robot_state(
-            root_pos=self.robot.data.root_link_pos_w.index_select(0, env_ids) - origins,
-            root_quat=self.robot.data.root_link_quat_w.index_select(0, env_ids),
-            joint_pos=joint_pos.index_select(0, env_ids),
-            root_link_velocity=self.robot.data.root_link_vel_w.index_select(0, env_ids),
-            joint_vel=joint_vel.index_select(0, env_ids),
-        )
-
-    def get_evaluator_imitation_policy_frame(
-        self,
-        env_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Return the method-independent policy frame used only by validation.
-
-        Training imitation features intentionally preserve each paper's native
-        root-velocity convention. Cross-method evaluation must not: it always
-        uses the physical root-link pose/velocity exposed by Isaac Lab, so ADD's
-        link convention and the other methods' COM convention cannot change the
-        external metric for an identical simulator state.
-        """
-
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
-        if env_ids.ndim != 1:
-            raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
-        joint_pos, joint_vel = self.get_action_joint_state()
-        root_pos = self.robot.data.root_link_pos_w.index_select(0, env_ids)
-        root_quat = self.robot.data.root_link_quat_w.index_select(0, env_ids)
-        root_velocity = self.robot.data.root_link_vel_w.index_select(0, env_ids)
-        env_origins = self.scene.env_origins.index_select(0, env_ids)
-        key_body_pos = self.robot.data.body_pos_w.index_select(0, env_ids)[
-            ..., self.imitation_key_body_ids, :
-        ]
-        return build_g1_imitation_frame(
-            root_pos=root_pos - env_origins,
-            root_quat_wxyz=root_quat,
-            joint_pos=joint_pos.index_select(0, env_ids),
-            key_body_pos=key_body_pos - env_origins.unsqueeze(-2),
-            root_lin_vel=root_velocity[:, :3],
-            root_ang_vel=root_velocity[:, 3:],
-            joint_vel=joint_vel.index_select(0, env_ids),
-        )
-
     def get_reference_state(self) -> dict[str, torch.Tensor]:
         reference = dict(self.motion.get_frame(self.phase_steps))
         env_origins = self.scene.env_origins
@@ -129,8 +49,6 @@ class MimicObservationMixin:
         robot_joint_pos, robot_joint_vel = self.get_action_joint_state()
         robot_body_pos_w = self.robot.data.body_pos_w[:, self.track_body_ids]
         robot_body_quat_w = self.robot.data.body_quat_w[:, self.track_body_ids]
-        robot_body_lin_vel_w = self.robot.data.body_lin_vel_w[:, self.track_body_ids]
-        robot_body_ang_vel_w = self.robot.data.body_ang_vel_w[:, self.track_body_ids]
         robot_anchor_pos_w = self.robot.data.body_pos_w[:, self.anchor_body_id]
         robot_anchor_quat_w = self.robot.data.body_quat_w[:, self.anchor_body_id]
 
@@ -139,19 +57,32 @@ class MimicObservationMixin:
             robot_anchor_pos_w,
             robot_anchor_quat_w,
         )
-        return {
+        context = {
             "reference": reference,
             "robot_joint_pos": robot_joint_pos,
             "robot_joint_vel": robot_joint_vel,
             "robot_body_pos_w": robot_body_pos_w,
             "robot_body_quat_w": robot_body_quat_w,
-            "robot_body_lin_vel_w": robot_body_lin_vel_w,
-            "robot_body_ang_vel_w": robot_body_ang_vel_w,
             "robot_anchor_pos_w": robot_anchor_pos_w,
             "robot_anchor_quat_w": robot_anchor_quat_w,
             "body_pos_relative_w": body_pos_relative_w,
             "body_quat_relative_w": body_quat_relative_w,
         }
+        require_finite_tensors(
+            {
+                **{
+                    f"reference.{name}": value
+                    for name, value in reference.items()
+                },
+                **{
+                    name: value
+                    for name, value in context.items()
+                    if name != "reference"
+                },
+            },
+            context="Tracking state",
+        )
+        return context
 
     def _motion_anchor_observation_terms(
         self,
@@ -193,6 +124,10 @@ class MimicObservationMixin:
             - context["robot_body_pos_w"][:, self.termination_body_indices, 2]
         )
         net_contact_forces = self.contact_sensor.data.net_forces_w_history
+        require_finite_tensors(
+            {"net_forces_w_history": net_contact_forces},
+            context="Contact sensor",
+        )
         foot_contact = (
             torch.max(torch.norm(net_contact_forces[:, :, self.foot_contact_body_ids], dim=-1), dim=1)[0]
             > 1.0
@@ -232,6 +167,10 @@ class MimicObservationMixin:
         )
         if observation.shape[-1] != OBS_DIM:
             raise RuntimeError(f"Expected observation dim {OBS_DIM}, got {observation.shape[-1]}")
+        require_finite_tensors(
+            {"observation": observation},
+            context="Policy observation",
+        )
         return observation
 
     def build_critic_observation(self) -> torch.Tensor:
@@ -272,6 +211,10 @@ class MimicObservationMixin:
         )
         if observation.shape[-1] != CRITIC_OBS_DIM:
             raise RuntimeError(f"Expected critic observation dim {CRITIC_OBS_DIM}, got {observation.shape[-1]}")
+        require_finite_tensors(
+            {"observation": observation},
+            context="Critic observation",
+        )
         return observation
 
     def _add_uniform_noise(self, value: torch.Tensor, n_min: float, n_max: float) -> torch.Tensor:
