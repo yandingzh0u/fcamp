@@ -63,8 +63,7 @@ class ChunkBoundaryDiagnostics:
             name: {category: [] for category in self._CATEGORIES}
             for name in self._DISTRIBUTIONS
         }
-        # FCAMP uses H=4.  Keeping at least four slots makes the output schema
-        # stable for shorter-horizon smoke tests as well.
+        # Keep H0-H3 visible in every run while supporting any AMP horizon.
         self._tracked_offsets = max(4, self.horizon)
         self._offset_values: dict[str, list[list[torch.Tensor]]] = {
             name: [[] for _ in range(self._tracked_offsets)]

@@ -263,6 +263,7 @@ class MimicMotionReference:
             data,
             robot_body_names,
             action_joint_names,
+            root_body_name,
         )
 
         (
@@ -312,10 +313,16 @@ class MimicMotionReference:
             action_joint_names=action_joint_names,
             device=device,
         )
-        self._fcamp_expert_integer_frame_cache: torch.Tensor | None = None
+        self._amp_expert_integer_frame_cache: torch.Tensor | None = None
         self.num_frames = int(self.joint_pos.shape[0])
 
-    def _load_holosoma(self, data, robot_body_names, action_joint_names):
+    def _load_holosoma(
+        self,
+        data,
+        robot_body_names,
+        action_joint_names,
+        root_body_name,
+    ):
         motion_joint_names = [str(n) for n in data["joint_names"]]
         motion_body_names = [str(n) for n in data["body_names"]]
 
@@ -331,11 +338,6 @@ class MimicMotionReference:
             raise ValueError(
                 "Holosoma joint_vel must contain root velocity plus named joints"
             )
-        # The exporter computes these six values directly from the root-link
-        # pose in world axes.  Its per-body fields are COM velocities, and its
-        # root angular body velocity has passed through MuJoCo's local qvel
-        # convention, so those fields are not the runtime root-link contract.
-        root_link_vel_w = joint_vel_raw[:, :6]
         joint_pos_joints = joint_pos_raw[:, joint_pos_raw.shape[1] - num_joints:]
         joint_vel_joints = joint_vel_raw[:, joint_vel_raw.shape[1] - num_joints:]
         j_idx = [motion_joint_names.index(n) for n in action_joint_names]
@@ -350,6 +352,39 @@ class MimicMotionReference:
         body_quat_raw = np.asarray(data["body_quat_w"], dtype=np.float32)
         body_lin_raw = np.asarray(data["body_lin_vel_w"], dtype=np.float32)
         body_ang_raw = np.asarray(data["body_ang_vel_w"], dtype=np.float32)
+        motion_root_name = (
+            root_body_name
+            if root_body_name in motion_body_names
+            else _G1_MOTION_BODY_ALIASES.get(root_body_name)
+        )
+        if motion_root_name not in motion_body_names:
+            raise ValueError(
+                f"Holosoma motion is missing root body {root_body_name!r}"
+            )
+        motion_root_id = motion_body_names.index(motion_root_name)
+        # MuJoCo free-joint qvel stores translation in world axes but angular
+        # velocity in the root-local frame. Isaac's root-link state and both
+        # AMP domains require world-frame angular velocity. The per-body
+        # linear field is a COM velocity, so the root-link origin translation
+        # must continue to come from qvel rather than body_lin_vel_w.
+        root_ang_vel_w = _quat_rotate_wxyz(
+            body_quat_raw[:, motion_root_id],
+            joint_vel_raw[:, 3:6],
+        )
+        if not np.allclose(
+            root_ang_vel_w,
+            body_ang_raw[:, motion_root_id],
+            rtol=1.0e-4,
+            atol=1.0e-4,
+        ):
+            raise ValueError(
+                "Holosoma root angular-velocity convention does not match "
+                "MuJoCo local qvel rotated into world coordinates"
+            )
+        root_link_vel_w = np.concatenate(
+            (joint_vel_raw[:, :3], root_ang_vel_w),
+            axis=-1,
+        ).astype(np.float32, copy=False)
         num_frames = body_pos_raw.shape[0]
         num_robot_bodies = len(robot_body_names)
 
@@ -409,6 +444,26 @@ class MimicMotionReference:
         weight = (t - lo.to(dtype=t.dtype)).view(-1, *([1] * (values.ndim - 1)))
         return values.index_select(0, lo) * (1.0 - weight) + values.index_select(0, hi) * weight
 
+    def _sample_left_frame(
+        self,
+        values: torch.Tensor,
+        time_steps: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sample the left frame at a continuous motion time.
+
+        MimicKit interpolates poses but uses the velocity stored at
+        ``frame_idx0``. Keeping reset and expert sampling on this same rule
+        prevents fractional RSI from creating a policy/expert data-domain
+        difference.
+        """
+
+        if not torch.is_floating_point(time_steps):
+            return values[time_steps]
+        t = self.clamp_time_steps(
+            time_steps.to(device=self.device, dtype=torch.float32)
+        )
+        return values.index_select(0, torch.floor(t).to(dtype=torch.long))
+
     def _interpolate_quat(self, values: torch.Tensor, time_steps: torch.Tensor) -> torch.Tensor:
         if not torch.is_floating_point(time_steps):
             return values[time_steps]
@@ -448,19 +503,34 @@ class MimicMotionReference:
         return F.normalize(torch.where(sin_theta > 1.0e-6, slerp, linear), dim=-1)
 
     def _root_link_velocity(self, time_steps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        velocity = self._interpolate(self.root_link_vel_w, time_steps)
+        velocity = self._sample_left_frame(
+            self.root_link_vel_w,
+            time_steps,
+        )
         return velocity[:, :3], velocity[:, 3:]
 
     def get_frame(self, time_steps: torch.Tensor) -> dict[str, torch.Tensor]:
         time_steps = self.clamp_time_steps(time_steps.to(device=self.device))
         body_pos = self._interpolate(self.body_pos_full_w, time_steps)
-        body_quat = self._interpolate_quat(self.body_quat_full_w, time_steps)
-        body_lin_vel = self._interpolate(self.body_lin_vel_full_w, time_steps)
-        body_ang_vel = self._interpolate(self.body_ang_vel_full_w, time_steps)
+        body_quat = self._interpolate_quat_shortest(
+            self.body_quat_full_w,
+            time_steps,
+        )
+        body_lin_vel = self._sample_left_frame(
+            self.body_lin_vel_full_w,
+            time_steps,
+        )
+        body_ang_vel = self._sample_left_frame(
+            self.body_ang_vel_full_w,
+            time_steps,
+        )
         root_lin_vel, root_ang_vel = self._root_link_velocity(time_steps)
         return {
             "joint_pos": self._interpolate(self.joint_pos, time_steps),
-            "joint_vel": self._interpolate(self.joint_vel, time_steps),
+            "joint_vel": self._sample_left_frame(
+                self.joint_vel,
+                time_steps,
+            ),
             "body_pos_w": body_pos[:, self.track_body_ids],
             "body_quat_w": body_quat[:, self.track_body_ids],
             "body_lin_vel_w": body_lin_vel[:, self.track_body_ids],
@@ -473,7 +543,7 @@ class MimicMotionReference:
             "root_ang_vel_w": root_ang_vel,
         }
 
-    def get_fcamp_fk_body_positions(
+    def get_amp_fk_body_positions(
         self,
         *,
         root_pos: torch.Tensor,
@@ -497,7 +567,7 @@ class MimicMotionReference:
             joint_pos=joint_pos.to(device=self.device, dtype=torch.float32),
         )
 
-    def build_fcamp_frame_from_robot_state(
+    def build_amp_frame_from_robot_state(
         self,
         *,
         root_pos: torch.Tensor,
@@ -506,7 +576,7 @@ class MimicMotionReference:
         root_link_velocity: torch.Tensor,
         joint_vel: torch.Tensor,
     ) -> torch.Tensor:
-        """Build the FCAMP 233-D frame through the expert FK code path.
+        """Build the AMP frame through the local-URDF expert FK code path.
 
         This is used as a same-state runtime invariant.  All physical fields,
         including root velocity, are supplied by the simulator; only key-body
@@ -515,7 +585,7 @@ class MimicMotionReference:
 
         if root_link_velocity.shape != (root_pos.shape[0], 6):
             raise ValueError("root_link_velocity must have shape [B,6]")
-        fk_body_pos = self.get_fcamp_fk_body_positions(
+        fk_body_pos = self.get_amp_fk_body_positions(
             root_pos=root_pos,
             root_quat=root_quat,
             joint_pos=joint_pos,
@@ -530,7 +600,7 @@ class MimicMotionReference:
             joint_vel=joint_vel,
         )
 
-    def get_fcamp_expert_frame_at_times(self, time_steps: torch.Tensor) -> torch.Tensor:
+    def get_amp_expert_frame_at_times(self, time_steps: torch.Tensor) -> torch.Tensor:
         """Return expert frames in the runtime URDF/root-link feature domain."""
 
         if not torch.is_tensor(time_steps):
@@ -538,42 +608,45 @@ class MimicMotionReference:
         requested_shape = tuple(time_steps.shape)
         phases = time_steps.to(device=self.device, dtype=torch.float32).reshape(-1)
         if not bool(torch.isfinite(phases).all()):
-            raise ValueError("FCAMP expert frame times contain non-finite values")
+            raise ValueError("AMP expert frame times contain non-finite values")
         if bool((phases < 0).any()) or bool((phases > self.num_frames - 1).any()):
             raise ValueError(
-                f"FCAMP expert frame times must lie in [0, {self.num_frames - 1}]"
+                f"AMP expert frame times must lie in [0, {self.num_frames - 1}]"
             )
         root_pos = self._interpolate(self.body_pos_full_w[:, self.root_body_id], phases)
         root_quat = self._interpolate_quat_shortest(
             self.body_quat_full_w[:, self.root_body_id], phases
         )
         joint_pos = self._interpolate(self.joint_pos, phases)
-        root_link_velocity = self._interpolate(self.root_link_vel_w, phases)
-        frame = self.build_fcamp_frame_from_robot_state(
+        root_link_velocity = self._sample_left_frame(
+            self.root_link_vel_w,
+            phases,
+        )
+        frame = self.build_amp_frame_from_robot_state(
             root_pos=root_pos,
             root_quat=root_quat,
             joint_pos=joint_pos,
             root_link_velocity=root_link_velocity,
-            joint_vel=self._interpolate(self.joint_vel, phases),
+            joint_vel=self._sample_left_frame(self.joint_vel, phases),
         )
         return frame.reshape(requested_shape + (G1_IMITATION_FRAME_DIM,))
 
     @torch.no_grad()
-    def _fcamp_integer_expert_frames(self) -> torch.Tensor:
-        cached = self._fcamp_expert_integer_frame_cache
+    def _amp_integer_expert_frames(self) -> torch.Tensor:
+        cached = self._amp_expert_integer_frame_cache
         if cached is None:
-            cached = self.get_fcamp_expert_frame_at_times(
+            cached = self.get_amp_expert_frame_at_times(
                 torch.arange(self.num_frames, device=self.device, dtype=torch.float32)
             ).detach()
-            self._fcamp_expert_integer_frame_cache = cached
+            self._amp_expert_integer_frame_cache = cached
         return cached
 
-    def get_fcamp_demo_history(
+    def get_amp_demo_history(
         self,
         phase_indices: torch.Tensor,
         window_size: int,
     ) -> torch.Tensor:
-        """Build chronological fixed-W FCAMP reset seeds ending at each phase."""
+        """Build chronological fixed-width AMP reset seeds."""
 
         if not torch.is_tensor(phase_indices):
             raise TypeError("phase_indices must be a torch.Tensor")
@@ -585,25 +658,92 @@ class MimicMotionReference:
                 raise ValueError("phase_indices contain non-finite values")
             rounded = torch.round(phases)
             if not torch.equal(phases, rounded):
-                raise ValueError("FCAMP reset history endpoints must be integer phases")
+                raise ValueError("AMP reset history endpoints must be integer phases")
             phases = rounded
         indices = history_indices(
             phases.to(dtype=torch.long), window_size, self.num_frames
         )
-        frames = self._fcamp_integer_expert_frames().index_select(
+        frames = self._amp_integer_expert_frames().index_select(
             0, indices.reshape(-1)
         ).reshape(indices.shape + (G1_IMITATION_FRAME_DIM,))
         return frames
 
-    def get_fcamp_demo_windows_at_end_indices(
+    def get_amp_demo_windows_at_end_indices(
         self,
         end_indices: torch.Tensor,
         window_size: int,
     ) -> torch.Tensor:
-        return self.get_fcamp_demo_history(end_indices, window_size)
+        return self.get_amp_demo_history(end_indices, window_size)
+
+    def get_amp_demo_windows_at_end_times(
+        self,
+        end_times: torch.Tensor,
+        window_size: int,
+        *,
+        control_dt: float,
+        loop: bool = False,
+    ) -> torch.Tensor:
+        """Return MimicKit-style expert windows at independently sampled times.
+
+        The endpoint may be fractional and every predecessor is spaced by one
+        real control interval.  Non-looping clips clamp negative predecessors
+        to the first frame; looping clips wrap them to the end.  This is the
+        expert-window contract used by AMP and deliberately does not condition
+        on policy phase or occupancy.
+        """
+
+        if not torch.is_tensor(end_times):
+            raise TypeError("end_times must be a torch.Tensor")
+        if end_times.ndim != 1:
+            raise ValueError(
+                f"end_times must be 1-D, got {tuple(end_times.shape)}"
+            )
+        if window_size <= 0:
+            raise ValueError(
+                f"window_size must be positive, got {window_size}"
+            )
+        if not math.isfinite(float(control_dt)) or float(control_dt) <= 0.0:
+            raise ValueError(
+                f"control_dt must be finite and positive, got {control_dt}"
+            )
+        endpoints = end_times.to(device=self.device, dtype=torch.float32)
+        if endpoints.numel() and (
+            not bool(torch.isfinite(endpoints).all())
+            or bool((endpoints < 0.0).any())
+            or bool((endpoints > float(self.num_frames - 1)).any())
+        ):
+            raise ValueError(
+                "AMP expert endpoints must lie in "
+                f"[0, {self.num_frames - 1}]"
+            )
+        frame_stride = float(self.fps) * float(control_dt)
+        offsets = torch.arange(
+            1 - int(window_size),
+            1,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        sample_times = endpoints[:, None] + offsets[None, :] * frame_stride
+        if loop:
+            period = float(max(1, self.num_frames - 1))
+            sample_times = torch.remainder(sample_times, period)
+        else:
+            sample_times = torch.clamp(
+                sample_times,
+                min=0.0,
+                max=float(self.num_frames - 1),
+            )
+        frames = self.get_amp_expert_frame_at_times(
+            sample_times.reshape(-1)
+        )
+        return frames.reshape(
+            endpoints.shape[0],
+            int(window_size),
+            G1_IMITATION_FRAME_DIM,
+        )
 
     def get_imitation_frame_at_times(self, time_steps: torch.Tensor) -> torch.Tensor:
-        """Return evaluator frames in the exact FCAMP expert feature domain."""
+        """Return evaluator frames in the exact AMP expert feature domain."""
 
         if not torch.is_tensor(time_steps):
             raise TypeError("time_steps must be a torch.Tensor")
@@ -614,4 +754,4 @@ class MimicMotionReference:
             raise ValueError("time_steps contain non-finite values")
         if bool((phases < 0).any()) or bool((phases > self.num_frames - 1).any()):
             raise ValueError(f"imitation frame times must lie in [0, {self.num_frames - 1}]")
-        return self.get_fcamp_expert_frame_at_times(phases.to(dtype=torch.float32))
+        return self.get_amp_expert_frame_at_times(phases.to(dtype=torch.float32))

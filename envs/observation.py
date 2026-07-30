@@ -12,7 +12,10 @@ from isaaclab.utils.math import (
 )
 
 from .spec import CRITIC_OBS_DIM, OBS_DIM
-from .imitation_data import build_g1_imitation_frame
+from .imitation_data import (
+    build_g1_amp_actor_observation,
+    build_g1_imitation_frame,
+)
 
 
 class MimicObservationMixin:
@@ -42,10 +45,10 @@ class MimicObservationMixin:
             joint_vel=joint_vel.index_select(0, env_ids),
         )
 
-    def get_fcamp_fk_aligned_policy_frame(
+    def get_amp_fk_aligned_policy_frame(
         self, env_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """Rebuild the same simulator state through FCAMP's expert FK path."""
+        """Rebuild the same simulator state through AMP's local-URDF FK path."""
 
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
@@ -53,7 +56,7 @@ class MimicObservationMixin:
             raise ValueError(f"env_ids must be 1-D, got {tuple(env_ids.shape)}")
         joint_pos, joint_vel = self.get_action_joint_state()
         origins = self.scene.env_origins.index_select(0, env_ids)
-        return self.motion.build_fcamp_frame_from_robot_state(
+        return self.motion.build_amp_frame_from_robot_state(
             root_pos=self.robot.data.root_link_pos_w.index_select(0, env_ids) - origins,
             root_quat=self.robot.data.root_link_quat_w.index_select(0, env_ids),
             joint_pos=joint_pos.index_select(0, env_ids),
@@ -174,53 +177,20 @@ class MimicObservationMixin:
         return self.build_critic_observation()
 
     def build_observation(self) -> torch.Tensor:
-        observation = torch.cat(
-            [
-                self.get_imitation_policy_frame()[..., 2:],
-                self.last_action,
-            ],
-            dim=-1,
+        # Standard G1 AMP observation: current self state only.  Global root
+        # x/y are removed; no reference, phase, target, future frame, contact,
+        # or previous action is exposed to the Actor.
+        observation = build_g1_amp_actor_observation(
+            self.get_imitation_policy_frame()
         )
         if observation.shape[-1] != OBS_DIM:
             raise RuntimeError(f"Expected observation dim {OBS_DIM}, got {observation.shape[-1]}")
         return observation
 
     def build_critic_observation(self) -> torch.Tensor:
-        context = self.get_tracking_context()
-        reference = context["reference"]
-        reference_joint_state = torch.cat([reference["joint_pos"], reference["joint_vel"]], dim=-1)
-        motion_anchor_pos_b, motion_anchor_ori_b = self._motion_anchor_observation_terms(
-            context["robot_anchor_pos_w"],
-            context["robot_anchor_quat_w"],
-            reference,
-        )
-        num_bodies = len(self.track_body_names)
-        robot_anchor_pos_repeat = context["robot_anchor_pos_w"][:, None, :].repeat(1, num_bodies, 1)
-        robot_anchor_quat_repeat = context["robot_anchor_quat_w"][:, None, :].repeat(1, num_bodies, 1)
-        robot_body_pos_b, robot_body_ori_b = subtract_frame_transforms(
-            robot_anchor_pos_repeat,
-            robot_anchor_quat_repeat,
-            context["robot_body_pos_w"],
-            context["robot_body_quat_w"],
-        )
-        robot_body_ori_b = matrix_from_quat(robot_body_ori_b)[..., :2].reshape(self.num_envs, -1)
-        joint_pos_rel = context["robot_joint_pos"] - self.default_action_joint_pos
-        joint_vel_rel = context["robot_joint_vel"] - self.default_action_joint_vel
-        observation = torch.cat(
-            [
-                reference_joint_state,
-                motion_anchor_pos_b,
-                motion_anchor_ori_b,
-                robot_body_pos_b.reshape(self.num_envs, -1),
-                robot_body_ori_b,
-                self.robot.data.root_lin_vel_b,
-                self.robot.data.root_ang_vel_b,
-                joint_pos_rel,
-                joint_vel_rel,
-                self.last_action,
-            ],
-            dim=-1,
-        )
+        # MimicKit AMP does not use a privileged reference-conditioned value
+        # function. Actor and Critic consume the same normalized self state.
+        observation = self.build_observation()
         if observation.shape[-1] != CRITIC_OBS_DIM:
             raise RuntimeError(f"Expected critic observation dim {CRITIC_OBS_DIM}, got {observation.shape[-1]}")
         return observation

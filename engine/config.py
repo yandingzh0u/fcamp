@@ -17,53 +17,45 @@ class EnvironmentConfig:
     sim_dt: float
     decimation: int
     fix_root_link: bool
-    startup_randomization: bool
     max_episode_steps: int
     motion_start_phase: int
     motion_end_phase: int
-    reset_noise: bool
-    interval_pushes: bool
-    reset_phase_sampling: str
-    rsi_keyframe_count: int
-    adaptive_num_bins: int
-    adaptive_alpha: float
-    adaptive_predecessor_ratio: float
-    adaptive_predecessor_lookback_bins: int
     root_velocity_mode: str
 
 
 @dataclass(frozen=True, slots=True)
-class FlowGaussianConfig:
-    """Shared deterministic-flow Gaussian actor settings used by FCAMP."""
+class AMPPolicyConfig:
+    """Standard AMP Gaussian actor and PPO/value settings.
+
+    The policy variable is a direct normalized absolute action, or an
+    ``[H, action_dim]`` chunk of direct actions.
+    """
 
     horizon: int
     actor_hidden_dims: tuple[int, ...]
-    activation: str
-    action_squash_scale: float
-    flow_steps: int
-    gaussian_path_init_std: float
-    gaussian_path_std_min: float
-    gaussian_path_std_max: float
     rollout_env_steps: int
     discount_gamma: float
     gae_lambda: float
     clip_range: float
-    desired_kl: float
+    advantage_clip: float
     policy_epochs: int
-    num_mini_batches: int
+    critic_epochs: int
+    # MimicKit expresses logical optimizer batch sizes as multiples of the
+    # environment count (4*N for actor, 2*N for critic).
+    actor_batch_size: int
+    critic_batch_size: int
+    # Device-memory subdivision only.  Splitting a logical batch must
+    # accumulate one equivalent gradient and perform exactly one optimizer
+    # step; it must not create additional PPO updates.
     micro_batch_size: int
     policy_lr: float
     value_lr: float
-    weight_decay: float
-    critic_weight_decay: float
-    init_at_random_ep_len: bool
-    max_grad_norm: float
-    kl_early_stop_factor: float
+    action_bound_weight: float
 
 
 @dataclass(frozen=True, slots=True)
-class StylePriorConfig:
-    """Temporal discriminator prior configuration used by FCAMP."""
+class AMPDiscriminatorConfig:
+    """Unconditional temporal AMP discriminator settings."""
 
     obs_steps: int
     hidden_dims: tuple[int, ...]
@@ -72,37 +64,30 @@ class StylePriorConfig:
     learning_rate: float
     weight_decay: float
     epochs: int
+    # Logical discriminator batch multiplier: B = batch_size * num_envs.
     batch_size: int
-    current_buffer_size: int
+    # Device-memory subdivision for an exactly equivalent accumulated logical
+    # batch. It never changes the number of discriminator optimizer steps.
+    micro_batch_size: int
     replay_size: int
     replay_samples: int
     grad_penalty: float
     logit_reg: float
     normalizer_clip: float
     reward_eval_batch_size: int
-    max_updates_per_iteration: int
 
 
 @dataclass(frozen=True, slots=True)
-class FlowCriticConfig:
-    encoder_hidden_dims: tuple[int, ...]
-    head_hidden_dims: tuple[int, ...]
+class AMPValueConfig:
+    hidden_dims: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class FCAMPStreamsConfig:
-    """Fixed phase-zero trajectory-attempt/curriculum mixture used by FCAMP."""
+class AMPConfig(AMPPolicyConfig):
+    """MimicKit-style pure AMP adapted to the configured robot and motion."""
 
-    phase0_fraction: float
-
-
-@dataclass(frozen=True, slots=True)
-class FCAMPConfig(FlowGaussianConfig):
-    """Causal Gaussian flow actor plus temporal discriminator prior."""
-
-    style_prior: StylePriorConfig
-    critic: FlowCriticConfig
-    streams: FCAMPStreamsConfig
+    style_prior: AMPDiscriminatorConfig
+    critic: AMPValueConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +98,6 @@ class TrainingConfig:
     save_every: int
     resume: str
     reset_optimizer_on_resume: bool
-    reset_sampler_on_resume: bool
     validation_every: int
     validation_max_steps: int
     validation_start_phase: int
@@ -126,8 +110,9 @@ class TrainingConfig:
 class ExperimentConfig:
     method: str
     environment: EnvironmentConfig
-    parameters: FCAMPConfig
+    parameters: AMPConfig
     training: TrainingConfig
+
 
 def _construct(cls, values: dict[str, Any]):
     names = {field.name for field in fields(cls)}
@@ -141,24 +126,26 @@ def _construct(cls, values: dict[str, Any]):
     for name in (
         "actor_hidden_dims",
         "hidden_dims",
-        "encoder_hidden_dims",
-        "head_hidden_dims",
     ):
         if name in converted:
             converted[name] = tuple(int(value) for value in converted[name])
     return cls(**converted)
 
 
-def _construct_fcamp(values: dict[str, Any]) -> FCAMPConfig:
+def _construct_amp(values: dict[str, Any]) -> AMPConfig:
     nested = dict(values)
     try:
-        style_prior = dict(nested["style_prior"])
-        nested["style_prior"] = _construct(StylePriorConfig, style_prior)
-        nested["critic"] = _construct(FlowCriticConfig, dict(nested["critic"]))
-        nested["streams"] = _construct(FCAMPStreamsConfig, dict(nested["streams"]))
+        nested["style_prior"] = _construct(
+            AMPDiscriminatorConfig,
+            dict(nested["style_prior"]),
+        )
+        nested["critic"] = _construct(
+            AMPValueConfig,
+            dict(nested["critic"]),
+        )
     except KeyError as exc:
-        raise KeyError(f"FCAMPConfig missing nested section: {exc.args[0]}") from exc
-    return _construct(FCAMPConfig, nested)
+        raise KeyError(f"AMPConfig missing nested section: {exc.args[0]}") from exc
+    return _construct(AMPConfig, nested)
 
 
 def _apply_overrides(tree: dict[str, Any], overrides: list[str]) -> None:
@@ -186,7 +173,10 @@ def _resolve_path(value: str, config_path: Path) -> str:
     return str(path.resolve())
 
 
-def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> ExperimentConfig:
+def config_from_dict(
+    tree: dict[str, Any],
+    source: str | Path = ".",
+) -> ExperimentConfig:
     normalized = dict(tree)
     required = {"method", "environment", "parameters", "training"}
     missing = required - normalized.keys()
@@ -196,16 +186,21 @@ def config_from_dict(tree: dict[str, Any], source: str | Path = ".") -> Experime
     if unknown:
         raise KeyError(f"ExperimentConfig unknown keys: {sorted(unknown)}")
     method = str(normalized["method"])
-    if method != "fcamp":
-        raise ValueError(f"method must be 'fcamp', got {method!r}")
+    if method != "amp":
+        raise ValueError(
+            f"method must be 'amp', got {method!r}"
+        )
     source_path = Path(source).expanduser().resolve()
     environment_values = dict(normalized["environment"])
     training_values = dict(normalized["training"])
-    training_values["resume"] = _resolve_path(str(training_values["resume"]), source_path)
+    training_values["resume"] = _resolve_path(
+        str(training_values["resume"]),
+        source_path,
+    )
     config = ExperimentConfig(
         method=method,
         environment=_construct(EnvironmentConfig, environment_values),
-        parameters=_construct_fcamp(dict(normalized["parameters"])),
+        parameters=_construct_amp(dict(normalized["parameters"])),
         training=_construct(TrainingConfig, training_values),
     )
     _validate(config)
@@ -219,13 +214,25 @@ def config_from_checkpoint_dict(
     return config_from_dict(tree, source)
 
 
-def load_config(config_path: str | Path, overrides: list[str] | None = None) -> ExperimentConfig:
+def load_config(
+    config_path: str | Path,
+    overrides: list[str] | None = None,
+) -> ExperimentConfig:
     path = Path(config_path).expanduser().resolve()
     with path.open("r", encoding="utf-8") as handle:
         tree = yaml.safe_load(handle) or {}
     if overrides:
         _apply_overrides(tree, overrides)
     return config_from_dict(tree, path)
+
+
+def _finite_positive(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) > 0.0
+    )
 
 
 def _validate(config: ExperimentConfig) -> None:
@@ -240,129 +247,114 @@ def _validate(config: ExperimentConfig) -> None:
     if env.decimation < 1:
         raise ValueError("environment.decimation must be positive")
     if env.platform_profile not in {"custom", "g1_largebox_50hz"}:
-        raise ValueError("environment.platform_profile must be custom or g1_largebox_50hz")
-    if env.reset_phase_sampling not in {
-        "adaptive",
-        "uniform",
-        "rsi",
-        "zero",
-    }:
         raise ValueError(
-            "environment.reset_phase_sampling must be one of "
-            "adaptive/uniform/rsi/zero"
+            "environment.platform_profile must be custom or g1_largebox_50hz"
         )
-    if env.rsi_keyframe_count < 1:
-        raise ValueError("environment.rsi_keyframe_count must be positive")
-    if env.root_velocity_mode not in {"com", "link"}:
-        raise ValueError("environment.root_velocity_mode must be com or link")
     if env.root_velocity_mode != "link":
         raise ValueError(
-            "FCAMP requires environment.root_velocity_mode=link so reset, "
-            "policy, expert, validation, snapshot, and push velocities share "
-            "one root-link world-frame contract"
+            "AMP requires environment.root_velocity_mode=link so reset, "
+            "policy, expert, validation, and snapshot velocities share one "
+            "root-link world-frame contract"
         )
     if env.platform_profile == "g1_largebox_50hz":
         if env.task != "largebox_plane":
-            raise ValueError("g1_largebox_50hz requires environment.task=largebox_plane")
+            raise ValueError(
+                "g1_largebox_50hz requires environment.task=largebox_plane"
+            )
         if abs(float(env.sim_dt) - 0.02) > 1.0e-12 or env.decimation != 4:
-            raise ValueError("g1_largebox_50hz requires 50 Hz control / 200 Hz simulation")
+            raise ValueError(
+                "g1_largebox_50hz requires 50 Hz control / 200 Hz simulation"
+            )
         if env.fix_root_link:
             raise ValueError("g1_largebox_50hz requires a free root link")
         if int(env.max_episode_steps) != 500:
-            raise ValueError("g1_largebox_50hz uses a 10 second, 500-step episode limit")
+            raise ValueError(
+                "g1_largebox_50hz uses a 10 second, 500-step episode limit"
+            )
     if train.max_updates < 1:
         raise ValueError("training.max_updates must be positive")
     if train.log_every < 1:
         raise ValueError("training.log_every must be positive")
+    if train.save_every < 1:
+        raise ValueError("training.save_every must be positive")
+    if train.validation_every < 1:
+        raise ValueError("training.validation_every must be positive")
     resolve_task(env.task)
-    if env.num_envs < 2:
-        raise ValueError("FCAMP requires at least two environments for two streams")
-    _validate_fcamp(config.parameters)
+    _validate_amp(config.parameters)
 
-def _validate_fcamp(params: FCAMPConfig) -> None:
+
+def _validate_amp(params: AMPConfig) -> None:
     if params.horizon < 1:
-        raise ValueError("FCAMP Gaussian actor requires parameters.horizon >= 1")
-    if params.flow_steps < 1:
-        raise ValueError("FCAMP flow mean requires parameters.flow_steps >= 1")
+        raise ValueError("AMP Gaussian actor requires parameters.horizon >= 1")
     if params.rollout_env_steps <= 0:
-        raise ValueError("FCAMP requires parameters.rollout_env_steps > 0")
-    if params.rollout_env_steps % params.horizon:
-        raise ValueError("parameters.rollout_env_steps must be divisible by parameters.horizon")
-    gaussian_path_std_values = (
-        params.gaussian_path_init_std,
-        params.gaussian_path_std_min,
-        params.gaussian_path_std_max,
-    )
-    if any(
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-        or float(value) <= 0.0
-        for value in gaussian_path_std_values
+        raise ValueError("AMP requires parameters.rollout_env_steps > 0")
+    if (
+        not params.actor_hidden_dims
+        or any(width < 1 for width in params.actor_hidden_dims)
     ):
-        raise ValueError(
-            "FCAMP action-path Gaussian std values must be finite and positive"
-        )
-    if not (
-        params.gaussian_path_std_min
-        <= params.gaussian_path_init_std
-        <= params.gaussian_path_std_max
+        raise ValueError("AMP actor_hidden_dims must be positive")
+    if not 0.0 < params.discount_gamma <= 1.0:
+        raise ValueError("parameters.discount_gamma must be in (0, 1]")
+    if not 0.0 <= params.gae_lambda <= 1.0:
+        raise ValueError("parameters.gae_lambda must be in [0, 1]")
+    if not 0.0 < params.clip_range < 1.0:
+        raise ValueError("parameters.clip_range must be in (0, 1)")
+    if not _finite_positive(params.advantage_clip):
+        raise ValueError("parameters.advantage_clip must be finite and positive")
+    if (
+        params.policy_epochs < 1
+        or params.critic_epochs < 1
+        or params.actor_batch_size < 1
+        or params.critic_batch_size < 1
+        or params.micro_batch_size < 1
     ):
-        raise ValueError(
-            "FCAMP requires gaussian_path_std_min <= "
-            "gaussian_path_init_std <= gaussian_path_std_max"
-        )
-    if params.policy_lr <= 0.0:
-        raise ValueError("FCAMP requires parameters.policy_lr > 0")
-    if params.value_lr <= 0.0:
-        raise ValueError("FCAMP requires parameters.value_lr > 0")
+        raise ValueError("AMP optimizer epoch/batch settings must be positive")
+    if not _finite_positive(params.policy_lr):
+        raise ValueError("AMP requires parameters.policy_lr > 0")
+    if not _finite_positive(params.value_lr):
+        raise ValueError("AMP requires parameters.value_lr > 0")
+    if params.action_bound_weight < 0.0:
+        raise ValueError("parameters.action_bound_weight cannot be negative")
 
     style = params.style_prior
     critic = params.critic
-    streams = params.streams
-    if not (0.0 < streams.phase0_fraction < 1.0):
-        raise ValueError("FCAMP streams.phase0_fraction must be in (0, 1)")
+    if (
+        not critic.hidden_dims
+        or any(width < 1 for width in critic.hidden_dims)
+    ):
+        raise ValueError("AMP critic hidden_dims must be positive")
     if style.obs_steps < 2:
-        raise ValueError("FCAMP requires style_prior.obs_steps >= 2")
-    if not style.hidden_dims:
-        raise ValueError("FCstyle discriminator hidden_dims cannot be empty")
-    if style.reward_scale <= 0.0 or not (0.0 < style.reward_epsilon < 1.0):
-        raise ValueError("FCAMP style reward scale/epsilon are invalid")
-    if style.learning_rate <= 0.0 or style.batch_size < 2 or style.epochs < 1:
-        raise ValueError("FCstyle discriminator optimizer/batch/epoch settings are invalid")
-    if style.max_updates_per_iteration < 1:
-        raise ValueError("FCAMP max_updates_per_iteration must be positive")
-    if style.current_buffer_size < style.batch_size:
-        raise ValueError("FCAMP style_prior.current_buffer_size must be >= batch_size")
-    current_phase0 = int(
-        round(style.current_buffer_size * streams.phase0_fraction)
-    )
-    if not 0 < current_phase0 < style.current_buffer_size:
+        raise ValueError("AMP requires style_prior.obs_steps >= 2")
+    if not style.hidden_dims or any(width < 1 for width in style.hidden_dims):
+        raise ValueError("AMP discriminator hidden_dims must be positive")
+    if (
+        style.reward_scale <= 0.0
+        or not 0.0 < style.reward_epsilon < 1.0
+    ):
+        raise ValueError("AMP style reward scale/epsilon are invalid")
+    if (
+        not _finite_positive(style.learning_rate)
+        or style.batch_size < 1
+        or style.epochs < 1
+    ):
         raise ValueError(
-            "FCAMP current discriminator buffer cannot realize both streams"
+            "AMP discriminator optimizer/batch/epoch settings are invalid"
         )
     if (
         style.replay_size < style.batch_size
         or style.replay_samples <= 0
         or style.replay_samples > style.replay_size
     ):
-        raise ValueError("FCAMP complete-window replay settings are invalid")
-    phase0_capacity = int(round(style.replay_size * streams.phase0_fraction))
-    phase0_replace = int(round(style.replay_samples * streams.phase0_fraction))
-    if not (
-        0 < phase0_capacity < style.replay_size
-        and 0 < phase0_replace < style.replay_samples
-        and phase0_replace <= phase0_capacity
-        and style.replay_samples - phase0_replace
-        <= style.replay_size - phase0_capacity
-    ):
+        raise ValueError("AMP global replay settings are invalid")
+    if style.grad_penalty < 0.0 or style.logit_reg < 0.0:
         raise ValueError(
-            "FCAMP replay size/replacement quotas cannot realize both streams"
+            "AMP gradient penalty and logit regularization cannot be negative"
         )
-    if (
-        not critic.encoder_hidden_dims
-        or not critic.head_hidden_dims
-        or any(width < 1 for width in critic.encoder_hidden_dims)
-        or any(width < 1 for width in critic.head_hidden_dims)
-    ):
-        raise ValueError("FCAMP critic encoder/head dimensions must be positive")
+    if not _finite_positive(style.normalizer_clip):
+        raise ValueError(
+            "style_prior.normalizer_clip must be finite and positive"
+        )
+    if style.reward_eval_batch_size < 1:
+        raise ValueError(
+            "style_prior.reward_eval_batch_size must be positive"
+        )

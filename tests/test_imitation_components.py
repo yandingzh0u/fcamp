@@ -17,13 +17,13 @@ from components.imitation.style_reward import discriminator_style_reward
 from models.style_discriminator import StyleDiscriminator, compute_style_discriminator_loss
 
 
-def test_feature_schema_is_233_and_policy_demo_share_builder() -> None:
+def test_feature_schema_is_239_and_policy_demo_share_builder() -> None:
     schema = ImitationFeatureSchema()
-    assert schema.frame_dim == 233
+    assert schema.frame_dim == 239
     batch = 3
     identity = torch.zeros(batch, 4)
     identity[:, 0] = 1.0
-    joint_identity = torch.zeros(batch, 29, 4)
+    joint_identity = torch.zeros(batch, 30, 4)
     joint_identity[..., 0] = 1.0
     kwargs = dict(
         root_pos=torch.randn(batch, 3),
@@ -37,7 +37,7 @@ def test_feature_schema_is_233_and_policy_demo_share_builder() -> None:
     )
     policy = build_imitation_frame(**kwargs)
     demo = build_imitation_frame(**kwargs)
-    assert policy.shape == (batch, 233)
+    assert policy.shape == (batch, 239)
     torch.testing.assert_close(policy, demo)
 
 
@@ -82,84 +82,17 @@ def test_demo_seeded_history_is_fixed_width_from_first_policy_step() -> None:
     history.reset_seeded(seed)
 
     assert history.ready.tolist() == [False]
-    history.push(
-        torch.tensor([[4.0]], dtype=torch.float32),
-        intervention_after=torch.tensor([False]),
-    )
+    history.push(torch.tensor([[4.0]], dtype=torch.float32))
 
     assert history.ready.tolist() == [True]
-    assert history.causal_ready.tolist() == [True]
     assert history.window_ages().tolist() == [[-2, -1, 0, 1]]
     assert history.window().squeeze(-1).tolist() == [[1.0, 2.0, 3.0, 4.0]]
 
 
-def test_actual_reset_history_waits_for_complete_actual_window() -> None:
-    history = TemporalFeatureHistory(1, history_len=4, feature_dim=1)
-    history.reset_from_frame(torch.tensor([[10.0]], dtype=torch.float32))
-
-    initial_stats = history.statistics()
-    assert initial_stats["history/seeded_count"] == 0.0
-    assert initial_stats["history/policy_steps_until_ready_mean"] == 3.0
-    assert history.ready.tolist() == [False]
-
-    for value in (11.0, 12.0):
-        history.push(
-            torch.tensor([[value]], dtype=torch.float32),
-            intervention_after=torch.tensor([False]),
-        )
-        assert history.ready.tolist() == [False]
-
-    history.push(
-        torch.tensor([[13.0]], dtype=torch.float32),
-        intervention_after=torch.tensor([False]),
-    )
-    assert history.ready.tolist() == [True]
-    assert history.causal_ready.tolist() == [True]
-    assert history.window_ages().tolist() == [[0, 1, 2, 3]]
-    # The first legal policy window is exactly S0..S(W-1), with neither demo
-    # seed data nor repeated-reset placeholders.
-    assert history.window().squeeze(-1).tolist() == [[10.0, 11.0, 12.0, 13.0]]
-
-
-def test_intervention_after_excludes_exactly_next_w_minus_one_windows() -> None:
-    history = TemporalFeatureHistory(1, history_len=4, feature_dim=1)
-    history.reset_seeded(
-        torch.tensor([[[0.0], [1.0], [2.0], [3.0]]], dtype=torch.float32)
-    )
-
-    # The intervention is after endpoint 4, so that endpoint remains clean.
-    history.push(
-        torch.tensor([[4.0]], dtype=torch.float32),
-        intervention_after=torch.tensor([True]),
-    )
-    assert history.causal_ready.tolist() == [True]
-    assert history.window().squeeze(-1).tolist() == [[1.0, 2.0, 3.0, 4.0]]
-
-    for value in (5.0, 6.0, 7.0):
-        history.push(
-            torch.tensor([[value]], dtype=torch.float32),
-            intervention_after=torch.tensor([False]),
-        )
-        assert history.ready.tolist() == [True]
-        assert history.causal_ready.tolist() == [False]
-        with pytest.raises(RuntimeError, match="external intervention"):
-            history.window()
-
-    history.push(
-        torch.tensor([[8.0]], dtype=torch.float32),
-        intervention_after=torch.tensor([False]),
-    )
-    assert history.causal_ready.tolist() == [True]
-    assert history.window().squeeze(-1).tolist() == [[5.0, 6.0, 7.0, 8.0]]
-
-
 def test_history_rejects_uninitialized_push() -> None:
     history = TemporalFeatureHistory(1, history_len=4, feature_dim=2)
-    with pytest.raises(RuntimeError, match="imitation history"):
-        history.push(
-            torch.zeros(1, 2),
-            intervention_after=torch.tensor([False]),
-        )
+    with pytest.raises(RuntimeError, match="history"):
+        history.push(torch.zeros(1, 2))
 
 
 def test_imitation_reward_matches_definition_and_clamps() -> None:

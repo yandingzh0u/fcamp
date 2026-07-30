@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
+import xml.etree.ElementTree as ET
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
@@ -10,7 +10,11 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
 from .imitation_data import G1_IMITATION_FRAME_DIM
-from .robots.g1 import G1_29DOF_ACTION_NAMES, G1_BASE_CFG, make_g1_cfg
+from .robots.g1 import (
+    G1_29DOF_ACTION_NAMES,
+    G1_LOCAL_URDF_PATH,
+    make_g1_cfg,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -53,67 +57,46 @@ MIMIC_ANCHOR_BODY_NAME = "torso_link"
 OBS_DIM = (
     G1_IMITATION_FRAME_DIM
     - 2  # discard global root x/y
-    + len(G1_29DOF_ACTION_NAMES)  # chunk continuation anchor
 )
-CRITIC_OBS_DIM = 286
+# Standard AMP uses the same self-state observation for Actor and Critic.
+CRITIC_OBS_DIM = OBS_DIM
 
 
 ANCHOR_Z_TERMINATION_THRESHOLD = 0.5
 ANCHOR_ORI_TERMINATION_THRESHOLD = 0.8
 EE_Z_TERMINATION_THRESHOLD = 0.25
-RESET_ROOT_POSE_RANGE = (
-    (-0.05, 0.05),
-    (-0.05, 0.05),
-    (-0.01, 0.01),
-    (-0.1, 0.1),
-    (-0.1, 0.1),
-    (-0.2, 0.2),
-)
-VELOCITY_RANGE = (
-    (-0.5, 0.5),
-    (-0.5, 0.5),
-    (-0.2, 0.2),
-    (-0.52, 0.52),
-    (-0.52, 0.52),
-    (-0.78, 0.78),
-)
-RESET_JOINT_POSITION_RANGE = (-0.1, 0.1)
-STARTUP_JOINT_DEFAULT_POS_RANGE = (-0.01, 0.01)
-STARTUP_BASE_COM_RANGE = (
-    (-0.025, 0.025),
-    (-0.05, 0.05),
-    (-0.05, 0.05),
-)
-PUSH_INTERVAL_STEP_RANGE = (50, 150)
+def _compute_g1_amp_action_scale_values() -> tuple[float, ...]:
+    """Return MimicKit's zero-centered physical action half ranges.
 
+    For one-dimensional position-controlled joints MimicKit sets the physical
+    action interval to ``[-1.4*max(|lower|,|upper|),
+    +1.4*max(|lower|,|upper|)]`` and then normalizes that interval to
+    ``[-1,1]`` for the Gaussian policy.
+    """
 
-def _match_joint_expr(expr: str, joint_name: str) -> bool:
-    return re.fullmatch(expr, joint_name) is not None
-
-
-def _compute_g1_mimic_action_scale_values() -> tuple[float, ...]:
+    root = ET.parse(G1_LOCAL_URDF_PATH).getroot()
+    limits: dict[str, tuple[float, float]] = {}
+    for joint in root.findall("joint"):
+        limit = joint.find("limit")
+        if limit is None:
+            continue
+        limits[joint.attrib["name"]] = (
+            float(limit.attrib["lower"]),
+            float(limit.attrib["upper"]),
+        )
     scale_values: list[float] = []
     for joint_name in G1_29DOF_ACTION_NAMES:
-        matched_scale: float | None = None
-        for actuator_cfg in G1_BASE_CFG.actuators.values():
-            effort_limit = actuator_cfg.effort_limit_sim
-            stiffness = actuator_cfg.stiffness
-            for joint_expr in actuator_cfg.joint_names_expr:
-                if not _match_joint_expr(joint_expr, joint_name):
-                    continue
-                effort_value = effort_limit[joint_expr] if isinstance(effort_limit, dict) else effort_limit
-                stiffness_value = stiffness[joint_expr] if isinstance(stiffness, dict) else stiffness
-                matched_scale = 0.25 * float(effort_value) / float(stiffness_value)
-                break
-            if matched_scale is not None:
-                break
-        if matched_scale is None:
-            raise KeyError(f"Failed to resolve mimic action scale for joint: {joint_name}")
-        scale_values.append(matched_scale)
+        try:
+            lower, upper = limits[joint_name]
+        except KeyError as exc:
+            raise KeyError(
+                f"URDF action joint {joint_name!r} has no finite position limit"
+            ) from exc
+        scale_values.append(1.4 * max(abs(lower), abs(upper)))
     return tuple(scale_values)
 
 
-G1_MIMIC_ACTION_SCALE_VALUES = _compute_g1_mimic_action_scale_values()
+G1_AMP_ACTION_SCALE_VALUES = _compute_g1_amp_action_scale_values()
 
 
 @configclass

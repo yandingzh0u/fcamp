@@ -9,11 +9,21 @@ from torch import nn
 
 
 class EmpiricalNormalization(nn.Module):
-    """Streaming observation normalization used by the actor and critic."""
+    """MimicKit observation normalizer shared by actor and critic."""
 
-    def __init__(self, shape: int, device, eps: float = 1e-2):
+    def __init__(
+        self,
+        shape: int,
+        device,
+        *,
+        clip: float = 10.0,
+        min_std: float = 1.0e-4,
+    ):
         super().__init__()
-        self.eps = eps
+        if clip <= 0.0 or min_std <= 0.0:
+            raise ValueError("clip and min_std must be positive")
+        self.clip = float(clip)
+        self.min_std = float(min_std)
         self.register_buffer("_mean", torch.zeros(shape).unsqueeze(0).to(device))
         self.register_buffer("_var", torch.ones(shape).unsqueeze(0).to(device))
         self.register_buffer("_std", torch.ones(shape).unsqueeze(0).to(device))
@@ -21,7 +31,8 @@ class EmpiricalNormalization(nn.Module):
 
     @torch.no_grad()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return (x - self._mean) / (self._std + self.eps)
+        normalized = (x - self._mean) / self._std
+        return torch.clamp(normalized, -self.clip, self.clip)
 
     @torch.no_grad()
     def _update(self, x: torch.Tensor) -> None:
@@ -34,7 +45,9 @@ class EmpiricalNormalization(nn.Module):
         m_a = self._var * self.count
         m_b = batch_var * batch_size
         m2 = m_a + m_b + delta.pow(2) * (self.count * batch_size / new_count)
-        self._var.copy_(m2 / new_count)
+        self._var.copy_(
+            torch.clamp(m2 / new_count, min=self.min_std**2)
+        )
         self._std.copy_(self._var.sqrt())
         self.count.copy_(new_count)
 

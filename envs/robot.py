@@ -9,11 +9,8 @@ from isaaclab.scene import InteractiveScene
 from isaaclab.sim import SimulationContext
 
 from .spec import (
+    G1_AMP_ACTION_SCALE_VALUES,
     G1SceneConfig,
-    G1_MIMIC_ACTION_SCALE_VALUES,
-    PUSH_INTERVAL_STEP_RANGE,
-    STARTUP_BASE_COM_RANGE,
-    STARTUP_JOINT_DEFAULT_POS_RANGE,
 )
 from .robots.g1 import G1_29DOF_ACTION_NAMES, make_g1_cfg
 from .tasks import TaskSpec
@@ -98,9 +95,6 @@ class G1Env:
 
         self.sim.set_camera_view((2.5, 2.5, 1.6), (0.0, 0.0, 0.8))
         self.sim.reset()
-        if cfg.startup_randomization:
-            self._apply_official_startup_events()
-
         action_joint_ids = self.robot.find_joints(G1_29DOF_ACTION_NAMES, preserve_order=True)[0]
         self.action_joint_ids = torch.tensor(action_joint_ids, dtype=torch.long, device=self.sim.device)
 
@@ -110,34 +104,15 @@ class G1Env:
         self.default_action_joint_pos = self.default_joint_pos.index_select(1, self.action_joint_ids)
         self.default_action_joint_vel = self.default_joint_vel.index_select(1, self.action_joint_ids)
         self.action_scale = torch.tensor(
-            G1_MIMIC_ACTION_SCALE_VALUES,
+            G1_AMP_ACTION_SCALE_VALUES,
             dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)
-        # FCAMP explicitly installs its algorithmic command domain after the
-        # policy is built.  Joint-position metadata never defines that domain:
-        # normalized actions are PD target commands, not physical joint poses.
+        # AMP installs normalized [-1,1] bounds after the policy is built.
+        # ``action_scale`` is MimicKit's zero-centered physical joint-target
+        # half range, derived from this repository's URDF.
         self._policy_action_low: torch.Tensor | None = None
         self._policy_action_high: torch.Tensor | None = None
-        self._push_interval_step_range = PUSH_INTERVAL_STEP_RANGE
-        min_push, max_push = self._push_interval_step_range
-        self.next_push_step = torch.randint(
-            min_push,
-            max_push + 1,
-            (self.num_envs,),
-            dtype=torch.long,
-            device=self.device,
-        )
-        # per-env episode-step of the FIRST interval push (-1 = not yet pushed).
-        # Used by validation to decompose the 50-100 cliff into "died before
-        # push" (early collapse) vs "pushed then died" (push-recovery failure).
-        self.first_push_step = torch.full(
-            (self.num_envs,), -1, dtype=torch.long, device=self.device
-        )
-        self._last_interval_push_mask = torch.zeros(
-            self.num_envs, dtype=torch.bool, device=self.device
-        )
-
         self._reset_default_pose()
 
     @property
@@ -157,11 +132,7 @@ class G1Env:
         low: torch.Tensor,
         high: torch.Tensor,
     ) -> None:
-        """Install the policy-owned command domain used by FCAMP.
-
-        This domain is deliberately independent of URDF joint-position limits.
-        The simulator writer maps the command to a PD target without projection.
-        """
+        """Install AMP's normalized environment-clipping interval."""
 
         low = torch.as_tensor(low, device=self.device, dtype=torch.float32)
         high = torch.as_tensor(high, device=self.device, dtype=torch.float32)
@@ -199,43 +170,6 @@ class G1Env:
         joint_pos = self.robot.data.joint_pos.index_select(1, self.action_joint_ids)
         joint_vel = self.robot.data.joint_vel.index_select(1, self.action_joint_ids)
         return joint_pos, joint_vel
-
-    def _apply_official_startup_events(self) -> None:
-        self._randomize_joint_default_pos()
-        self._randomize_torso_com()
-        self._randomize_rigid_body_material()
-
-    def _randomize_joint_default_pos(self) -> None:
-        low, high = STARTUP_JOINT_DEFAULT_POS_RANGE
-        self.robot.data.default_joint_pos += low + (high - low) * torch.rand_like(self.robot.data.default_joint_pos)
-
-    def _randomize_torso_com(self) -> None:
-        torso_id = self.robot.body_names.index("torso_link")
-        env_ids_cpu = torch.arange(self.num_envs, device="cpu")
-        body_ids_cpu = torch.tensor([torso_id], dtype=torch.int, device="cpu")
-        range_tensor = torch.tensor(STARTUP_BASE_COM_RANGE, dtype=torch.float32, device="cpu")
-        rand_samples = (
-            range_tensor[:, 0]
-            + (range_tensor[:, 1] - range_tensor[:, 0])
-            * torch.rand((self.num_envs, 3), device="cpu")
-        ).unsqueeze(1)
-        coms = self.robot.root_physx_view.get_coms().clone()
-        coms[env_ids_cpu[:, None], body_ids_cpu, :3] += rand_samples
-        self.robot.root_physx_view.set_coms(coms, env_ids_cpu)
-
-    def _randomize_rigid_body_material(self) -> None:
-        env_ids_cpu = torch.arange(self.num_envs, device="cpu")
-        total_num_shapes = self.robot.root_physx_view.max_shapes
-        ranges = torch.tensor(
-            ((0.3, 1.6), (0.3, 1.2), (0.0, 0.5)),
-            dtype=torch.float32,
-            device="cpu",
-        )
-        buckets = ranges[:, 0] + (ranges[:, 1] - ranges[:, 0]) * torch.rand((64, 3), device="cpu")
-        bucket_ids = torch.randint(0, 64, (self.num_envs, total_num_shapes), device="cpu")
-        materials = self.robot.root_physx_view.get_material_properties()
-        materials[env_ids_cpu] = buckets[bucket_ids]
-        self.robot.root_physx_view.set_material_properties(materials, env_ids_cpu)
 
     def get_observation(self) -> torch.Tensor:
         joint_pos, joint_vel = self.get_action_joint_state()

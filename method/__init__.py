@@ -1,1 +1,1 @@
-"""FCAMP training method."""
+"""Pure adversarial motion-prior training."""

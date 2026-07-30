@@ -14,6 +14,8 @@ class TaskSpec:
     name: str
     motion_file: Path
     terrain: Terrain
+    contact_termination: bool
+    allowed_contact_bodies: tuple[str, ...]
 
 
 TASKS = {
@@ -21,6 +23,9 @@ TASKS = {
         name="crawl_slope",
         motion_file=PROJECT_ROOT / "assets" / "motions" / "g1_crawl" / "motion_crawl_slope.npz",
         terrain="slope",
+        # Standard AMP disables contact termination for roll/crawl motions.
+        contact_termination=False,
+        allowed_contact_bodies=(),
     ),
     "largebox_plane": TaskSpec(
         name="largebox_plane",
@@ -37,6 +42,15 @@ TASKS = {
             / "sub3_largebox_003_mj.npz"
         ),
         terrain="plane",
+        contact_termination=True,
+        allowed_contact_bodies=(
+            "left_knee_link",
+            "left_ankle_pitch_link",
+            "left_ankle_roll_link",
+            "right_knee_link",
+            "right_ankle_pitch_link",
+            "right_ankle_roll_link",
+        ),
     ),
 }
 

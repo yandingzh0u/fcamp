@@ -1,6 +1,64 @@
 from __future__ import annotations
 
+import math
+import re
+
 from .validation import short_body_name
+
+
+_MIN_LOGGED_HORIZON = 4
+_MISSING_METRIC_SENTINEL = -1.0
+_OFFSET_TRACKING_NAMES = (
+    "joint_pos_error",
+    "joint_vel_error",
+    "root_ang_vel_error",
+)
+_OFFSET_STATISTICS = ("count", "mean", "p95", "p99")
+
+
+def _finite_metric(
+    metrics: dict[str, float],
+    key: str,
+    default: float = _MISSING_METRIC_SENTINEL,
+) -> float:
+    try:
+        value = float(metrics.get(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+    return value if math.isfinite(value) else float(default)
+
+
+def _validation_log_offsets(
+    prefix: str,
+    metrics: dict[str, float],
+) -> range:
+    pattern = re.compile(rf"^{re.escape(prefix)}/chunk_offset(\d+)_")
+    present = {
+        int(match.group(1))
+        for key in metrics
+        if (match := pattern.match(key)) is not None
+    }
+    real_slots = max(present) + 1 if present else 0
+    return range(max(_MIN_LOGGED_HORIZON, real_slots))
+
+
+def _ensure_validation_offset_metrics(
+    prefix: str,
+    metrics: dict[str, float],
+) -> range:
+    """Keep H0-H3 visible in short-horizon logs and include every real offset."""
+
+    offsets = _validation_log_offsets(prefix, metrics)
+    for offset in offsets:
+        for name in _OFFSET_TRACKING_NAMES:
+            for statistic in _OFFSET_STATISTICS:
+                metrics.setdefault(
+                    f"{prefix}/chunk_offset{offset}_{name}_{statistic}",
+                    0.0
+                    if statistic == "count"
+                    else _MISSING_METRIC_SENTINEL,
+                )
+    return offsets
 
 
 def log_validation_metrics(env, metrics: dict[str, float]) -> None:
@@ -13,6 +71,7 @@ def log_validation_metrics(env, metrics: dict[str, float]) -> None:
 
 
 def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float]) -> None:
+    logged_offsets = _ensure_validation_offset_metrics(prefix, metrics)
     print(
         f"[{label}] steps_mean={metrics[f'{prefix}/steps_mean']:.2f} "
         f"steps_min={metrics.get(f'{prefix}/steps_min', float('nan')):.0f} "
@@ -25,6 +84,10 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
     )
     print(
         f"[{label}_CAUSE] "
+        f"physical_failure={metrics.get(f'{prefix}/physical_failure_frac', float('nan')):.5f} "
+        f"illegal_contact={metrics.get(f'{prefix}/illegal_contact_frac', float('nan')):.5f} "
+        f"numerical_failure={metrics.get(f'{prefix}/numerical_failure_frac', float('nan')):.5f} "
+        f"tracking_cf={metrics.get(f'{prefix}/tracking_failure_counterfactual_frac', float('nan')):.5f} "
         f"anchor_pos_bad={metrics.get(f'{prefix}/anchor_pos_bad_frac', float('nan')):.5f} "
         f"anchor_ori_bad={metrics.get(f'{prefix}/anchor_ori_bad_frac', float('nan')):.5f} "
         f"ee_body_bad={metrics.get(f'{prefix}/ee_body_bad_frac', float('nan')):.5f} "
@@ -50,6 +113,10 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
     )
     print(
         f"[{label}_FAIL] "
+        f"contact_force_max="
+        f"{metrics.get(f'{prefix}/physical_failure_contact_force_max_mean', float('nan')):.5f} "
+        f"illegal_contact_bodies="
+        f"{metrics.get(f'{prefix}/physical_failure_illegal_contact_body_count_mean', float('nan')):.3f} "
         f"act_abs={metrics.get(f'{prefix}/fail_action_abs', float('nan')):.5f} "
         f"act_max={metrics.get(f'{prefix}/fail_action_max', float('nan')):.5f} "
         f"root_pos={metrics.get(f'{prefix}/fail_root_pos_err', float('nan')):.5f} "
@@ -67,7 +134,11 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
     print(
         f"[{label}_OUTCOME] "
         f"failure={metrics.get(f'{prefix}/failure_frac', float('nan')):.4f} "
+        f"physical_failure={metrics.get(f'{prefix}/physical_failure_frac', float('nan')):.4f} "
+        f"illegal_contact={metrics.get(f'{prefix}/illegal_contact_frac', float('nan')):.4f} "
+        f"numerical_failure={metrics.get(f'{prefix}/numerical_failure_frac', float('nan')):.4f} "
         f"motion_complete={metrics.get(f'{prefix}/motion_complete_frac', float('nan')):.4f} "
+        f"reference_end={metrics.get(f'{prefix}/reference_motion_end_reached_frac', float('nan')):.4f} "
         f"time_out={metrics.get(f'{prefix}/time_out_frac', float('nan')):.4f} "
         f"steps_p50={metrics.get(f'{prefix}/steps_p50', float('nan')):.0f}",
         flush=True,
@@ -76,6 +147,9 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
         f"[{label}_PHASE] "
         f"failure_p50={metrics.get(f'{prefix}/terminal/failure/phase_p50', float('nan')):.1f} "
         f"failure_p95={metrics.get(f'{prefix}/terminal/failure/phase_p95', float('nan')):.1f} "
+        f"physical_p50={metrics.get(f'{prefix}/terminal/physical_failure/phase_p50', float('nan')):.1f} "
+        f"illegal_contact_p50={metrics.get(f'{prefix}/terminal/illegal_contact/phase_p50', float('nan')):.1f} "
+        f"numerical_p50={metrics.get(f'{prefix}/terminal/numerical_failure/phase_p50', float('nan')):.1f} "
         f"anchor_pos_p50={metrics.get(f'{prefix}/terminal/anchor_pos_bad/phase_p50', float('nan')):.1f} "
         f"anchor_ori_p50={metrics.get(f'{prefix}/terminal/anchor_ori_bad/phase_p50', float('nan')):.1f} "
         f"ee_body_p50={metrics.get(f'{prefix}/terminal/ee_body_bad/phase_p50', float('nan')):.1f} "
@@ -154,15 +228,15 @@ def _log_validation_block(env, label: str, prefix: str, metrics: dict[str, float
         f"root_ang_vel_error={metrics.get(f'{prefix}/chunk_root_ang_vel_error_reset_first_mean', float('nan')):.6f}",
         flush=True,
     )
-    for offset in range(4):
+    for offset in logged_offsets:
         print(
             f"[{label}_OFFSET{offset}] "
-            f"joint_pos={metrics.get(f'{prefix}/chunk_offset{offset}_joint_pos_error_mean', float('nan')):.6f} "
-            f"joint_pos_p95={metrics.get(f'{prefix}/chunk_offset{offset}_joint_pos_error_p95', float('nan')):.6f} "
-            f"joint_vel={metrics.get(f'{prefix}/chunk_offset{offset}_joint_vel_error_mean', float('nan')):.6f} "
-            f"joint_vel_p95={metrics.get(f'{prefix}/chunk_offset{offset}_joint_vel_error_p95', float('nan')):.6f} "
-            f"root_ang_vel={metrics.get(f'{prefix}/chunk_offset{offset}_root_ang_vel_error_mean', float('nan')):.6f} "
-            f"root_ang_vel_p95={metrics.get(f'{prefix}/chunk_offset{offset}_root_ang_vel_error_p95', float('nan')):.6f} "
-            f"count={metrics.get(f'{prefix}/chunk_offset{offset}_joint_pos_error_count', 0.0):.0f}",
+            f"joint_pos={_finite_metric(metrics, f'{prefix}/chunk_offset{offset}_joint_pos_error_mean'):.6f} "
+            f"joint_pos_p95={_finite_metric(metrics, f'{prefix}/chunk_offset{offset}_joint_pos_error_p95'):.6f} "
+            f"joint_vel={_finite_metric(metrics, f'{prefix}/chunk_offset{offset}_joint_vel_error_mean'):.6f} "
+            f"joint_vel_p95={_finite_metric(metrics, f'{prefix}/chunk_offset{offset}_joint_vel_error_p95'):.6f} "
+            f"root_ang_vel={_finite_metric(metrics, f'{prefix}/chunk_offset{offset}_root_ang_vel_error_mean'):.6f} "
+            f"root_ang_vel_p95={_finite_metric(metrics, f'{prefix}/chunk_offset{offset}_root_ang_vel_error_p95'):.6f} "
+            f"count={_finite_metric(metrics, f'{prefix}/chunk_offset{offset}_joint_pos_error_count', 0.0):.0f}",
             flush=True,
         )

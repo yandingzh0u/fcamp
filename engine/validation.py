@@ -15,20 +15,45 @@ from .env_state import restore_env_state, snapshot_env_state
 from .validation_metrics import ChunkBoundaryDiagnostics, terminal_phase_metrics
 
 
-def classify_mimickit_done_terms(
+def standard_amp_action_target(
+    normalized_action: torch.Tensor,
+    action_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Map MimicKit's normalized absolute action directly to a PD target."""
+
+    return action_scale * torch.clamp(normalized_action, -1.0, 1.0)
+
+
+def _done_term(
+    done: torch.Tensor,
+    done_terms: dict[str, torch.Tensor],
+    name: str,
+) -> torch.Tensor:
+    value = done_terms.get(name)
+    if value is None:
+        return torch.zeros_like(done, dtype=torch.bool)
+    return value.to(device=done.device, dtype=torch.bool)
+
+
+def classify_amp_done_terms(
     done: torch.Tensor,
     done_terms: dict[str, torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Apply MimicKit's TIME -> SUCC -> FAIL overwrite precedence."""
+    """Classify standard-AMP terminals without treating reference time as success.
 
+    Reference motion completion and pose errors are deliberately absent here:
+    they are counterfactual diagnostics for an unconditional policy, not MDP
+    terminal conditions.  A physical/numerical failure wins over timeout when
+    both flags happen on the same transition.
+    """
     done = done.bool()
     failure = done & (
-        done_terms["anchor_pos_bad"].bool()
-        | done_terms["anchor_ori_bad"].bool()
-        | done_terms["ee_body_bad"].bool()
+        _done_term(done, done_terms, "physical_failure")
+        | _done_term(done, done_terms, "illegal_contact")
+        | _done_term(done, done_terms, "numerical_failure")
     )
-    motion_complete = done & done_terms["motion_complete"].bool() & ~failure
-    timeout = done & done_terms["time_out"].bool() & ~motion_complete & ~failure
+    timeout = done & _done_term(done, done_terms, "time_out") & ~failure
+    motion_complete = torch.zeros_like(done)
     return timeout, motion_complete, failure
 
 
@@ -64,7 +89,7 @@ def _reset_alignment_metrics(env, prefix: str) -> dict[str, float]:
     body_pos_top_idx = int(torch.argmax(body_pos_err_mean_by_body).item())
     body_ori_top_idx = int(torch.argmax(body_ori_deg_mean_by_body).item())
     joint_pos, joint_vel = env.get_action_joint_state()
-    # FCAMP writes and discriminates root-link velocity. Read the same frame so
+    # AMP writes and discriminates root-link velocity. Read the same frame so
     # the reset diagnostic cannot become a COM-vs-link comparison artifact.
     root_velocity = env.get_mimic_root_velocity_w(velocity_frame="link")
     root_ori_deg = (
@@ -122,17 +147,12 @@ def run_validation_rollout(
     env_device = torch.device(env.device)
     cpu_rng_state = torch.random.get_rng_state()
     cuda_rng_state = None
-    original_reset_noise = env.reset_noise
-    original_interval_pushes = env.interval_pushes
-    env.reset_noise = False
-    env.interval_pushes = False
-
-    original_record_failures = env.record_motion_failures
-    env.record_motion_failures = False
 
     original_max_episode_steps = env.max_episode_steps
     max_steps = validation_max_steps(tcfg, env)
-    env.max_episode_steps = env.full_motion_control_steps() + 1
+    # Validation is bounded by its own protocol, not by the demonstration's
+    # final frame.  Motion end is deliberately nonterminal in pure AMP.
+    env.max_episode_steps = max_steps
     if torch.cuda.is_available() and env_device.type == "cuda":
         cuda_rng_state = torch.cuda.get_rng_state(env_device)
     if fixed_seed is not None:
@@ -185,6 +205,10 @@ def run_validation_rollout(
         "anchor_pos_bad",
         "anchor_ori_bad",
         "ee_body_bad",
+        "tracking_failure",
+        "illegal_contact",
+        "numerical_failure",
+        "physical_failure",
     ]
     done_term_record = {
         name: torch.zeros(num_envs, dtype=torch.bool, device=env.device)
@@ -192,8 +216,28 @@ def run_validation_rollout(
     }
     done_debug_record = {
         name: torch.zeros(num_envs, device=env.device)
-        for name in ("ee_z_error_max", "ee_z_error_mean", "anchor_z_error", "anchor_gravity_z_error")
+        for name in (
+            "ee_z_error_max",
+            "ee_z_error_mean",
+            "anchor_z_error",
+            "anchor_gravity_z_error",
+            "contact_force_max",
+            "illegal_contact_body_count",
+        )
     }
+    tracking_counterfactual_ever = torch.zeros(
+        num_envs, dtype=torch.bool, device=env.device
+    )
+    anchor_pos_bad_counterfactual_ever = torch.zeros_like(
+        tracking_counterfactual_ever
+    )
+    anchor_ori_bad_counterfactual_ever = torch.zeros_like(
+        tracking_counterfactual_ever
+    )
+    ee_body_bad_counterfactual_ever = torch.zeros_like(
+        tracking_counterfactual_ever
+    )
+    reference_motion_end_ever = torch.zeros_like(tracking_counterfactual_ever)
     ee_body_count = len(env.ee_body_names)
     done_ee_z_error_record = torch.zeros(num_envs, ee_body_count, device=env.device)
     done_ee_bad_record = torch.zeros(num_envs, ee_body_count, dtype=torch.bool, device=env.device)
@@ -231,9 +275,25 @@ def run_validation_rollout(
                     action = torch.where(done.unsqueeze(-1), torch.zeros_like(action), action)
                 chunk_index += 1
                 active_mask = ~done
-                action_target = env.default_action_joint_pos + env.action_scale * torch.clamp(action, -100.0, 100.0)
+                action_target = standard_amp_action_target(action, env.action_scale)
 
                 current_obs, step_done, info = algo.evaluation_step(action)
+                step_done_terms = info["done_terms"]
+                tracking_counterfactual_ever |= active_mask & _done_term(
+                    active_mask, step_done_terms, "tracking_failure"
+                )
+                anchor_pos_bad_counterfactual_ever |= active_mask & _done_term(
+                    active_mask, step_done_terms, "anchor_pos_bad"
+                )
+                anchor_ori_bad_counterfactual_ever |= active_mask & _done_term(
+                    active_mask, step_done_terms, "anchor_ori_bad"
+                )
+                ee_body_bad_counterfactual_ever |= active_mask & _done_term(
+                    active_mask, step_done_terms, "ee_body_bad"
+                )
+                reference_motion_end_ever |= active_mask & _done_term(
+                    active_mask, step_done_terms, "motion_complete"
+                )
                 reference_post = env.motion.get_frame(info["reference_phase_steps"])
                 robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
                 robot_root_ang_vel = env.get_mimic_root_velocity_w()[:, 3:]
@@ -260,13 +320,23 @@ def run_validation_rollout(
                     num_frames=env.motion.num_frames,
                 )
                 demo_imitation_frame = env.motion.get_imitation_frame_at_times(metric_phases)
-                # Terminal post-action states are excluded. Every legal window
-                # therefore contains W consecutive states that remained alive,
-                # in range, and on the same unwrapped motion trajectory.
+                # Terminal states and the clamped post-demonstration tail are
+                # excluded.  The latter is critical: pure AMP keeps running
+                # after motion end, but phase-matched MMD must not compare that
+                # continuation against infinitely repeated final demo frames.
                 motion_metric.update_selected(
                     policy_imitation_frame,
                     demo_imitation_frame,
-                    (active_mask & ~step_done).index_select(0, metric_env_ids) & phase_valid,
+                    (
+                        active_mask
+                        & ~step_done
+                        & ~_done_term(
+                            active_mask,
+                            step_done_terms,
+                            "motion_complete",
+                        )
+                    ).index_select(0, metric_env_ids)
+                    & phase_valid,
                     metric_phases,
                 )
                 latest_phase_steps = info["termination_phase_steps"].float().clone()
@@ -292,7 +362,9 @@ def run_validation_rollout(
                         if name in done_terms:
                             done_term_record[name][new_done] = done_terms[name][new_done]
                     for name in done_debug_record:
-                        done_debug_record[name][new_done] = debug_terms[name][new_done]
+                        done_debug_record[name][new_done] = debug_terms[name][
+                            new_done
+                        ].to(dtype=done_debug_record[name].dtype)
                     ee_z_error_by_body = debug_terms["ee_z_error_by_body"][new_done]
                     done_ee_z_error_record[new_done] = ee_z_error_by_body
                     done_ee_bad_record[new_done] = ee_z_error_by_body > EE_Z_TERMINATION_THRESHOLD
@@ -348,12 +420,8 @@ def run_validation_rollout(
                     )
                 if bool(done.all()):
                     break
-        validation_first_push_step = env.first_push_step.clone()
         final_phase_record = torch.where(done, death_phase_record, latest_phase_steps)
     finally:
-        env.reset_noise = original_reset_noise
-        env.interval_pushes = original_interval_pushes
-        env.record_motion_failures = original_record_failures
         env.max_episode_steps = original_max_episode_steps
         restore_env_state(env, training_snapshot)
         algo.restore_runtime_state(algorithm_snapshot)
@@ -392,15 +460,36 @@ def run_validation_rollout(
     metrics.update(motion_metric.metrics())
     metrics.update(chunk_diagnostics.metrics())
     metrics.update(reset_metrics)
-    timeout, motion_complete, failure = classify_mimickit_done_terms(done, done_term_record)
+    timeout, motion_complete, failure = classify_amp_done_terms(done, done_term_record)
+    illegal_contact = done & done_term_record["illegal_contact"]
+    numerical_failure = done & done_term_record["numerical_failure"]
+    physical_failure = done & done_term_record["physical_failure"]
     metrics.update({
         "validation/time_out_frac": float(timeout.float().mean().item()),
         "validation/motion_complete_frac": float(motion_complete.float().mean().item()),
         "validation/failure_frac": float(failure.float().mean().item()),
+        "validation/physical_failure_frac": float(physical_failure.float().mean().item()),
+        "validation/illegal_contact_frac": float(illegal_contact.float().mean().item()),
+        "validation/numerical_failure_frac": float(numerical_failure.float().mean().item()),
         "validation/censored_frac": float((~done).float().mean().item()),
         "validation/anchor_pos_bad_frac": float(done_term_record["anchor_pos_bad"].float().mean().item()),
         "validation/anchor_ori_bad_frac": float(done_term_record["anchor_ori_bad"].float().mean().item()),
         "validation/ee_body_bad_frac": float(done_term_record["ee_body_bad"].float().mean().item()),
+        "validation/tracking_failure_counterfactual_frac": float(
+            tracking_counterfactual_ever.float().mean().item()
+        ),
+        "validation/anchor_pos_bad_counterfactual_frac": float(
+            anchor_pos_bad_counterfactual_ever.float().mean().item()
+        ),
+        "validation/anchor_ori_bad_counterfactual_frac": float(
+            anchor_ori_bad_counterfactual_ever.float().mean().item()
+        ),
+        "validation/ee_body_bad_counterfactual_frac": float(
+            ee_body_bad_counterfactual_ever.float().mean().item()
+        ),
+        "validation/reference_motion_end_reached_frac": float(
+            reference_motion_end_ever.float().mean().item()
+        ),
     })
     outcome_masks = {
         "failure": failure,
@@ -410,6 +499,9 @@ def run_validation_rollout(
     cause_masks = {
         name: done_term_record[name]
         for name in (
+            "physical_failure",
+            "illegal_contact",
+            "numerical_failure",
             "anchor_pos_bad",
             "anchor_ori_bad",
             "ee_body_bad",
@@ -428,16 +520,22 @@ def run_validation_rollout(
         )
     if "pose_fail" in done_term_record:
         metrics["validation/pose_fail_frac"] = float(done_term_record["pose_fail"].float().mean().item())
-    _pushed = validation_first_push_step >= 0
-    _died = failure
-    metrics["validation/push_applied_frac"] = float(_pushed.float().mean().item())
-    metrics["validation/died_before_push_frac"] = float((_died & ~_pushed).float().mean().item())
-    metrics["validation/pushed_then_died_frac"] = float((_died & _pushed).float().mean().item())
-    _pushed_steps = validation_first_push_step[_pushed]
-    metrics["validation/first_push_step_count"] = float(_pushed_steps.numel())
-    metrics["validation/first_push_step_mean"] = (
-        float(_pushed_steps.float().mean().item()) if _pushed_steps.numel() > 0 else -1.0
-    )
+    if bool(done.any()):
+        metrics["validation/terminal_contact_force_max_mean"] = float(
+            done_debug_record["contact_force_max"][done].mean().item()
+        )
+        metrics["validation/terminal_illegal_contact_body_count_mean"] = float(
+            done_debug_record["illegal_contact_body_count"][done].mean().item()
+        )
+    if bool(physical_failure.any()):
+        metrics["validation/physical_failure_contact_force_max_mean"] = float(
+            done_debug_record["contact_force_max"][physical_failure].mean().item()
+        )
+        metrics["validation/physical_failure_illegal_contact_body_count_mean"] = float(
+            done_debug_record["illegal_contact_body_count"][physical_failure]
+            .mean()
+            .item()
+        )
     if bool((action_ref_steps > 0).any()):
         safe_action_steps = action_ref_steps.clamp(min=1.0)
         metrics["validation/action_target_ref_now_abs"] = float(

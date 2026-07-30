@@ -21,15 +21,6 @@ _RESUME_ENV_KEYS = (
     "max_episode_steps",
     "motion_start_phase",
     "motion_end_phase",
-    "reset_phase_sampling",
-    "rsi_keyframe_count",
-    "startup_randomization",
-    "reset_noise",
-    "interval_pushes",
-    "adaptive_num_bins",
-    "adaptive_alpha",
-    "adaptive_predecessor_ratio",
-    "adaptive_predecessor_lookback_bins",
     "root_velocity_mode",
 )
 
@@ -108,14 +99,13 @@ class Checkpointer:
             "train_wall_seconds_total": float(t.train_wall_seconds_total),
             "platform_identity": self.platform_identity,
         }
-        payload["adaptive_sampler_state"] = t.env.adaptive_sampler.state_dict()
         payload["torch_rng_state"] = torch.random.get_rng_state()
         if torch.device(t.env.device).type == "cuda":
             payload["cuda_rng_state"] = torch.cuda.get_rng_state(t.env.device)
         step_path = t.checkpoint_dir / (filename if filename is not None else f"update_{update_idx:04d}.pt")
         torch.save(payload, step_path)
         if filename is None:
-            # Replay-complete FC-AMP checkpoints can exceed 1 GiB. Keep last.pt
+            # Replay-complete AMP checkpoints can exceed 1 GiB. Keep last.pt
             # as a hard link instead of serializing the same payload twice.
             last_path = t.checkpoint_dir / "last.pt"
             last_path.unlink(missing_ok=True)
@@ -147,15 +137,14 @@ class Checkpointer:
                     "start a fresh run instead of crossing dataset/platform/recipe profiles."
                 )
         saved_platform_identity = payload.get("platform_identity")
-        if saved_platform_identity is not None and self.platform_identity is not None:
-            if saved_platform_identity != self.platform_identity:
-                raise ValueError(
-                    "Checkpoint dataset/robot/action schema does not match the current platform."
-                )
-        else:
-            print(
-                "[CHECKPOINT] WARN: legacy checkpoint has no dataset/robot/action-schema hashes.",
-                flush=True,
+        if saved_platform_identity is None or self.platform_identity is None:
+            raise ValueError(
+                "Checkpoint is missing the required dataset/robot/action-schema "
+                "identity; start a fresh AMP run."
+            )
+        if saved_platform_identity != self.platform_identity:
+            raise ValueError(
+                "Checkpoint dataset/robot/action schema does not match the current platform."
             )
         t.algo.policy.load_state_dict(payload["policy"])
         reset_optimizer = bool(t.train_cfg.reset_optimizer_on_resume)
@@ -167,17 +156,6 @@ class Checkpointer:
             raise KeyError(f"Checkpoint {checkpoint_path} has no optimizer state.")
 
         t.algo.load_extra_checkpoint_state(payload.get("algo_state", {}), reset_optimizer=reset_optimizer)
-
-
-        reset_sampler = bool(t.train_cfg.reset_sampler_on_resume)
-        if reset_sampler:
-            t.env.adaptive_sampler.init_buffers()
-            t.env._failure_recorded.zero_()
-            print("[CHECKPOINT] adaptive sampler reset by request; starting fresh.", flush=True)
-        elif t.env.adaptive_sampler.load_state_dict(payload.get("adaptive_sampler_state")):
-            print("[CHECKPOINT] restored adaptive sampler state.", flush=True)
-        else:
-            print("[CHECKPOINT] adaptive sampler state absent/incompatible; starting fresh.", flush=True)
 
         try:
             if "torch_rng_state" in payload:

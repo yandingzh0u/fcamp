@@ -1,0 +1,619 @@
+[RUN] dir=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/amp_h1_official_userassets_u500_s0_20260730_1339
+[RUN] log_file=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/amp_h1_official_userassets_u500_s0_20260730_1339/logs/train.log
+[RUN] method=amp task=largebox_plane seed=0
+[RUN] resolved_config_sha256=dd47cbeb0300f9b6cd3e1394d69062d94de25052a655721ab39f135eca60c1e3
+[RUN] source_snapshot_sha256=0869d5b8bf286b0fcf79f677dd61780734a51810eea037a9a42cbe5562117d5e
+[RUN_ASSET] kind=robot origin=user_local path=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/assets/robots/holosoma_g1/g1_29dof.urdf sha256=7fad8847061eac142dca45825a65e2f61bf08b996b6dadf7a89eb0f69d585b21
+[RUN_ASSET] kind=motion origin=user_local path=/home/y/my_mimic_mixgrpo/holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj.npz sha256=296303f225a70013e719be9e594d1f528366df405753422a59bbea12deb392bf
+[INFO] IsaacLab logging to file: /tmp/isaaclab_2026-07-30_13-38-42.log
+[METRICS] jsonl=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/amp_h1_official_userassets_u500_s0_20260730_1339/logs/metrics.jsonl tensorboard=True
+[METHOD] name=amp actor=direct_absolute_fixed_gaussian prior=unconditional_temporal_discriminator reward=pure_amp critic=scalar_state_value
+[ASSETS] origin=user_local robot_urdf=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/assets/robots/holosoma_g1/g1_29dof.urdf motion=/home/y/my_mimic_mixgrpo/holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj.npz motion_frames=325 motion_fps=50.0
+[AMP_DOMAIN_PARITY] full_rms=7.705e-07 full_max=2.611e-05 key_rms=3.042e-06 root_lin_rms=4.296e-09 root_ang_rms=0.000e+00 joint_vel_rms=0.000e+00 tolerance=1.0e-04 pass=1
+[ARCH] actor_obs=237 actor_input=self_state_only phase=False target=False reference=False last_action=False action_dim=29 H=1 W_D=10 frame=239 window=2390
+[CREDIT] reward=immediate_old_discriminator reward_source=pure_amp_only dt_scale=False ratio=executed_chunk_joint_gaussian gae=variable_duration_semi_mdp
+[STYLE_PRIOR] hidden=[1024, 512] GP=10.0 replay=200000 conditioning=none history=demo_predecessor_seeded expert_sampling=independent_uniform_full_motion
+[AMP_CONTRACT] schema=5 action=normalized_absolute_direct_h_configurable_v1 observation=g1_self_state_official_field_order_v3 exploration=fixed_diagonal_gaussian_std_0p05_v1 reset=uniform_continuous_pose_slerp_velocity_left_frame_v3 replay=single_global_circular_capacity_permutation_v2
+[INFO] checkpoint_dir=/home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/amp_h1_official_userassets_u500_s0_20260730_1339/checkpoints
+[UPDATE] 10/500 amp=0.47685 done=0.02881 ep_len=33.86
+[AMP_POLICY] loss=-0.00992 bound=0.00000 kl=0.007772 ratio=1.0001 clip=0.1005 grad=3.8834 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05001 noise_h=0.05001/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.007772/-1.000000/-1.000000/-1.000000 clip=0.1005/-1.0000/-1.0000/-1.0000 ratio=1.0001/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.003/164.55/323.801 count=3776
+[AMP_CREDIT] raw=0.47685 chunk=0.47685 adv=-0.08830/0.78957 actor_adv=-0.00018/0.99381 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=0.59642 V=5.3052 target=5.3680 rmse=0.7591 ev=0.9680 grad=1.6839
+[DISCRIMINATOR] train_loss=5.78404 train_bce=0.22590 gp=0.41374 post_accE=1.0000 post_accC=0.9377 post_accR=0.9266 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.9375 accR=0.9267 logitE=1.4689 logitC=-1.5910 logitR=-1.6033
+[DISC_DOMAINS] post_logitC=-1.6050 post_logitR=-1.6166 post_logitE=1.4754 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=33.1/184.6/324.0 expert=16.3/162.4/307.5 current_expert_tv=0.15477
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07146 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.028809 timeout=0.000000 illegal_contact=0.028809 numerical=0.000000 tracking_cf=0.391747 reference_end_occupancy=0.065590
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=4.997s actor=0.486s critic=0.114s disc=11.612s gpu_peak=1.60GiB
+[TRAIN_RESET] count=3776 first_frame_bin_fraction=0.0032 p50=165.0 p95=308.0
+[PROGRESS] env_steps=1310720 iteration=18.922s throughput=6927.0
+[UPDATE] 20/500 amp=0.45950 done=0.02732 ep_len=37.22
+[AMP_POLICY] loss=-0.01026 bound=0.00000 kl=0.008550 ratio=0.9996 clip=0.1135 grad=4.2104 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05000 noise_h=0.05000/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.008550/-1.000000/-1.000000/-1.000000 clip=0.1135/-1.0000/-1.0000/-1.0000 ratio=0.9996/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.017/160.76/323.791 count=3581
+[AMP_CREDIT] raw=0.45950 chunk=0.45950 adv=-0.03904/0.69539 actor_adv=-0.00144/0.99100 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=0.47498 V=5.2329 target=5.2389 rmse=0.6828 ev=0.9727 grad=0.8801
+[DISCRIMINATOR] train_loss=4.03639 train_bce=0.21052 gp=0.25496 post_accE=1.0000 post_accC=0.9359 post_accR=0.9323 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.9360 accR=0.9312 logitE=1.5373 logitC=-1.6550 logitR=-1.8212
+[DISC_DOMAINS] post_logitC=-1.6668 post_logitR=-1.8372 post_logitE=1.5421 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=34.4/185.4/324.0 expert=16.0/161.7/307.8 current_expert_tv=0.14127
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07156 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.027321 timeout=0.000000 illegal_contact=0.027321 numerical=0.000000 tracking_cf=0.382660 reference_end_occupancy=0.066048
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=4.948s actor=0.483s critic=0.115s disc=11.508s gpu_peak=1.60GiB
+[TRAIN_RESET] count=3581 first_frame_bin_fraction=0.0042 p50=160.0 p95=307.0
+[PROGRESS] env_steps=2621440 iteration=18.751s throughput=6990.2
+[UPDATE] 30/500 amp=0.47202 done=0.02541 ep_len=38.85
+[AMP_POLICY] loss=-0.01140 bound=0.00000 kl=0.009155 ratio=0.9996 clip=0.1228 grad=4.3977 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05001 noise_h=0.05001/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.009155/-1.000000/-1.000000/-1.000000 clip=0.1228/-1.0000/-1.0000/-1.0000 ratio=0.9996/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.137/160.69/323.962 count=3330
+[AMP_CREDIT] raw=0.47202 chunk=0.47202 adv=0.00095/0.77809 actor_adv=-0.00062/0.98831 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=0.59033 V=5.6996 target=5.6971 rmse=0.7591 ev=0.9728 grad=1.0897
+[DISCRIMINATOR] train_loss=3.20039 train_bce=0.20746 gp=0.18223 post_accE=1.0000 post_accC=0.9349 post_accR=0.9377 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.9346 accR=0.9374 logitE=1.5603 logitC=-1.6186 logitR=-1.9411
+[DISC_DOMAINS] post_logitC=-1.6292 post_logitR=-1.9592 post_logitE=1.5634 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=36.8/187.4/324.0 expert=16.1/161.8/307.9 current_expert_tv=0.14372
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07186 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.025406 timeout=0.000000 illegal_contact=0.025406 numerical=0.000000 tracking_cf=0.365318 reference_end_occupancy=0.064468
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=4.978s actor=0.486s critic=0.114s disc=11.529s gpu_peak=1.60GiB
+[TRAIN_RESET] count=3330 first_frame_bin_fraction=0.0027 p50=161.0 p95=305.0
+[PROGRESS] env_steps=3932160 iteration=18.900s throughput=6935.0
+[UPDATE] 40/500 amp=0.49632 done=0.02438 ep_len=42.30
+[AMP_POLICY] loss=-0.01216 bound=0.00000 kl=0.009252 ratio=1.0001 clip=0.1239 grad=4.5373 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.04998 noise_h=0.04998/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.009252/-1.000000/-1.000000/-1.000000 clip=0.1239/-1.0000/-1.0000/-1.0000 ratio=1.0001/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.432/165.12/323.782 count=3195
+[AMP_CREDIT] raw=0.49632 chunk=0.49632 adv=0.02770/0.79496 actor_adv=-0.00009/0.98263 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=0.61488 V=6.0690 target=6.0913 rmse=0.7742 ev=0.9758 grad=1.2272
+[DISCRIMINATOR] train_loss=2.69433 train_bce=0.20774 gp=0.13996 post_accE=1.0000 post_accC=0.9301 post_accR=0.9408 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.9299 accR=0.9402 logitE=1.5695 logitC=-1.5607 logitR=-2.0181
+[DISC_DOMAINS] post_logitC=-1.5710 post_logitR=-2.0297 post_logitE=1.5718 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=38.0/189.8/324.0 expert=16.3/161.7/307.6 current_expert_tv=0.13254
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07214 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.024376 timeout=0.000000 illegal_contact=0.024376 numerical=0.000000 tracking_cf=0.362694 reference_end_occupancy=0.075844
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=4.995s actor=0.489s critic=0.114s disc=11.551s gpu_peak=1.60GiB
+[TRAIN_RESET] count=3195 first_frame_bin_fraction=0.0013 p50=166.0 p95=309.0
+[PROGRESS] env_steps=5242880 iteration=18.923s throughput=6926.5
+[UPDATE] 50/500 amp=0.53962 done=0.02314 ep_len=43.40
+[AMP_POLICY] loss=-0.01132 bound=0.00000 kl=0.009541 ratio=0.9997 clip=0.1302 grad=4.6768 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.04999 noise_h=0.04999/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.009541/-1.000000/-1.000000/-1.000000 clip=0.1302/-1.0000/-1.0000/-1.0000 ratio=0.9997/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.045/157.58/323.879 count=3033
+[AMP_CREDIT] raw=0.53962 chunk=0.53962 adv=0.00883/0.83968 actor_adv=-0.00092/0.97100 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=0.68049 V=6.8440 target=6.8651 rmse=0.8123 ev=0.9784 grad=1.4509
+[DISCRIMINATOR] train_loss=2.39581 train_bce=0.21170 gp=0.11684 post_accE=1.0000 post_accC=0.9242 post_accR=0.9458 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.9243 accR=0.9455 logitE=1.5663 logitC=-1.4400 logitR=-2.0820
+[DISC_DOMAINS] post_logitC=-1.4524 post_logitR=-2.0990 post_logitE=1.5686 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=36.6/187.0/324.0 expert=16.2/162.5/307.6 current_expert_tv=0.11414
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07257 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.023140 timeout=0.000000 illegal_contact=0.023140 numerical=0.000000 tracking_cf=0.367485 reference_end_occupancy=0.070946
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=4.967s actor=0.489s critic=0.114s disc=11.524s gpu_peak=1.60GiB
+[TRAIN_RESET] count=3033 first_frame_bin_fraction=0.0023 p50=155.0 p95=306.0
+[PROGRESS] env_steps=6553600 iteration=18.872s throughput=6945.2
+[VALIDATION_START] update=50 max_steps=500 envs=4096 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.016s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.111s
+[VALIDATION_PROGRESS] step=50/500 done=0.99487 alive=0.00513 elapsed=4.686s
+[VALIDATION_PROGRESS] step=68/500 done=1.00000 alive=0.00000 elapsed=6.499s
+[VALIDATION_DONE] update=50 time=6.856s
+[VAL] steps_mean=45.17 steps_min=24 steps_p50=45 steps_p95=46 steps_max=68 fail_phase_mean=45.2 done=1.00000
+[VAL_CAUSE] physical_failure=1.00000 illegal_contact=1.00000 numerical_failure=0.00000 tracking_cf=1.00000 anchor_pos_bad=0.00000 anchor_ori_bad=0.00000 ee_body_bad=0.00220 pose_fail=nan time_out=0.00000 anchor_z=0.15043 anchor_grav=0.17858 ee_z_max=0.09308 ee_z_mean=0.04696
+[VAL_FAIL] contact_force_max=1325.63440 illegal_contact_bodies=1.607 act_abs=0.02109 act_max=0.06037 root_pos=0.87537 root_ori=19.410deg anchor_pos=0.87639 anchor_ori=13.458deg joint_pos=0.53189 joint_vel=3.05622 body_pos=0.62126 body_pos_top=torso:0.87639 body_z=0.07732 body_z_top=torso:0.15043
+[VAL_OUTCOME] failure=1.0000 physical_failure=1.0000 illegal_contact=1.0000 numerical_failure=0.0000 motion_complete=0.0000 reference_end=0.0000 time_out=0.0000 steps_p50=45
+[VAL_PHASE] failure_p50=45.0 failure_p95=46.0 physical_p50=45.0 illegal_contact_p50=45.0 numerical_p50=-1.0 anchor_pos_p50=-1.0 anchor_ori_p50=-1.0 ee_body_p50=46.0 motion_complete_p50=-1.0
+[VAL_MOTION] window_mmd2_w16=0.3589856 window_mmd2_w32=nan raw_w16=0.3589856 raw_w32=nan pairs_w16=1678 pairs_w32=0 gap_w16=16 gap_w32=0 phase_mean_w16=30.12 phase_max_w16=57.00 phase_mean_w32=38.16 phase_max_w32=57.00 progress_max_w16=0.1759 progress_max_w32=0.1759 progress_span_w16=0.1265 progress_span_w32=0.0772 samples_w16=3736 samples_w32=1688 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.001912 delta_internal=-1.000000 delta_ratio=-1.0000 delta_boundary_p95=0.005283 delta_boundary_p99=0.007419 delta_internal_p95=-1.000000 delta_internal_p99=-1.000000 d2_boundary=0.003803 d2_internal=-1.000000 d2_ratio=-1.0000 d2_boundary_p95=0.003269 d2_boundary_p99=0.125033 d2_internal_p95=-1.000000 d2_internal_p99=-1.000000
+[VAL_CHUNK_STATE] joint_vel_boundary=0.210164 joint_vel_internal=-1.000000 joint_vel_ratio=-1.0000 joint_vel_boundary_p95=0.550549 joint_vel_boundary_p99=2.859032 joint_vel_internal_p95=-1.000000 joint_vel_internal_p99=-1.000000 root_ang_boundary=0.153885 root_ang_internal=-1.000000 root_ang_ratio=-1.0000 root_ang_boundary_p95=0.498243 root_ang_boundary_p99=0.592353 root_ang_internal_p95=-1.000000 root_ang_internal_p99=-1.000000
+[VAL_CHUNK_RESET] action_delta=0.122692 action_delta_p95=0.122692 joint_vel_jump=1.716982 joint_vel_jump_p95=1.708014 root_ang_vel_jump=1.326258 root_ang_vel_jump_p95=1.340817 joint_pos_error=0.026276 joint_vel_error=1.599003 root_ang_vel_error=1.321013
+[VAL_OFFSET0] joint_pos=0.400974 joint_pos_p95=0.518758 joint_vel=0.926897 joint_vel_p95=1.933243 root_ang_vel=1.091416 root_ang_vel_p95=2.188869 count=185023
+[VAL_OFFSET1] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[VAL_OFFSET2] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[VAL_OFFSET3] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/amp_h1_official_userassets_u500_s0_20260730_1339/checkpoints/update_0050.pt
+[UPDATE] 60/500 amp=0.59190 done=0.02288 ep_len=44.49
+[AMP_POLICY] loss=-0.01172 bound=0.00000 kl=0.009535 ratio=0.9992 clip=0.1321 grad=4.8580 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05003 noise_h=0.05003/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.009535/-1.000000/-1.000000/-1.000000 clip=0.1321/-1.0000/-1.0000/-1.0000 ratio=0.9992/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.035/162.00/323.954 count=2999
+[AMP_CREDIT] raw=0.59190 chunk=0.59190 adv=0.03638/0.92149 actor_adv=0.00052/0.95106 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=0.82681 V=7.7901 target=7.8001 rmse=0.8982 ev=0.9789 grad=1.5540
+[DISCRIMINATOR] train_loss=2.17328 train_bce=0.22071 gp=0.09998 post_accE=1.0000 post_accC=0.9183 post_accR=0.9499 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.9179 accR=0.9500 logitE=1.5346 logitC=-1.3146 logitR=-2.1213
+[DISC_DOMAINS] post_logitC=-1.3258 post_logitR=-2.1402 post_logitE=1.5376 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=36.9/182.6/324.0 expert=16.1/161.7/308.0 current_expert_tv=0.11504
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07309 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.022881 timeout=0.000000 illegal_contact=0.022881 numerical=0.000000 tracking_cf=0.351532 reference_end_occupancy=0.074585
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.126s actor=0.486s critic=0.115s disc=11.487s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2999 first_frame_bin_fraction=0.0023 p50=161.0 p95=307.0
+[PROGRESS] env_steps=7864320 iteration=18.886s throughput=6940.1
+[UPDATE] 70/500 amp=0.62624 done=0.02273 ep_len=44.75
+[AMP_POLICY] loss=-0.01077 bound=0.00000 kl=0.008425 ratio=0.9999 clip=0.1146 grad=4.5403 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05002 noise_h=0.05002/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.008425/-1.000000/-1.000000/-1.000000 clip=0.1146/-1.0000/-1.0000/-1.0000 ratio=0.9999/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.021/161.46/323.814 count=2979
+[AMP_CREDIT] raw=0.62624 chunk=0.62624 adv=0.02651/0.96682 actor_adv=0.00002/0.94770 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=0.91216 V=8.3589 target=8.3618 rmse=0.9440 ev=0.9804 grad=1.5496
+[DISCRIMINATOR] train_loss=2.00097 train_bce=0.22875 gp=0.08755 post_accE=1.0000 post_accC=0.9081 post_accR=0.9503 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.9084 accR=0.9510 logitE=1.4891 logitC=-1.2466 logitR=-2.1335
+[DISC_DOMAINS] post_logitC=-1.2538 post_logitR=-2.1438 post_logitE=1.4958 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=36.5/186.3/324.0 expert=16.1/162.2/307.7 current_expert_tv=0.12307
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07355 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.022728 timeout=0.000000 illegal_contact=0.022728 numerical=0.000000 tracking_cf=0.358459 reference_end_occupancy=0.081871
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.098s actor=0.485s critic=0.123s disc=11.491s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2979 first_frame_bin_fraction=0.0030 p50=161.0 p95=308.0
+[PROGRESS] env_steps=9175040 iteration=18.878s throughput=6943.1
+[UPDATE] 80/500 amp=0.64732 done=0.02250 ep_len=44.54
+[AMP_POLICY] loss=-0.00840 bound=0.00000 kl=0.007792 ratio=0.9996 clip=0.1021 grad=4.5582 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05002 noise_h=0.05002/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.007792/-1.000000/-1.000000/-1.000000 clip=0.1021/-1.0000/-1.0000/-1.0000 ratio=0.9996/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.029/162.03/323.973 count=2949
+[AMP_CREDIT] raw=0.64732 chunk=0.64732 adv=-0.00328/1.05035 actor_adv=-0.00020/0.93598 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.07645 V=8.8478 target=8.8611 rmse=1.0247 ev=0.9797 grad=1.6454
+[DISCRIMINATOR] train_loss=1.85840 train_bce=0.23411 gp=0.07787 post_accE=1.0000 post_accC=0.9022 post_accR=0.9508 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.9022 accR=0.9505 logitE=1.4615 logitC=-1.2084 logitR=-2.1377
+[DISC_DOMAINS] post_logitC=-1.2172 post_logitR=-2.1561 post_logitE=1.4663 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=38.2/186.1/324.0 expert=16.2/161.9/308.0 current_expert_tv=0.12286
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07404 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.022499 timeout=0.000000 illegal_contact=0.022499 numerical=0.000000 tracking_cf=0.348701 reference_end_occupancy=0.085709
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.024s actor=0.487s critic=0.114s disc=11.554s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2949 first_frame_bin_fraction=0.0037 p50=161.0 p95=307.0
+[PROGRESS] env_steps=10485760 iteration=18.915s throughput=6929.6
+[UPDATE] 90/500 amp=0.66661 done=0.02160 ep_len=45.92
+[AMP_POLICY] loss=-0.00575 bound=0.00000 kl=0.007650 ratio=0.9994 clip=0.0999 grad=4.5322 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.04999 noise_h=0.04999/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.007650/-1.000000/-1.000000/-1.000000 clip=0.0999/-1.0000/-1.0000/-1.0000 ratio=0.9994/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.098/160.28/323.770 count=2831
+[AMP_CREDIT] raw=0.66661 chunk=0.66661 adv=0.02521/1.05997 actor_adv=-0.00302/0.95729 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.09700 V=9.2297 target=9.2390 rmse=1.0345 ev=0.9811 grad=1.7989
+[DISCRIMINATOR] train_loss=1.74048 train_bce=0.23885 gp=0.07028 post_accE=1.0000 post_accC=0.8975 post_accR=0.9495 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8973 accR=0.9495 logitE=1.4423 logitC=-1.1717 logitR=-2.1296
+[DISC_DOMAINS] post_logitC=-1.1803 post_logitR=-2.1465 post_logitE=1.4418 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=38.8/188.5/324.0 expert=16.1/161.7/307.9 current_expert_tv=0.12032
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07449 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.021599 timeout=0.000000 illegal_contact=0.021599 numerical=0.000000 tracking_cf=0.342743 reference_end_occupancy=0.082108
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.079s actor=0.487s critic=0.116s disc=11.488s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2831 first_frame_bin_fraction=0.0025 p50=160.0 p95=305.0
+[PROGRESS] env_steps=11796480 iteration=18.855s throughput=6951.5
+[UPDATE] 100/500 amp=0.67806 done=0.02128 ep_len=47.12
+[AMP_POLICY] loss=-0.00680 bound=0.00000 kl=0.007921 ratio=0.9995 clip=0.1030 grad=4.6126 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.04999 noise_h=0.04999/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.007921/-1.000000/-1.000000/-1.000000 clip=0.1030/-1.0000/-1.0000/-1.0000 ratio=0.9995/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.226/164.91/323.989 count=2789
+[AMP_CREDIT] raw=0.67806 chunk=0.67806 adv=-0.00668/1.08416 actor_adv=-0.00166/0.95884 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.14826 V=9.4229 target=9.4445 rmse=1.0591 ev=0.9814 grad=1.8179
+[DISCRIMINATOR] train_loss=1.63717 train_bce=0.24320 gp=0.06382 post_accE=1.0000 post_accC=0.8912 post_accR=0.9482 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8908 accR=0.9487 logitE=1.4120 logitC=-1.1610 logitR=-2.1073
+[DISC_DOMAINS] post_logitC=-1.1692 post_logitR=-2.1256 post_logitE=1.4110 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=40.9/191.4/324.0 expert=16.2/161.9/307.9 current_expert_tv=0.12531
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07499 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.021278 timeout=0.000000 illegal_contact=0.021278 numerical=0.000000 tracking_cf=0.315399 reference_end_occupancy=0.094917
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.020s actor=0.484s critic=0.115s disc=11.492s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2789 first_frame_bin_fraction=0.0039 p50=165.0 p95=309.0
+[PROGRESS] env_steps=13107200 iteration=18.829s throughput=6961.1
+[VALIDATION_START] update=100 max_steps=500 envs=4096 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.017s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.114s
+[VALIDATION_PROGRESS] step=50/500 done=0.01318 alive=0.98682 elapsed=4.647s
+[VALIDATION_PROGRESS] step=100/500 done=0.99976 alive=0.00024 elapsed=9.817s
+[VALIDATION_PROGRESS] step=126/500 done=1.00000 alive=0.00000 elapsed=12.482s
+[VALIDATION_DONE] update=100 time=12.523s
+[VAL] steps_mean=51.09 steps_min=23 steps_p50=51 steps_p95=52 steps_max=126 fail_phase_mean=51.1 done=1.00000
+[VAL_CAUSE] physical_failure=1.00000 illegal_contact=1.00000 numerical_failure=0.00000 tracking_cf=1.00000 anchor_pos_bad=0.00073 anchor_ori_bad=0.00024 ee_body_bad=0.00073 pose_fail=nan time_out=0.00000 anchor_z=0.16972 anchor_grav=0.34720 ee_z_max=0.09100 ee_z_mean=0.04846
+[VAL_FAIL] contact_force_max=676.75903 illegal_contact_bodies=1.386 act_abs=0.04003 act_max=0.09043 root_pos=0.91045 root_ori=18.066deg anchor_pos=0.90626 anchor_ori=28.445deg joint_pos=0.50075 joint_vel=2.80619 body_pos=0.66667 body_pos_top=left_shoulder:0.92989 body_z=0.09492 body_z_top=torso:0.16972
+[VAL_OUTCOME] failure=1.0000 physical_failure=1.0000 illegal_contact=1.0000 numerical_failure=0.0000 motion_complete=0.0000 reference_end=0.0000 time_out=0.0000 steps_p50=51
+[VAL_PHASE] failure_p50=51.0 failure_p95=52.0 physical_p50=51.0 illegal_contact_p50=51.0 numerical_p50=-1.0 anchor_pos_p50=79.0 anchor_ori_p50=126.0 ee_body_p50=79.0 motion_complete_p50=-1.0
+[VAL_MOTION] window_mmd2_w16=0.3044483 window_mmd2_w32=nan raw_w16=0.3044483 raw_w32=nan pairs_w16=2030 pairs_w32=0 gap_w16=16 gap_w32=0 phase_mean_w16=33.06 phase_max_w16=53.00 phase_mean_w32=41.09 phase_max_w32=53.00 progress_max_w16=0.1636 progress_max_w32=0.1636 progress_span_w16=0.1142 progress_span_w32=0.0648 samples_w16=4485 samples_w32=2437 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.002320 delta_internal=-1.000000 delta_ratio=-1.0000 delta_boundary_p95=0.005123 delta_boundary_p99=0.010007 delta_internal_p95=-1.000000 delta_internal_p99=-1.000000 d2_boundary=0.003317 d2_internal=-1.000000 d2_ratio=-1.0000 d2_boundary_p95=0.003191 d2_boundary_p99=0.112987 d2_internal_p95=-1.000000 d2_internal_p99=-1.000000
+[VAL_CHUNK_STATE] joint_vel_boundary=0.156307 joint_vel_internal=-1.000000 joint_vel_ratio=-1.0000 joint_vel_boundary_p95=0.407718 joint_vel_boundary_p99=1.489962 joint_vel_internal_p95=-1.000000 joint_vel_internal_p99=-1.000000 root_ang_boundary=0.109829 root_ang_internal=-1.000000 root_ang_ratio=-1.0000 root_ang_boundary_p95=0.320204 root_ang_boundary_p99=0.373357 root_ang_internal_p95=-1.000000 root_ang_internal_p99=-1.000000
+[VAL_CHUNK_RESET] action_delta=0.107738 action_delta_p95=0.107738 joint_vel_jump=1.340180 joint_vel_jump_p95=1.343272 root_ang_vel_jump=0.943950 root_ang_vel_jump_p95=0.961228 joint_pos_error=0.020136 joint_vel_error=1.238258 root_ang_vel_error=0.938674
+[VAL_OFFSET0] joint_pos=0.300005 joint_pos_p95=0.457982 joint_vel=0.728619 joint_vel_p95=1.151236 root_ang_vel=0.873588 root_ang_vel_p95=1.785482 count=209262
+[VAL_OFFSET1] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[VAL_OFFSET2] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[VAL_OFFSET3] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/amp_h1_official_userassets_u500_s0_20260730_1339/checkpoints/update_0100.pt
+[UPDATE] 110/500 amp=0.68333 done=0.02103 ep_len=47.32
+[AMP_POLICY] loss=-0.00773 bound=0.00000 kl=0.007286 ratio=0.9996 clip=0.0942 grad=4.3089 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.04998 noise_h=0.04998/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.007286/-1.000000/-1.000000/-1.000000 clip=0.0942/-1.0000/-1.0000/-1.0000 ratio=0.9996/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.005/164.06/323.937 count=2756
+[AMP_CREDIT] raw=0.68333 chunk=0.68333 adv=0.03976/1.20123 actor_adv=0.00016/0.93174 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.41488 V=9.7736 target=9.7969 rmse=1.1772 ev=0.9792 grad=2.2515
+[DISCRIMINATOR] train_loss=1.55757 train_bce=0.24673 gp=0.05950 post_accE=1.0000 post_accC=0.8907 post_accR=0.9475 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8901 accR=0.9475 logitE=1.3917 logitC=-1.1497 logitR=-2.0782
+[DISC_DOMAINS] post_logitC=-1.1568 post_logitR=-2.0925 post_logitE=1.3905 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=40.6/186.6/324.0 expert=16.1/162.2/307.8 current_expert_tv=0.12482
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07546 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.021027 timeout=0.000000 illegal_contact=0.021027 numerical=0.000000 tracking_cf=0.316978 reference_end_occupancy=0.086990
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.058s actor=0.483s critic=0.114s disc=11.490s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2756 first_frame_bin_fraction=0.0033 p50=164.0 p95=308.0
+[PROGRESS] env_steps=14417920 iteration=18.835s throughput=6958.8
+[UPDATE] 120/500 amp=0.69328 done=0.02105 ep_len=46.11
+[AMP_POLICY] loss=-0.01234 bound=0.00000 kl=0.007509 ratio=1.0001 clip=0.0977 grad=4.3336 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05000 noise_h=0.05000/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.007509/-1.000000/-1.000000/-1.000000 clip=0.0977/-1.0000/-1.0000/-1.0000 ratio=1.0001/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.131/163.00/323.845 count=2759
+[AMP_CREDIT] raw=0.69328 chunk=0.69328 adv=-0.00282/1.26121 actor_adv=0.00501/0.92229 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.54110 V=10.0258 target=10.0611 rmse=1.2222 ev=0.9785 grad=2.6080
+[DISCRIMINATOR] train_loss=1.47370 train_bce=0.25199 gp=0.05430 post_accE=1.0000 post_accC=0.8883 post_accR=0.9466 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8880 accR=0.9458 logitE=1.3586 logitC=-1.1283 logitR=-2.0321
+[DISC_DOMAINS] post_logitC=-1.1319 post_logitR=-2.0419 post_logitE=1.3600 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=39.8/187.8/324.0 expert=16.2/162.3/307.8 current_expert_tv=0.11310
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07576 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.021049 timeout=0.000000 illegal_contact=0.021049 numerical=0.000000 tracking_cf=0.312592 reference_end_occupancy=0.086449
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.128s actor=0.488s critic=0.114s disc=11.523s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2759 first_frame_bin_fraction=0.0025 p50=161.0 p95=308.0
+[PROGRESS] env_steps=15728640 iteration=18.967s throughput=6910.5
+[UPDATE] 130/500 amp=0.70573 done=0.02092 ep_len=47.48
+[AMP_POLICY] loss=-0.00743 bound=0.00000 kl=0.006898 ratio=0.9998 clip=0.0873 grad=4.2099 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05002 noise_h=0.05002/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006898/-1.000000/-1.000000/-1.000000 clip=0.0873/-1.0000/-1.0000/-1.0000 ratio=0.9998/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.130/158.64/323.937 count=2742
+[AMP_CREDIT] raw=0.70573 chunk=0.70573 adv=0.00417/1.27307 actor_adv=0.00075/0.93886 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.58337 V=10.4798 target=10.5028 rmse=1.2439 ev=0.9790 grad=2.5527
+[DISCRIMINATOR] train_loss=1.40139 train_bce=0.25738 gp=0.04997 post_accE=1.0000 post_accC=0.8871 post_accR=0.9446 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8869 accR=0.9445 logitE=1.3343 logitC=-1.0971 logitR=-1.9775
+[DISC_DOMAINS] post_logitC=-1.1016 post_logitR=-1.9896 post_logitE=1.3339 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=40.2/185.4/324.0 expert=16.0/162.0/308.0 current_expert_tv=0.11703
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07627 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.020920 timeout=0.000000 illegal_contact=0.020920 numerical=0.000000 tracking_cf=0.296959 reference_end_occupancy=0.084877
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.055s actor=0.485s critic=0.115s disc=11.489s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2742 first_frame_bin_fraction=0.0022 p50=160.0 p95=306.0
+[PROGRESS] env_steps=17039360 iteration=18.842s throughput=6956.2
+[UPDATE] 140/500 amp=0.70953 done=0.02048 ep_len=48.62
+[AMP_POLICY] loss=-0.00679 bound=0.00000 kl=0.007546 ratio=1.0000 clip=0.0989 grad=4.4906 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05001 noise_h=0.05001/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.007546/-1.000000/-1.000000/-1.000000 clip=0.0989/-1.0000/-1.0000/-1.0000 ratio=1.0000/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.140/164.74/323.982 count=2685
+[AMP_CREDIT] raw=0.70953 chunk=0.70953 adv=-0.02068/1.26109 actor_adv=0.00028/0.94221 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.55616 V=10.6606 target=10.6789 rmse=1.2348 ev=0.9799 grad=2.6914
+[DISCRIMINATOR] train_loss=1.32971 train_bce=0.26290 gp=0.04545 post_accE=1.0000 post_accC=0.8865 post_accR=0.9419 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8864 accR=0.9428 logitE=1.3005 logitC=-1.0816 logitR=-1.9217
+[DISC_DOMAINS] post_logitC=-1.0849 post_logitR=-1.9301 post_logitE=1.3023 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=40.1/186.4/324.0 expert=16.1/161.2/307.7 current_expert_tv=0.11227
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07663 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.020485 timeout=0.000000 illegal_contact=0.020485 numerical=0.000000 tracking_cf=0.302208 reference_end_occupancy=0.085152
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.162s actor=0.492s critic=0.115s disc=11.541s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2685 first_frame_bin_fraction=0.0034 p50=166.0 p95=305.0
+[PROGRESS] env_steps=18350080 iteration=19.017s throughput=6892.3
+[UPDATE] 150/500 amp=0.71954 done=0.02071 ep_len=48.88
+[AMP_POLICY] loss=-0.00621 bound=0.00000 kl=0.006925 ratio=1.0002 clip=0.0877 grad=4.3307 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05000 noise_h=0.05000/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006925/-1.000000/-1.000000/-1.000000 clip=0.0877/-1.0000/-1.0000/-1.0000 ratio=1.0002/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.034/164.28/323.962 count=2715
+[AMP_CREDIT] raw=0.71954 chunk=0.71954 adv=0.00661/1.23208 actor_adv=-0.00076/0.94463 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.49346 V=10.9400 target=10.9473 rmse=1.2121 ev=0.9811 grad=2.4775
+[DISCRIMINATOR] train_loss=1.26486 train_bce=0.26884 gp=0.04132 post_accE=1.0000 post_accC=0.8860 post_accR=0.9411 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8857 accR=0.9399 logitE=1.2702 logitC=-1.0648 logitR=-1.8589
+[DISC_DOMAINS] post_logitC=-1.0687 post_logitR=-1.8716 post_logitE=1.2690 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=40.9/188.4/324.0 expert=16.3/161.3/308.1 current_expert_tv=0.11517
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07699 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.020714 timeout=0.000000 illegal_contact=0.020714 numerical=0.000000 tracking_cf=0.295815 reference_end_occupancy=0.086067
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.128s actor=0.485s critic=0.114s disc=11.506s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2715 first_frame_bin_fraction=0.0026 p50=166.0 p95=308.0
+[PROGRESS] env_steps=19660800 iteration=18.918s throughput=6928.3
+[VALIDATION_START] update=150 max_steps=500 envs=4096 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.016s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.112s
+[VALIDATION_PROGRESS] step=50/500 done=0.00903 alive=0.99097 elapsed=4.712s
+[VALIDATION_PROGRESS] step=90/500 done=1.00000 alive=0.00000 elapsed=8.982s
+[VALIDATION_DONE] update=150 time=9.022s
+[VAL] steps_mean=54.22 steps_min=33 steps_p50=54 steps_p95=55 steps_max=90 fail_phase_mean=54.2 done=1.00000
+[VAL_CAUSE] physical_failure=1.00000 illegal_contact=1.00000 numerical_failure=0.00000 tracking_cf=1.00000 anchor_pos_bad=0.00073 anchor_ori_bad=0.00000 ee_body_bad=0.00464 pose_fail=nan time_out=0.00000 anchor_z=0.12602 anchor_grav=0.35423 ee_z_max=0.10346 ee_z_mean=0.06475
+[VAL_FAIL] contact_force_max=418.07690 illegal_contact_bodies=1.003 act_abs=0.06954 act_max=0.19679 root_pos=0.82337 root_ori=33.330deg anchor_pos=0.81668 anchor_ori=37.955deg joint_pos=0.34552 joint_vel=2.75435 body_pos=0.61990 body_pos_top=left_shoulder:0.84389 body_z=0.09821 body_z_top=left_knee:0.22132
+[VAL_OUTCOME] failure=1.0000 physical_failure=1.0000 illegal_contact=1.0000 numerical_failure=0.0000 motion_complete=0.0000 reference_end=0.0000 time_out=0.0000 steps_p50=54
+[VAL_PHASE] failure_p50=54.0 failure_p95=55.0 physical_p50=54.0 illegal_contact_p50=54.0 numerical_p50=-1.0 anchor_pos_p50=90.0 anchor_ori_p50=-1.0 ee_body_p50=76.0 motion_complete_p50=-1.0
+[VAL_MOTION] window_mmd2_w16=0.1951198 window_mmd2_w32=0.1370861 raw_w16=0.1951198 raw_w32=0.1370861 pairs_w16=2056 pairs_w32=14 gap_w16=16 gap_w32=32 phase_mean_w16=34.79 phase_max_w16=77.00 phase_mean_w32=42.85 phase_max_w32=77.00 progress_max_w16=0.2377 progress_max_w32=0.2377 progress_span_w16=0.1883 progress_span_w32=0.1389 samples_w16=4919 samples_w32=2871 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.002627 delta_internal=-1.000000 delta_ratio=-1.0000 delta_boundary_p95=0.006547 delta_boundary_p99=0.010414 delta_internal_p95=-1.000000 delta_internal_p99=-1.000000 d2_boundary=0.003008 d2_internal=-1.000000 d2_ratio=-1.0000 d2_boundary_p95=0.003523 d2_boundary_p99=0.106997 d2_internal_p95=-1.000000 d2_internal_p99=-1.000000
+[VAL_CHUNK_STATE] joint_vel_boundary=0.133779 joint_vel_internal=-1.000000 joint_vel_ratio=-1.0000 joint_vel_boundary_p95=0.407234 joint_vel_boundary_p99=1.595521 joint_vel_internal_p95=-1.000000 joint_vel_internal_p99=-1.000000 root_ang_boundary=0.080953 root_ang_internal=-1.000000 root_ang_ratio=-1.0000 root_ang_boundary_p95=0.274554 root_ang_boundary_p99=0.727612 root_ang_internal_p95=-1.000000 root_ang_internal_p99=-1.000000
+[VAL_CHUNK_RESET] action_delta=0.101888 action_delta_p95=0.101888 joint_vel_jump=1.149172 joint_vel_jump_p95=1.156367 root_ang_vel_jump=0.785797 root_ang_vel_jump_p95=0.801376 joint_pos_error=0.017896 joint_vel_error=1.035276 root_ang_vel_error=0.780558
+[VAL_OFFSET0] joint_pos=0.192288 joint_pos_p95=0.299555 joint_vel=0.594893 joint_vel_p95=1.096078 root_ang_vel=0.750655 root_ang_vel_p95=1.369003 count=222098
+[VAL_OFFSET1] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[VAL_OFFSET2] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[VAL_OFFSET3] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/amp_h1_official_userassets_u500_s0_20260730_1339/checkpoints/update_0150.pt
+[UPDATE] 160/500 amp=0.71149 done=0.01990 ep_len=50.72
+[AMP_POLICY] loss=-0.00703 bound=0.00000 kl=0.006977 ratio=1.0000 clip=0.0896 grad=4.5402 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.04997 noise_h=0.04997/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006977/-1.000000/-1.000000/-1.000000 clip=0.0896/-1.0000/-1.0000/-1.0000 ratio=1.0000/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.079/162.12/323.713 count=2608
+[AMP_CREDIT] raw=0.71149 chunk=0.71149 adv=-0.00072/1.28632 actor_adv=0.00028/0.94804 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.62566 V=10.8848 target=10.9093 rmse=1.2638 ev=0.9798 grad=2.8669
+[DISCRIMINATOR] train_loss=1.20633 train_bce=0.27199 gp=0.03789 post_accE=1.0000 post_accC=0.8873 post_accR=0.9367 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8873 accR=0.9371 logitE=1.2519 logitC=-1.0771 logitR=-1.8089
+[DISC_DOMAINS] post_logitC=-1.0798 post_logitR=-1.8127 post_logitE=1.2521 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=41.6/186.3/324.0 expert=16.2/162.0/307.9 current_expert_tv=0.12534
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07727 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.019897 timeout=0.000000 illegal_contact=0.019897 numerical=0.000000 tracking_cf=0.303879 reference_end_occupancy=0.088280
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.133s actor=0.495s critic=0.115s disc=11.536s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2608 first_frame_bin_fraction=0.0027 p50=160.0 p95=308.0
+[PROGRESS] env_steps=20971520 iteration=19.087s throughput=6867.1
+[UPDATE] 170/500 amp=0.71424 done=0.01958 ep_len=50.23
+[AMP_POLICY] loss=-0.00608 bound=0.00000 kl=0.006918 ratio=1.0001 clip=0.0877 grad=4.6261 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05001 noise_h=0.05001/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006918/-1.000000/-1.000000/-1.000000 clip=0.0877/-1.0000/-1.0000/-1.0000 ratio=1.0001/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.078/159.70/323.958 count=2567
+[AMP_CREDIT] raw=0.71424 chunk=0.71424 adv=-0.00745/1.27950 actor_adv=-0.00033/0.95663 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.60479 V=11.2596 target=11.2755 rmse=1.2544 ev=0.9810 grad=2.9478
+[DISCRIMINATOR] train_loss=1.15729 train_bce=0.27704 gp=0.03504 post_accE=1.0000 post_accC=0.8878 post_accR=0.9343 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8877 accR=0.9343 logitE=1.2233 logitC=-1.0715 logitR=-1.7552
+[DISC_DOMAINS] post_logitC=-1.0740 post_logitR=-1.7614 post_logitE=1.2243 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=41.5/183.9/324.0 expert=16.2/162.0/307.9 current_expert_tv=0.12471
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07755 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.019585 timeout=0.000000 illegal_contact=0.019585 numerical=0.000000 tracking_cf=0.311882 reference_end_occupancy=0.093834
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.226s actor=0.485s critic=0.114s disc=11.570s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2567 first_frame_bin_fraction=0.0027 p50=157.0 p95=306.0
+[PROGRESS] env_steps=22282240 iteration=19.137s throughput=6849.0
+[UPDATE] 180/500 amp=0.72145 done=0.01947 ep_len=51.78
+[AMP_POLICY] loss=-0.00602 bound=0.00000 kl=0.006209 ratio=1.0006 clip=0.0758 grad=4.2158 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05000 noise_h=0.05000/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006209/-1.000000/-1.000000/-1.000000 clip=0.0758/-1.0000/-1.0000/-1.0000 ratio=1.0006/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.061/162.50/323.910 count=2552
+[AMP_CREDIT] raw=0.72145 chunk=0.72145 adv=0.03505/1.29409 actor_adv=-0.00023/0.94546 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.64855 V=11.5703 target=11.5725 rmse=1.2737 ev=0.9813 grad=3.8349
+[DISCRIMINATOR] train_loss=1.11256 train_bce=0.28319 gp=0.03233 post_accE=1.0000 post_accC=0.8878 post_accR=0.9320 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8875 accR=0.9317 logitE=1.1934 logitC=-1.0568 logitR=-1.6924
+[DISC_DOMAINS] post_logitC=-1.0594 post_logitR=-1.6950 post_logitE=1.1922 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=42.2/185.1/324.0 expert=16.3/162.7/307.6 current_expert_tv=0.13174
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07777 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.019470 timeout=0.000000 illegal_contact=0.019470 numerical=0.000000 tracking_cf=0.307281 reference_end_occupancy=0.086983
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.160s actor=0.485s critic=0.115s disc=11.577s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2552 first_frame_bin_fraction=0.0035 p50=162.0 p95=309.0
+[PROGRESS] env_steps=23592960 iteration=19.076s throughput=6870.9
+[UPDATE] 190/500 amp=0.72020 done=0.01885 ep_len=52.74
+[AMP_POLICY] loss=-0.00679 bound=0.00000 kl=0.006909 ratio=1.0004 clip=0.0880 grad=4.5838 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05000 noise_h=0.05000/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006909/-1.000000/-1.000000/-1.000000 clip=0.0880/-1.0000/-1.0000/-1.0000 ratio=1.0004/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.115/161.71/323.892 count=2471
+[AMP_CREDIT] raw=0.72020 chunk=0.72020 adv=0.00289/1.42404 actor_adv=0.00124/0.93252 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=1.98806 V=11.9972 target=12.0072 rmse=1.3954 ev=0.9788 grad=3.7470
+[DISCRIMINATOR] train_loss=1.07583 train_bce=0.28815 gp=0.03039 post_accE=1.0000 post_accC=0.8930 post_accR=0.9311 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8930 accR=0.9301 logitE=1.1668 logitC=-1.0463 logitR=-1.6317
+[DISC_DOMAINS] post_logitC=-1.0487 post_logitR=-1.6379 post_logitE=1.1655 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=42.0/184.6/324.0 expert=16.0/161.6/307.8 current_expert_tv=0.12907
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07806 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.018852 timeout=0.000000 illegal_contact=0.018852 numerical=0.000000 tracking_cf=0.313087 reference_end_occupancy=0.094101
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.152s actor=0.487s critic=0.115s disc=11.545s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2471 first_frame_bin_fraction=0.0036 p50=160.0 p95=306.0
+[PROGRESS] env_steps=24903680 iteration=19.027s throughput=6888.7
+[UPDATE] 200/500 amp=0.71380 done=0.01859 ep_len=53.04
+[AMP_POLICY] loss=-0.00965 bound=0.00000 kl=0.006492 ratio=1.0003 clip=0.0809 grad=4.3567 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.04998 noise_h=0.04998/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006492/-1.000000/-1.000000/-1.000000 clip=0.0809/-1.0000/-1.0000/-1.0000 ratio=1.0003/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.019/158.24/323.992 count=2436
+[AMP_CREDIT] raw=0.71380 chunk=0.71380 adv=-0.08163/1.52044 actor_adv=0.00421/0.93424 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=2.24876 V=12.1443 target=12.1700 rmse=1.4816 ev=0.9769 grad=5.0224
+[DISCRIMINATOR] train_loss=1.03748 train_bce=0.29193 gp=0.02827 post_accE=1.0000 post_accC=0.8966 post_accR=0.9283 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8966 accR=0.9281 logitE=1.1440 logitC=-1.0521 logitR=-1.5786
+[DISC_DOMAINS] post_logitC=-1.0540 post_logitR=-1.5818 post_logitE=1.1441 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=39.9/186.1/324.0 expert=15.9/161.2/307.8 current_expert_tv=0.12801
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07824 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.018585 timeout=0.000000 illegal_contact=0.018585 numerical=0.000000 tracking_cf=0.325523 reference_end_occupancy=0.100349
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.229s actor=0.486s critic=0.115s disc=11.523s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2436 first_frame_bin_fraction=0.0021 p50=157.0 p95=304.0
+[PROGRESS] env_steps=26214400 iteration=19.089s throughput=6866.3
+[VALIDATION_START] update=200 max_steps=500 envs=4096 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.016s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.115s
+[VALIDATION_PROGRESS] step=50/500 done=0.00708 alive=0.99292 elapsed=4.709s
+[VALIDATION_PROGRESS] step=100/500 done=0.99780 alive=0.00220 elapsed=10.104s
+[VALIDATION_PROGRESS] step=110/500 done=1.00000 alive=0.00000 elapsed=11.210s
+[VALIDATION_DONE] update=200 time=11.250s
+[VAL] steps_mean=68.65 steps_min=34 steps_p50=68 steps_p95=72 steps_max=110 fail_phase_mean=68.6 done=1.00000
+[VAL_CAUSE] physical_failure=1.00000 illegal_contact=1.00000 numerical_failure=0.00000 tracking_cf=1.00000 anchor_pos_bad=0.00806 anchor_ori_bad=0.00171 ee_body_bad=0.98169 pose_fail=nan time_out=0.00000 anchor_z=0.38781 anchor_grav=0.24981 ee_z_max=0.30414 ee_z_mean=0.17656
+[VAL_FAIL] contact_force_max=828.51294 illegal_contact_bodies=1.848 act_abs=0.05609 act_max=0.20378 root_pos=0.97364 root_ori=36.656deg anchor_pos=0.97996 anchor_ori=36.934deg joint_pos=0.27915 joint_vel=3.19368 body_pos=0.76107 body_pos_top=left_elbow:1.01512 body_z=0.27420 body_z_top=left_elbow:0.39637
+[VAL_OUTCOME] failure=1.0000 physical_failure=1.0000 illegal_contact=1.0000 numerical_failure=0.0000 motion_complete=0.0000 reference_end=0.0000 time_out=0.0000 steps_p50=68
+[VAL_PHASE] failure_p50=68.0 failure_p95=72.0 physical_p50=68.0 illegal_contact_p50=68.0 numerical_p50=-1.0 anchor_pos_p50=78.0 anchor_ori_p50=103.0 ee_body_p50=68.0 motion_complete_p50=-1.0
+[VAL_MOTION] window_mmd2_w16=0.1878169 window_mmd2_w32=0.0861271 raw_w16=0.1878169 raw_w32=0.0861271 pairs_w16=2701 pairs_w32=666 gap_w16=16 gap_w32=32 phase_mean_w16=42.25 phase_max_w16=104.00 phase_mean_w32=50.33 phase_max_w32=104.00 progress_max_w16=0.3210 progress_max_w32=0.3210 progress_span_w16=0.2716 progress_span_w32=0.2222 samples_w16=6801 samples_w32=4753 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.002923 delta_internal=-1.000000 delta_ratio=-1.0000 delta_boundary_p95=0.008691 delta_boundary_p99=0.010907 delta_internal_p95=-1.000000 delta_internal_p99=-1.000000 d2_boundary=0.002584 d2_internal=-1.000000 d2_ratio=-1.0000 d2_boundary_p95=0.003511 d2_boundary_p99=0.101243 d2_internal_p95=-1.000000 d2_internal_p99=-1.000000
+[VAL_CHUNK_STATE] joint_vel_boundary=0.121591 joint_vel_internal=-1.000000 joint_vel_ratio=-1.0000 joint_vel_boundary_p95=0.332409 joint_vel_boundary_p99=2.315846 joint_vel_internal_p95=-1.000000 joint_vel_internal_p99=-1.000000 root_ang_boundary=0.064181 root_ang_internal=-1.000000 root_ang_ratio=-1.0000 root_ang_boundary_p95=0.222052 root_ang_boundary_p99=0.555844 root_ang_internal_p95=-1.000000 root_ang_internal_p99=-1.000000
+[VAL_CHUNK_RESET] action_delta=0.096910 action_delta_p95=0.096910 joint_vel_jump=0.929765 joint_vel_jump_p95=0.938314 root_ang_vel_jump=0.439413 root_ang_vel_jump_p95=0.459890 joint_pos_error=0.014355 joint_vel_error=0.815572 root_ang_vel_error=0.434311
+[VAL_OFFSET0] joint_pos=0.182968 joint_pos_p95=0.278183 joint_vel=0.501838 joint_vel_p95=0.841665 root_ang_vel=0.598654 root_ang_vel_p95=1.463644 count=281177
+[VAL_OFFSET1] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[VAL_OFFSET2] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[VAL_OFFSET3] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/amp_h1_official_userassets_u500_s0_20260730_1339/checkpoints/update_0200.pt
+[UPDATE] 210/500 amp=0.71585 done=0.01871 ep_len=53.07
+[AMP_POLICY] loss=-0.00668 bound=0.00000 kl=0.006451 ratio=0.9998 clip=0.0804 grad=4.5354 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05002 noise_h=0.05002/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006451/-1.000000/-1.000000/-1.000000 clip=0.0804/-1.0000/-1.0000/-1.0000 ratio=0.9998/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.191/161.90/323.944 count=2452
+[AMP_CREDIT] raw=0.71585 chunk=0.71585 adv=0.02496/1.48366 actor_adv=0.00078/0.94357 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=2.14488 V=12.5438 target=12.5427 rmse=1.4482 ev=0.9786 grad=6.0016
+[DISCRIMINATOR] train_loss=1.00515 train_bce=0.29679 gp=0.02652 post_accE=1.0000 post_accC=0.8960 post_accR=0.9258 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8960 accR=0.9262 logitE=1.1204 logitC=-1.0523 logitR=-1.5237
+[DISC_DOMAINS] post_logitC=-1.0542 post_logitR=-1.5235 post_logitE=1.1214 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=40.8/184.0/324.0 expert=16.1/161.8/307.9 current_expert_tv=0.13792
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07850 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.018707 timeout=0.000000 illegal_contact=0.018707 numerical=0.000000 tracking_cf=0.326584 reference_end_occupancy=0.105095
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.157s actor=0.486s critic=0.115s disc=11.492s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2452 first_frame_bin_fraction=0.0008 p50=160.0 p95=309.0
+[PROGRESS] env_steps=27525120 iteration=18.993s throughput=6901.2
+[UPDATE] 220/500 amp=0.70354 done=0.01838 ep_len=54.24
+[AMP_POLICY] loss=-0.00896 bound=0.00000 kl=0.006352 ratio=1.0000 clip=0.0770 grad=4.4514 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.04999 noise_h=0.04999/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006352/-1.000000/-1.000000/-1.000000 clip=0.0770/-1.0000/-1.0000/-1.0000 ratio=1.0000/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.394/159.71/323.842 count=2409
+[AMP_CREDIT] raw=0.70354 chunk=0.70354 adv=0.02321/1.55675 actor_adv=0.00376/0.94053 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=2.35668 V=12.4507 target=12.4586 rmse=1.5131 ev=0.9779 grad=5.3125
+[DISCRIMINATOR] train_loss=0.97548 train_bce=0.29918 gp=0.02517 post_accE=1.0000 post_accC=0.8987 post_accR=0.9233 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8987 accR=0.9234 logitE=1.1107 logitC=-1.0745 logitR=-1.4652
+[DISC_DOMAINS] post_logitC=-1.0752 post_logitR=-1.4643 post_logitE=1.1110 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=43.2/185.2/324.0 expert=16.0/162.4/307.8 current_expert_tv=0.13895
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07864 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.018379 timeout=0.000000 illegal_contact=0.018379 numerical=0.000000 tracking_cf=0.326973 reference_end_occupancy=0.106079
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.218s actor=0.485s critic=0.116s disc=11.638s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2409 first_frame_bin_fraction=0.0021 p50=159.0 p95=307.0
+[PROGRESS] env_steps=28835840 iteration=19.222s throughput=6819.0
+[UPDATE] 230/500 amp=0.71116 done=0.01825 ep_len=51.48
+[AMP_POLICY] loss=-0.00590 bound=0.00000 kl=0.006240 ratio=0.9998 clip=0.0763 grad=4.7864 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05000 noise_h=0.05000/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006240/-1.000000/-1.000000/-1.000000 clip=0.0763/-1.0000/-1.0000/-1.0000 ratio=0.9998/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.002/160.24/323.847 count=2392
+[AMP_CREDIT] raw=0.71116 chunk=0.71116 adv=0.00551/1.45658 actor_adv=0.00114/0.96050 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=2.08878 V=12.7204 target=12.6902 rmse=1.4341 ev=0.9802 grad=5.5056
+[DISCRIMINATOR] train_loss=0.94995 train_bce=0.30371 gp=0.02392 post_accE=1.0000 post_accC=0.8996 post_accR=0.9200 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.8995 accR=0.9219 logitE=1.0942 logitC=-1.0633 logitR=-1.4180
+[DISC_DOMAINS] post_logitC=-1.0651 post_logitR=-1.4200 post_logitE=1.0945 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=42.9/186.5/324.0 expert=16.2/161.8/307.8 current_expert_tv=0.14175
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07890 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.018250 timeout=0.000000 illegal_contact=0.018250 numerical=0.000000 tracking_cf=0.328056 reference_end_occupancy=0.106522
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.302s actor=0.487s critic=0.115s disc=11.624s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2392 first_frame_bin_fraction=0.0042 p50=159.0 p95=307.0
+[PROGRESS] env_steps=30146560 iteration=19.294s throughput=6793.2
+[UPDATE] 240/500 amp=0.71008 done=0.01723 ep_len=56.17
+[AMP_POLICY] loss=-0.00594 bound=0.00000 kl=0.006076 ratio=0.9997 clip=0.0723 grad=4.3731 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05000 noise_h=0.05000/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006076/-1.000000/-1.000000/-1.000000 clip=0.0723/-1.0000/-1.0000/-1.0000 ratio=0.9997/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.016/157.88/323.969 count=2258
+[AMP_CREDIT] raw=0.71008 chunk=0.71008 adv=0.03167/1.45226 actor_adv=0.00066/0.95623 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=2.07667 V=13.0218 target=13.0527 rmse=1.4290 ev=0.9807 grad=5.4598
+[DISCRIMINATOR] train_loss=0.92547 train_bce=0.30664 gp=0.02284 post_accE=1.0000 post_accC=0.9061 post_accR=0.9197 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.9059 accR=0.9199 logitE=1.0819 logitC=-1.0569 logitR=-1.3802
+[DISC_DOMAINS] post_logitC=-1.0597 post_logitR=-1.3792 post_logitE=1.0812 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=42.0/185.5/324.0 expert=16.1/162.1/307.5 current_expert_tv=0.14211
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07915 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.017227 timeout=0.000000 illegal_contact=0.017227 numerical=0.000000 tracking_cf=0.319000 reference_end_occupancy=0.115295
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.266s actor=0.488s critic=0.116s disc=11.590s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2258 first_frame_bin_fraction=0.0058 p50=160.0 p95=304.0
+[PROGRESS] env_steps=31457280 iteration=19.212s throughput=6822.3
+[UPDATE] 250/500 amp=0.70670 done=0.01772 ep_len=55.85
+[AMP_POLICY] loss=-0.00594 bound=0.00000 kl=0.006740 ratio=1.0004 clip=0.0855 grad=4.7701 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.05000 noise_h=0.05000/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006740/-1.000000/-1.000000/-1.000000 clip=0.0855/-1.0000/-1.0000/-1.0000 ratio=1.0004/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.147/163.62/323.977 count=2323
+[AMP_CREDIT] raw=0.70670 chunk=0.70670 adv=0.01206/1.44534 actor_adv=0.00091/0.95211 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=2.06147 V=13.1035 target=13.0737 rmse=1.4249 ev=0.9817 grad=5.7095
+[DISCRIMINATOR] train_loss=0.90207 train_bce=0.30924 gp=0.02182 post_accE=1.0000 post_accC=0.9033 post_accR=0.9170 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.9033 accR=0.9176 logitE=1.0719 logitC=-1.0690 logitR=-1.3473
+[DISC_DOMAINS] post_logitC=-1.0694 post_logitR=-1.3470 post_logitE=1.0723 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=43.8/188.9/324.0 expert=15.8/162.4/307.8 current_expert_tv=0.15411
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07933 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.017723 timeout=0.000000 illegal_contact=0.017723 numerical=0.000000 tracking_cf=0.324913 reference_end_occupancy=0.116776
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.306s actor=0.486s critic=0.115s disc=11.615s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2323 first_frame_bin_fraction=0.0043 p50=168.0 p95=306.0
+[PROGRESS] env_steps=32768000 iteration=19.291s throughput=6794.6
+[VALIDATION_START] update=250 max_steps=500 envs=4096 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.017s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.119s
+[VALIDATION_PROGRESS] step=50/500 done=0.00488 alive=0.99512 elapsed=4.790s
+[VALIDATION_PROGRESS] step=100/500 done=0.83350 alive=0.16650 elapsed=10.400s
+[VALIDATION_PROGRESS] step=124/500 done=1.00000 alive=0.00000 elapsed=13.298s
+[VALIDATION_DONE] update=250 time=13.339s
+[VAL] steps_mean=95.74 steps_min=34 steps_p50=96 steps_p95=105 steps_max=124 fail_phase_mean=95.7 done=1.00000
+[VAL_CAUSE] physical_failure=1.00000 illegal_contact=1.00000 numerical_failure=0.00000 tracking_cf=1.00000 anchor_pos_bad=0.98975 anchor_ori_bad=0.24902 ee_body_bad=0.99170 pose_fail=nan time_out=0.00000 anchor_z=0.62739 anchor_grav=0.61478 ee_z_max=0.58589 ee_z_mean=0.27439
+[VAL_FAIL] contact_force_max=2269.80566 illegal_contact_bodies=1.747 act_abs=0.05548 act_max=0.18468 root_pos=1.16898 root_ori=95.144deg anchor_pos=1.23383 anchor_ori=87.100deg joint_pos=0.19575 joint_vel=3.41466 body_pos=1.02505 body_pos_top=left_shoulder:1.51460 body_z=0.46590 body_z_top=left_shoulder:0.85636
+[VAL_OUTCOME] failure=1.0000 physical_failure=1.0000 illegal_contact=1.0000 numerical_failure=0.0000 motion_complete=0.0000 reference_end=0.0000 time_out=0.0000 steps_p50=96
+[VAL_PHASE] failure_p50=96.0 failure_p95=105.0 physical_p50=96.0 illegal_contact_p50=96.0 numerical_p50=-1.0 anchor_pos_p50=96.0 anchor_ori_p50=98.0 ee_body_p50=96.0 motion_complete_p50=-1.0
+[VAL_MOTION] window_mmd2_w16=0.2339745 window_mmd2_w32=0.1283941 raw_w16=0.2339745 raw_w32=0.1283941 pairs_w16=4425 pairs_w32=3872 gap_w16=16 gap_w32=32 phase_mean_w16=56.15 phase_max_w16=109.00 phase_mean_w32=64.20 phase_max_w32=109.00 progress_max_w16=0.3364 progress_max_w32=0.3364 progress_span_w16=0.2870 progress_span_w32=0.2377 samples_w16=10355 samples_w32=8307 selected_envs=128
+[VAL_CHUNK_ACTION] delta_boundary=0.002904 delta_internal=-1.000000 delta_ratio=-1.0000 delta_boundary_p95=0.007733 delta_boundary_p99=0.011944 delta_internal_p95=-1.000000 delta_internal_p99=-1.000000 d2_boundary=0.002760 d2_internal=-1.000000 d2_ratio=-1.0000 d2_boundary_p95=0.005688 d2_boundary_p99=0.097975 d2_internal_p95=-1.000000 d2_internal_p99=-1.000000
+[VAL_CHUNK_STATE] joint_vel_boundary=0.134412 joint_vel_internal=-1.000000 joint_vel_ratio=-1.0000 joint_vel_boundary_p95=0.287009 joint_vel_boundary_p99=1.702526 joint_vel_internal_p95=-1.000000 joint_vel_internal_p99=-1.000000 root_ang_boundary=0.113796 root_ang_internal=-1.000000 root_ang_ratio=-1.0000 root_ang_boundary_p95=0.284703 root_ang_boundary_p99=0.837527 root_ang_internal_p95=-1.000000 root_ang_internal_p99=-1.000000
+[VAL_CHUNK_RESET] action_delta=0.092988 action_delta_p95=0.092989 joint_vel_jump=0.678197 joint_vel_jump_p95=0.725608 root_ang_vel_jump=0.464659 root_ang_vel_jump_p95=0.481724 joint_pos_error=0.010652 joint_vel_error=0.561042 root_ang_vel_error=0.459485
+[VAL_OFFSET0] joint_pos=0.150805 joint_pos_p95=0.217295 joint_vel=0.511239 joint_vel_p95=0.884243 root_ang_vel=0.665282 root_ang_vel_p95=1.909975 count=392137
+[VAL_OFFSET1] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[VAL_OFFSET2] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[VAL_OFFSET3] joint_pos=-1.000000 joint_pos_p95=-1.000000 joint_vel=-1.000000 joint_vel_p95=-1.000000 root_ang_vel=-1.000000 root_ang_vel_p95=-1.000000 count=0
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/my_mimic_mixgrpo_h1/runs/amp_h1_official_userassets_u500_s0_20260730_1339/checkpoints/update_0250.pt
+[UPDATE] 260/500 amp=0.70975 done=0.01740 ep_len=56.29
+[AMP_POLICY] loss=-0.00662 bound=0.00000 kl=0.006169 ratio=0.9999 clip=0.0741 grad=4.4441 lr=0.000100
+[AMP_EXPLORATION] fixed_std=0.05000 std_h=0.05000/-1.00000/-1.00000/-1.00000 noise_rms=0.04999 noise_h=0.04999/-1.00000/-1.00000/-1.00000 last_first=1.0000 env_clip=0.00000 mean_oob=0.00000
+[AMP_PPO_H] kl=0.006169/-1.000000/-1.000000/-1.000000 clip=0.0741/-1.0000/-1.0000/-1.0000 ratio=0.9999/-1.0000/-1.0000/-1.0000
+[RESET_SAMPLING] mode=uniform_continuous_full_motion support=[0,324) phase=0.041/167.74/323.987 count=2280
+[AMP_CREDIT] raw=0.70975 chunk=0.70975 adv=0.05911/1.48062 actor_adv=0.00137/0.95209 duration=1.000
+[AMP_HISTORY] primitive=131072 decisions=131072 endpoint=131072 coverage=1.00000 warmup_gap=0 credit_gap=0
+[CRITIC] loss=2.16226 V=13.6310 target=13.6220 rmse=1.4596 ev=0.9816 grad=5.5185
+[DISCRIMINATOR] train_loss=0.88075 train_bce=0.31175 gp=0.02093 post_accE=1.0000 post_accC=0.9045 post_accR=0.9163 reward_clamp=0.00000
+[DISC_TRAIN_PRE] accE=1.0000 accC=0.9044 accR=0.9154 logitE=1.0645 logitC=-1.0591 logitR=-1.3286
+[DISC_DOMAINS] post_logitC=-1.0609 post_logitR=-1.3318 post_logitE=1.0639 count=131072/131072/131072 effective_w=0.25/0.25/0.50
+[DISC_ENDPOINT] support=[0,324] current=43.6/189.2/324.0 expert=16.4/162.8/308.1 current_expert_tv=0.13850
+[AMP_REPLAY] size=200000/200000 fill=1.00000 inserted=1000
+[AMP_SEAMS] within_rms=-1.00000 boundary_rms=0.07946 boundary_within=-1.00000
+[AMP_TERMINATION] done=0.017395 timeout=0.000000 illegal_contact=0.017395 numerical=0.000000 tracking_cf=0.325066 reference_end_occupancy=0.116325
+[AMP_CONTRACT] action_violation=0.000e+00 history_gap=0 credit_gap=0 finite=1
+[TIME] collect=5.300s actor=0.485s critic=0.116s disc=11.507s gpu_peak=1.61GiB
+[TRAIN_RESET] count=2280 first_frame_bin_fraction=0.0044 p50=173.0 p95=310.0
+[PROGRESS] env_steps=34078720 iteration=19.120s throughput=6855.3

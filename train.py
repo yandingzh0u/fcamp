@@ -124,6 +124,16 @@ def main() -> None:
     print(f"[RUN] method={cfg.method} task={cfg.environment.task} seed={cfg.training.seed}", flush=True)
     print(f"[RUN] resolved_config_sha256={resolved['resolved_config_sha256']}", flush=True)
     print(f"[RUN] source_snapshot_sha256={snapshot_sha256}", flush=True)
+    print(
+        "[RUN_ASSET] kind=robot origin=user_local "
+        f"path={robot_path} sha256={resolved['robot_asset_sha256']}",
+        flush=True,
+    )
+    print(
+        "[RUN_ASSET] kind=motion origin=user_local "
+        f"path={dataset_path} sha256={resolved['dataset_sha256']}",
+        flush=True,
+    )
 
     trainer = CoreTrainer(simulation_app, cfg, run_dir / "checkpoints")
     try:

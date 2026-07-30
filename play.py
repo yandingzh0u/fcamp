@@ -26,9 +26,6 @@ parser.add_argument("--render_every", type=int, default=1, help="Render every N 
 parser.add_argument("--real_time", action="store_true", default=False, help="Throttle to wall-clock. GUI enables this automatically.")
 parser.add_argument("--no_real_time", action="store_true", default=False, help="Disable automatic wall-clock throttle in GUI.")
 parser.add_argument("--fix_root_link", action="store_true", default=False, help="Lock the robot base in place.")
-parser.add_argument("--interval_pushes", action=argparse.BooleanOptionalAction, default=None, help="Override interval pushes. Default keeps checkpoint setting.")
-parser.add_argument("--reset_noise", action=argparse.BooleanOptionalAction, default=None, help="Override reset pose/velocity noise. Default keeps checkpoint setting.")
-parser.add_argument("--startup_randomization", action=argparse.BooleanOptionalAction, default=None, help="Override startup randomization. Default keeps checkpoint setting.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -39,7 +36,7 @@ import torch
 
 from engine.config import config_from_checkpoint_dict
 from envs.g1_mimic import G1MimicEnv
-from method.fcamp import FCAMP
+from method.amp import AMP
 
 
 def main() -> None:
@@ -61,13 +58,6 @@ def main() -> None:
         fix_root_link=args_cli.fix_root_link or cfg.environment.fix_root_link,
         max_episode_steps=int(1.0e9),
         motion_start_phase=(args_cli.start_phase if args_cli.start_phase >= 0 else cfg.environment.motion_start_phase),
-        interval_pushes=(cfg.environment.interval_pushes if args_cli.interval_pushes is None else args_cli.interval_pushes),
-        reset_noise=(cfg.environment.reset_noise if args_cli.reset_noise is None else args_cli.reset_noise),
-        startup_randomization=(
-            cfg.environment.startup_randomization
-            if args_cli.startup_randomization is None
-            else args_cli.startup_randomization
-        ),
     )
     torch.manual_seed(args_cli.seed)
     if torch.cuda.is_available():
@@ -78,8 +68,11 @@ def main() -> None:
         render=not args_cli.headless,
         render_every=args_cli.render_every,
     )
-    algo = FCAMP(cfg.parameters, env)
+    algo = AMP(cfg.parameters, env)
     algo.build()
+    preflight = getattr(algo, "validate_checkpoint_payload", None)
+    if callable(preflight):
+        preflight(payload)
     algo.policy.load_state_dict(payload["policy"])
     algo.policy.eval()
 
@@ -102,9 +95,7 @@ def main() -> None:
         flush=True,
     )
     print(
-        f"[INFO] horizon={horizon} action_dim={env.action_dim} "
-        f"interval_pushes={environment.interval_pushes} "
-        f"reset_noise={environment.reset_noise}",
+        f"[INFO] horizon={horizon} action_dim={env.action_dim}",
         flush=True,
     )
 
@@ -140,9 +131,19 @@ def main() -> None:
                 f"tilt={float(info['debug_terms']['robot_anchor_tilt'].mean().item()):.5f} "
                 f"ee_z_max={float(info['debug_terms']['ee_z_error_max'].mean().item()):.5f} "
                 f"anchor_z={float(info['debug_terms']['anchor_z_error'].mean().item()):.5f} "
-                f"anchor_pos_bad={float(info['done_terms']['anchor_pos_bad'].float().mean().item()):.5f} "
-                f"anchor_ori_bad={float(info['done_terms']['anchor_ori_bad'].float().mean().item()):.5f} "
-                f"ee_bad={float(info['done_terms']['ee_body_bad'].float().mean().item()):.5f}",
+                f"tracking_cf_anchor_pos_bad="
+                f"{float(info['done_terms']['anchor_pos_bad'].float().mean().item()):.5f} "
+                f"tracking_cf_anchor_ori_bad="
+                f"{float(info['done_terms']['anchor_ori_bad'].float().mean().item()):.5f} "
+                f"tracking_cf_ee_bad="
+                f"{float(info['done_terms']['ee_body_bad'].float().mean().item()):.5f} "
+                f"physical_failure={float(info['done_terms']['physical_failure'].float().mean().item()):.5f} "
+                f"illegal_contact={float(info['done_terms']['illegal_contact'].float().mean().item()):.5f} "
+                f"numerical_failure={float(info['done_terms']['numerical_failure'].float().mean().item()):.5f} "
+                f"time_out={float(info['done_terms']['time_out'].float().mean().item()):.5f} "
+                f"contact_force_max={float(info['debug_terms']['contact_force_max'].mean().item()):.5f} "
+                f"illegal_contact_bodies="
+                f"{float(info['debug_terms']['illegal_contact_body_count'].float().mean().item()):.3f}",
                 flush=True,
             )
 
@@ -152,7 +153,19 @@ def main() -> None:
         need_reset = False
         reason = ""
         if args_cli.reset_on_done and bool(done.any()):
-            need_reset, reason = True, "termination"
+            physical = info["done_terms"]["physical_failure"] & done
+            illegal = info["done_terms"]["illegal_contact"] & done
+            numerical = info["done_terms"]["numerical_failure"] & done
+            timeout = info["done_terms"]["time_out"] & done & ~physical
+            causes = []
+            if bool(illegal.any()):
+                causes.append("illegal_contact")
+            if bool(numerical.any()):
+                causes.append("numerical_failure")
+            if bool(timeout.any()):
+                causes.append("timeout")
+            need_reset = True
+            reason = "+".join(causes) if causes else "unknown_terminal"
         if args_cli.loop_motion and bool(torch.any(env.phase_steps >= env.motion.num_frames - 1)):
             need_reset, reason = True, "motion_end"
         if need_reset:

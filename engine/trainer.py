@@ -11,10 +11,10 @@ from .validation_logging import log_validation_metrics
 from .validation import run_validation_rollout, validation_max_steps
 from .metrics_logger import MetricsLogger
 from envs.g1_mimic import G1MimicEnv
-from method.fcamp import FCAMP
+from method.amp import AMP
 
 
-VALIDATION_PROTOCOL_VERSION = 5.0
+VALIDATION_PROTOCOL_VERSION = 6.0
 
 
 class CoreTrainer:
@@ -38,10 +38,15 @@ class CoreTrainer:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_logger = MetricsLogger(self.checkpoint_dir.parent / "logs")
 
-        self.algo = FCAMP(self.algo_cfg, self.env)
+        self.algo = AMP(self.algo_cfg, self.env)
         self.algo.build()
         self.checkpointer = Checkpointer(self)
 
+        # Include the actual initial RSI population in update-one diagnostics.
+        # Starting the recorder only inside the update loop would make a
+        # healthy first rollout misleadingly report reset count zero.
+        self.env.begin_reset_phase_diagnostics()
+        self._reset_phase_diagnostics_open = True
         self.current_observation = self.algo.initial_reset()
 
         if cfg.training.resume:
@@ -60,11 +65,18 @@ class CoreTrainer:
             if not self.simulation_app.is_running():
                 break
             t0 = time.perf_counter()
-            self.env.begin_reset_phase_diagnostics()
+            if not getattr(
+                self,
+                "_reset_phase_diagnostics_open",
+                False,
+            ):
+                self.env.begin_reset_phase_diagnostics()
+                self._reset_phase_diagnostics_open = True
             current_obs = self.algo.reset_for_update(update_idx)
             self.current_observation = current_obs
             rollout = self.algo.collect(current_obs)
             reset_metrics = self.env.finish_reset_phase_diagnostics()
+            self._reset_phase_diagnostics_open = False
             self.current_observation = rollout["next_observation"]
             collect_time = time.perf_counter() - t0
 
@@ -106,12 +118,10 @@ class CoreTrainer:
                 print(
                     "[TRAIN_RESET] "
                     f"count={metrics.get('train_reset/all/count', 0.0):.0f} "
-                    f"phase0_frac={metrics.get('train_reset/all/start_fraction', 0.0):.4f} "
+                    "first_frame_bin_fraction="
+                    f"{metrics.get('train_reset/all/first_frame_bin_fraction', 0.0):.4f} "
                     f"p50={metrics.get('train_reset/all/phase_p50', -1.0):.1f} "
-                    f"p95={metrics.get('train_reset/all/phase_p95', -1.0):.1f} "
-                    f"target_count={metrics.get('train_reset/phase0/count', 0.0):.0f} "
-                    f"target_nonzero={metrics.get('train_reset/phase0/nonstart_count', 0.0):.0f} "
-                    f"curriculum_p50={metrics.get('train_reset/curriculum/phase_p50', -1.0):.1f}",
+                    f"p95={metrics.get('train_reset/all/phase_p95', -1.0):.1f}",
                     flush=True,
                 )
                 print(

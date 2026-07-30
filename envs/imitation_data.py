@@ -33,12 +33,56 @@ G1_IMITATION_JOINT_AXES = (
 )
 
 G1_IMITATION_NUM_JOINTS = len(G1_IMITATION_JOINT_AXES)
+G1_IMITATION_NUM_KINEMATIC_JOINTS = G1_IMITATION_NUM_JOINTS + 1
 G1_IMITATION_NUM_KEY_BODIES = len(G1_IMITATION_KEY_BODY_NAMES)
 G1_IMITATION_SCHEMA = ImitationFeatureSchema(
-    num_joints=G1_IMITATION_NUM_JOINTS,
+    num_joint_rotations=G1_IMITATION_NUM_KINEMATIC_JOINTS,
+    num_dofs=G1_IMITATION_NUM_JOINTS,
     num_key_bodies=G1_IMITATION_NUM_KEY_BODIES,
 )
 G1_IMITATION_FRAME_DIM = G1_IMITATION_SCHEMA.frame_dim
+
+
+def build_g1_amp_actor_observation(
+    imitation_frame: torch.Tensor,
+) -> torch.Tensor:
+    """Reorder one discriminator frame into MimicKit's G1 actor schema.
+
+    The discriminator and Actor contain the same physical quantities but not
+    in the same order.  MimicKit's G1 Actor uses
+
+    ``root_h, root_rot6d, root_v, root_w, joint_rot6d, dof_v, key_pos``.
+
+    Keeping this as an explicit transform prevents a dimension-preserving
+    ``frame[..., 2:]`` slice from silently changing the observation contract.
+    """
+
+    if imitation_frame.shape[-1] != G1_IMITATION_FRAME_DIM:
+        raise ValueError(
+            "G1 imitation frame must end in dimension "
+            f"{G1_IMITATION_FRAME_DIM}, got {tuple(imitation_frame.shape)}"
+        )
+    joint_rot_start = 9
+    joint_rot_stop = (
+        joint_rot_start + 6 * G1_IMITATION_NUM_KINEMATIC_JOINTS
+    )
+    key_pos_stop = (
+        joint_rot_stop + 3 * G1_IMITATION_NUM_KEY_BODIES
+    )
+    root_lin_vel_stop = key_pos_stop + 3
+    root_ang_vel_stop = root_lin_vel_stop + 3
+    return torch.cat(
+        (
+            imitation_frame[..., 2:3],
+            imitation_frame[..., 3:9],
+            imitation_frame[..., key_pos_stop:root_lin_vel_stop],
+            imitation_frame[..., root_lin_vel_stop:root_ang_vel_stop],
+            imitation_frame[..., joint_rot_start:joint_rot_stop],
+            imitation_frame[..., root_ang_vel_stop:],
+            imitation_frame[..., joint_rot_stop:key_pos_stop],
+        ),
+        dim=-1,
+    )
 
 
 def build_g1_imitation_frame(
@@ -59,7 +103,25 @@ def build_g1_imitation_frame(
     tracking error is included.
     """
     axes = joint_pos.new_tensor(G1_IMITATION_JOINT_AXES)
-    joint_quat = revolute_dof_to_quat(joint_pos, axes)
+    actuated_joint_quat = revolute_dof_to_quat(joint_pos, axes)
+    # MimicKit's G1 kinematic model contains one additional fixed head joint.
+    # It sits between the three waist joints and the arm joints in the
+    # non-root joint order. Fixed joints still contribute an identity
+    # quaternion (and hence a constant 6-D tangent/normal feature).
+    fixed_head = torch.zeros(
+        actuated_joint_quat.shape[:-2] + (1, 4),
+        device=actuated_joint_quat.device,
+        dtype=actuated_joint_quat.dtype,
+    )
+    fixed_head[..., 0] = 1.0
+    joint_quat = torch.cat(
+        (
+            actuated_joint_quat[..., :15, :],
+            fixed_head,
+            actuated_joint_quat[..., 15:, :],
+        ),
+        dim=-2,
+    )
     return build_imitation_frame(
         root_pos=root_pos,
         root_quat=root_quat_wxyz,

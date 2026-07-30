@@ -30,14 +30,6 @@ def mimic_env_type(monkeypatch):
     class _Termination:
         pass
 
-    math_module = _module(
-        "isaaclab.utils.math",
-        quat_from_euler_xyz=lambda *args: args[0],
-        quat_mul=lambda first, _second: first,
-    )
-    monkeypatch.setitem(sys.modules, "isaaclab", _module("isaaclab"))
-    monkeypatch.setitem(sys.modules, "isaaclab.utils", _module("isaaclab.utils"))
-    monkeypatch.setitem(sys.modules, "isaaclab.utils.math", math_module)
     monkeypatch.setitem(
         sys.modules,
         "components.rollout.reset_diagnostics",
@@ -45,11 +37,6 @@ def mimic_env_type(monkeypatch):
             "components.rollout.reset_diagnostics",
             ResetPhaseRecorder=object,
         ),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "envs.adaptive_sampling",
-        _module("envs.adaptive_sampling", AdaptiveTimestepsSampler=object),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -68,9 +55,6 @@ def mimic_env_type(monkeypatch):
             CRITIC_OBS_DIM=2,
             OBS_DIM=2,
             PROJECT_ROOT=Path("."),
-            RESET_JOINT_POSITION_RANGE=(0.0, 0.0),
-            RESET_ROOT_POSE_RANGE=((0.0, 0.0),) * 6,
-            VELOCITY_RANGE=((0.0, 0.0),) * 6,
             MIMIC_ANCHOR_BODY_NAME="anchor",
             MIMIC_BODY_NAMES=(),
             MIMIC_EE_BODY_NAMES=(),
@@ -105,7 +89,11 @@ def mimic_env_type(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "envs.robots.g1",
-        _module("envs.robots.g1", G1_29DOF_ACTION_NAMES=("a", "b")),
+        _module(
+            "envs.robots.g1",
+            G1_29DOF_ACTION_NAMES=("a", "b"),
+            G1_LOCAL_URDF_PATH=Path("assets/robots/holosoma_g1/g1_29dof.urdf"),
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -173,7 +161,6 @@ def _make_env(
     *,
     reference_joint_pos: torch.Tensor,
     contract_installed: bool,
-    reset_noise: bool,
 ):
     env = object.__new__(env_type)
     env.num_envs = 4
@@ -184,7 +171,6 @@ def _make_env(
     env.episode_steps = torch.full((4,), 17, dtype=torch.long)
     env.episode_ids = torch.full((4,), -1, dtype=torch.long)
     env._next_episode_id = 10
-    env._failure_recorded = torch.ones(4, dtype=torch.bool)
     env.last_action = torch.full((4, 2), -99.0)
     env.default_action_joint_pos = torch.tensor(
         [
@@ -197,13 +183,8 @@ def _make_env(
     env.action_scale = torch.tensor([[0.50, 0.25]])
     env._policy_action_low = torch.full((2,), -5.0) if contract_installed else None
     env._policy_action_high = torch.full((2,), 5.0) if contract_installed else None
-    env.reset_noise = reset_noise
     env.scene = _Scene(env)
     env.reset_phase_recorder = SimpleNamespace(record=lambda *_args: None)
-    env._reset_interval_push_schedule = MethodType(
-        lambda _self, _ids: None,
-        env,
-    )
     env.get_observation = MethodType(
         lambda self: self.last_action.clone(),
         env,
@@ -218,12 +199,6 @@ def _make_env(
             self,
             "written_joint_pos",
             kwargs["joint_pos"].clone(),
-        ),
-        env,
-    )
-    env._apply_official_reset_noise = MethodType(
-        lambda _self, _ids, _rp, _rq, _rlv, _rav, joint_pos: joint_pos.add_(
-            100.0
         ),
         env,
     )
@@ -252,14 +227,10 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
         mimic_env_type,
         reference_joint_pos=references,
         contract_installed=True,
-        reset_noise=True,
     )
     env_ids = torch.tensor([3, 1, 2])
     phases = torch.tensor([0, 1, 2])
-    expected = (
-        references.index_select(0, phases)
-        - env.default_action_joint_pos.index_select(0, env_ids)
-    ) / env.action_scale
+    expected = references.index_select(0, phases) / env.action_scale
 
     observation = env.reset_envs(env_ids, phase_indices=phases)
 
@@ -272,7 +243,7 @@ def test_atomic_reset_uses_clean_phase_reference_for_partial_envs(
     torch.testing.assert_close(env.validated_actions[0], expected)
     torch.testing.assert_close(
         env.written_joint_pos,
-        references.index_select(0, phases) + 100.0,
+        references.index_select(0, phases),
     )
     torch.testing.assert_close(
         env.scene.anchor_at_update.index_select(0, env_ids),
@@ -295,7 +266,6 @@ def test_pre_contract_reset_is_finite_and_does_not_clamp(
         mimic_env_type,
         reference_joint_pos=references,
         contract_installed=False,
-        reset_noise=False,
     )
     env_ids = torch.tensor([0])
 
@@ -307,3 +277,26 @@ def test_pre_contract_reset_is_finite_and_does_not_clamp(
     env.action_scale[0, 0] = 0.0
     with pytest.raises(RuntimeError, match="non-finite reset policy command"):
         env.reset_envs(env_ids, phase_indices=torch.tensor([0]))
+
+
+def test_reset_phase_sampling_is_uniform_and_horizon_independent(
+    mimic_env_type,
+) -> None:
+    env = object.__new__(mimic_env_type)
+    env.device = torch.device("cpu")
+    env.motion_start_phase = 3
+    env.motion_end_phase = 9
+
+    torch.manual_seed(123)
+    h1 = env.sample_phase_indices(20_000, horizon=1)
+    torch.manual_seed(123)
+    h4 = env.sample_phase_indices(20_000, horizon=4)
+
+    assert torch.equal(h1, h4)
+    assert h1.dtype == torch.float32
+    assert float(h1.min()) >= 3.0
+    assert float(h1.max()) < 9.0
+    assert bool((h1 != h1.floor()).any())
+    counts = torch.bincount(h1.floor().long() - 3, minlength=6).float()
+    expected = float(h1.numel()) / 6.0
+    assert bool(((counts - expected).abs() < 0.08 * expected).all())

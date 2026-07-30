@@ -8,7 +8,10 @@ from types import ModuleType
 import pytest
 import torch
 
-from envs.imitation_data import G1_IMITATION_FRAME_DIM
+from envs.imitation_data import (
+    G1_IMITATION_FRAME_DIM,
+    build_g1_amp_actor_observation,
+)
 
 
 @pytest.fixture()
@@ -27,8 +30,8 @@ def observation_mixin(monkeypatch):
     monkeypatch.setitem(sys.modules, "isaaclab.utils", ModuleType("isaaclab.utils"))
     monkeypatch.setitem(sys.modules, "isaaclab.utils.math", math_module)
     spec_module = ModuleType("envs.spec")
-    spec_module.CRITIC_OBS_DIM = 286
-    spec_module.OBS_DIM = 260
+    spec_module.CRITIC_OBS_DIM = G1_IMITATION_FRAME_DIM - 2
+    spec_module.OBS_DIM = G1_IMITATION_FRAME_DIM - 2
     monkeypatch.setitem(sys.modules, "envs.spec", spec_module)
 
     path = Path(__file__).parents[1] / "envs" / "observation.py"
@@ -39,7 +42,7 @@ def observation_mixin(monkeypatch):
     return module.MimicObservationMixin
 
 
-def test_actor_observation_is_reference_free_self_state_with_raw_action_tail(
+def test_actor_observation_is_reference_free_self_state(
     observation_mixin,
 ) -> None:
     class Fixture(observation_mixin):
@@ -52,19 +55,42 @@ def test_actor_observation_is_reference_free_self_state_with_raw_action_tail(
 
     batch = 3
     frame = torch.randn(batch, G1_IMITATION_FRAME_DIM)
-    last_action = torch.randn(batch, 29)
     env = Fixture()
     env.frame = frame
-    env.last_action = last_action
 
     observation = env.build_observation()
 
-    assert observation.shape == (batch, 260)
-    torch.testing.assert_close(observation[:, :-29], frame[:, 2:])
-    torch.testing.assert_close(observation[:, -29:], last_action)
+    assert observation.shape == (batch, G1_IMITATION_FRAME_DIM - 2)
+    torch.testing.assert_close(
+        observation,
+        build_g1_amp_actor_observation(frame),
+    )
 
     # Global root x/y and reference/phase bookkeeping are not actor inputs.
     env.frame[:, :2] += torch.tensor([100.0, -50.0])
     env.phase_steps = torch.full((batch,), 999.0)
     env.reference = torch.randn(batch, 17)
     torch.testing.assert_close(env.build_observation(), observation)
+
+
+def test_actor_observation_matches_official_g1_field_order() -> None:
+    frame = torch.arange(
+        G1_IMITATION_FRAME_DIM, dtype=torch.float32
+    ).unsqueeze(0)
+
+    observation = build_g1_amp_actor_observation(frame)
+
+    expected_indices = (
+        [2]
+        + list(range(3, 9))
+        + list(range(204, 207))
+        + list(range(207, 210))
+        + list(range(9, 189))
+        + list(range(210, 239))
+        + list(range(189, 204))
+    )
+    assert observation.shape == (1, 237)
+    torch.testing.assert_close(
+        observation,
+        frame[:, expected_indices],
+    )

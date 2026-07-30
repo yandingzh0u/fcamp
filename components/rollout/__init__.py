@@ -1,1 +1,1 @@
-"""Rollout utilities for FC-AMP training."""
+"""Rollout utilities for pure AMP training."""
