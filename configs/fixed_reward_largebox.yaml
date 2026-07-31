@@ -29,7 +29,10 @@ parameters:
   activation: elu
   action_squash_scale: 5.0
   flow_steps: 4
-  cps_noise_level: 0.8
+  # Direct-residual CPS: one learnable global exploration scale.  The 0.36
+  # initialization matches the old path-smoothed CPS action-space noise energy
+  # for H=4; it is an initialization, not a schedule or annealing rule.
+  cps_noise_init: 0.36
   cps_cov_rank: 8
   rollout_env_steps: 24
   discount_gamma: 0.99

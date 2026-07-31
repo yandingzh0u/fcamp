@@ -259,9 +259,18 @@ def test_reward_decomposition_has_exact_weights_and_one_dt() -> None:
     assert (reconstructed - expected).abs().max().item() < 1.0e-6
 
 
-def test_checkpoint_schema_one_rejects_legacy_before_base_restore(
+def test_checkpoint_schema_four_rejects_legacy_before_base_restore(
     monkeypatch,
 ) -> None:
+    assert FIXED_REWARD_CHECKPOINT_CONTRACT == {
+        "fixed_reward_schema_version": 4,
+        "policy_semantics": "per_frame_conditional_factor_ppo_v1",
+        "action_semantics": "cumulative_residual_decoder_v1",
+        "cps_semantics": (
+            "direct_residual_shared_offset_cov_learned_global_eta_v1"
+        ),
+        "gae_semantics": "primitive_gae_v1",
+    }
     algo = object.__new__(FixedRewardFlowCPS)
     base_restore_calls: list[dict] = []
 

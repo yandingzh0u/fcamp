@@ -1,0 +1,306 @@
+[RUN] dir=/home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_direct_residual_cps_u500_s0_20260731_120000
+[RUN] log_file=/home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_direct_residual_cps_u500_s0_20260731_120000/logs/train.log
+[RUN] method=fixed_reward task=largebox_plane seed=0
+[RUN] resolved_config_sha256=b8538f1f5912a6c6d2853b24195a9f95907db971b9c3a90f4eae3beadd97051e
+[RUN] source_snapshot_sha256=e2434be36564c5a39d79f3741a21c3be202be834446b4ceed8fddf4376b413c1
+[INFO] IsaacLab logging to file: /tmp/isaaclab_2026-07-31_12-00-23.log
+[METRICS] jsonl=/home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_direct_residual_cps_u500_s0_20260731_120000/logs/metrics.jsonl tensorboard=True
+[FLOW_CPS] method=fixed_reward actor=causal_flow_cps decoder=cumulative_residual CPS=direct_residual covariance=shared_offset_shape scale=learned_global_eta ppo=per_frame_conditional_factor reward=pose_only streams=phase0_10pct,curriculum_90pct
+[CRITIC] type=single_task_flow context=896 flow_steps=4
+[REWARD] formula=(0.5*anchor_pos+0.5*anchor_ori+2*body_pos+2*body_ori-0.1*action_rate-10*joint_limit-0.1*undesired_contacts)*dt
+[HEALTH] finite_guards=state,observation,action,reward,value,return,advantage,loss,gradient,parameter fixed_reward_schema=4
+[INFO] checkpoint_dir=/home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_direct_residual_cps_u500_s0_20260731_120000/checkpoints
+[FLOW_CPS] update=10/500 loss=-0.01141 kl=0.012520 ratio=0.9996 clip=0.1877 grad=0.2446 delta=1.049e+00 backbone_delta=1.046e+00 cov_delta=7.867e-02 eta=0.354944 eta_delta=4.958e-03
+[CRITIC] loss=0.26615 value=0.07894 return=0.10054 grad=0.1600 delta=4.627e-01
+[REWARD] total=0.02852 anchor_pos=0.8381 anchor_ori=0.4587 body_pos=0.8403 body_ori=0.3241 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=0.4134 phase0_length=13.4 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=0.4394 curr_length=14.3 curr_fail=0.9920 curr_complete=0.0080
+[TRAIN_RESET] count=12254 phase0_frac=0.1191 p50=69.0 p95=261.0 target_count=1382 target_nonzero=0 curriculum_p50=90.0
+[PROGRESS] env_steps=1966080 iteration=7.103s throughput=27680.3
+[FLOW_CPS] update=20/500 loss=-0.01129 kl=0.013113 ratio=0.9991 clip=0.1948 grad=0.3011 delta=8.376e-01 backbone_delta=8.354e-01 cov_delta=6.043e-02 eta=0.343412 eta_delta=4.922e-03
+[CRITIC] loss=0.25459 value=0.19992 return=0.21099 grad=0.1845 delta=3.740e-01
+[REWARD] total=0.03550 anchor_pos=0.8328 anchor_ori=0.5019 body_pos=0.8490 body_ori=0.3332 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=0.5854 phase0_length=15.4 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=0.6187 curr_length=16.6 curr_fail=0.9890 curr_complete=0.0110
+[TRAIN_RESET] count=10713 phase0_frac=0.1165 p50=59.0 p95=258.0 target_count=1160 target_nonzero=0 curriculum_p50=78.0
+[PROGRESS] env_steps=3932160 iteration=6.908s throughput=28459.1
+[FLOW_CPS] update=30/500 loss=-0.00792 kl=0.016772 ratio=0.9982 clip=0.2464 grad=0.4173 delta=1.183e+00 backbone_delta=1.179e+00 cov_delta=9.629e-02 eta=0.332847 eta_delta=4.613e-03
+[CRITIC] loss=0.25467 value=0.26200 return=0.28335 grad=0.4129 delta=4.537e-01
+[REWARD] total=0.03461 anchor_pos=0.7617 anchor_ori=0.5100 body_pos=0.8285 body_ori=0.2995 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=0.7615 phase0_length=20.1 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=0.8030 curr_length=23.8 curr_fail=0.9867 curr_complete=0.0133
+[TRAIN_RESET] count=7930 phase0_frac=0.1274 p50=52.0 p95=257.0 target_count=956 target_nonzero=0 curriculum_p50=75.0
+[PROGRESS] env_steps=5898240 iteration=6.808s throughput=28880.6
+[FLOW_CPS] update=40/500 loss=-0.00564 kl=0.016629 ratio=0.9986 clip=0.2416 grad=0.4596 delta=1.011e+00 backbone_delta=1.007e+00 cov_delta=8.546e-02 eta=0.323635 eta_delta=3.754e-03
+[CRITIC] loss=0.24619 value=0.32357 return=0.34427 grad=0.3651 delta=5.139e-01
+[REWARD] total=0.03320 anchor_pos=0.6915 anchor_ori=0.5304 body_pos=0.8140 body_ori=0.2732 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=1.0098 phase0_length=31.1 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=1.0363 curr_length=30.7 curr_fail=0.9813 curr_complete=0.0187
+[TRAIN_RESET] count=5896 phase0_frac=0.1099 p50=57.0 p95=259.0 target_count=598 target_nonzero=0 curriculum_p50=74.0
+[PROGRESS] env_steps=7864320 iteration=7.083s throughput=27757.9
+[FLOW_CPS] update=50/500 loss=-0.00630 kl=0.015935 ratio=0.9990 clip=0.2330 grad=0.4961 delta=8.313e-01 backbone_delta=8.277e-01 cov_delta=7.693e-02 eta=0.315698 eta_delta=3.474e-03
+[CRITIC] loss=0.22319 value=0.44648 return=0.45085 grad=0.4219 delta=5.721e-01
+[REWARD] total=0.03428 anchor_pos=0.6702 anchor_ori=0.5613 body_pos=0.8161 body_ori=0.2762 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=1.2481 phase0_length=41.3 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=1.2216 curr_length=34.2 curr_fail=0.9765 curr_complete=0.0235
+[TRAIN_RESET] count=5147 phase0_frac=0.0962 p50=66.0 p95=259.0 target_count=462 target_nonzero=0 curriculum_p50=80.0
+[PROGRESS] env_steps=9830400 iteration=7.125s throughput=27594.0
+[VALIDATION_START] update=50 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.006s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.210s
+[VALIDATION_PROGRESS] step=50/500 done=0.03052 alive=0.96948 elapsed=7.134s
+[VALIDATION_PROGRESS] step=70/500 done=1.00000 alive=0.00000 elapsed=10.184s
+[VALIDATION_DONE] update=50 time=10.247s
+[VAL] steps_mean=55.65 steps_min=46 steps_p50=55 steps_p95=62 steps_max=70 return=3.07042 done=1.00000
+[VAL_OUTCOME] failure=1.00000 motion_complete=0.00000 time_out=0.00000 censored=0.00000 reference_progress=0.17177
+[VAL_CAUSE] anchor_pos_bad=0.00000 anchor_ori_bad=0.00000 ee_body_bad=1.00000 failure_phase_p50=55.0 completion_phase_p50=-1.0
+[VAL_RESET] root_pos=0.000000 root_ori=0.000deg anchor_pos=0.010003 anchor_ori=0.000deg joint_pos=0.000000 joint_vel=0.000000 body_pos=0.002920 body_ori=0.000deg
+[VAL_TRACKING] target_ref_now=0.308465 target_ref_next=0.306576 torso_ori=6.955deg left_wrist_ori=29.449deg right_wrist_ori=25.723deg
+[VAL_CHUNK] action_boundary=0.072357 action_internal=0.060334 action_ratio=1.1993 joint_vel_ratio=1.0228 root_ang_ratio=0.8691 reset_action=0.207686
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_direct_residual_cps_u500_s0_20260731_120000/checkpoints/update_0050.pt
+[FLOW_CPS] update=60/500 loss=-0.00498 kl=0.016941 ratio=0.9996 clip=0.2448 grad=0.5893 delta=7.984e-01 backbone_delta=7.951e-01 cov_delta=7.251e-02 eta=0.308666 eta_delta=3.467e-03
+[CRITIC] loss=0.21275 value=0.50235 return=0.51838 grad=1.2072 delta=5.524e-01
+[REWARD] total=0.03547 anchor_pos=0.6684 anchor_ori=0.5748 body_pos=0.8206 body_ori=0.2883 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=1.3880 phase0_length=42.4 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=1.4900 curr_length=42.5 curr_fail=0.9741 curr_complete=0.0259
+[TRAIN_RESET] count=4559 phase0_frac=0.1016 p50=61.0 p95=259.0 target_count=432 target_nonzero=0 curriculum_p50=78.0
+[PROGRESS] env_steps=11796480 iteration=7.185s throughput=27362.6
+[FLOW_CPS] update=70/500 loss=-0.00535 kl=0.015948 ratio=0.9987 clip=0.2320 grad=0.5883 delta=7.524e-01 backbone_delta=7.492e-01 cov_delta=7.004e-02 eta=0.301982 eta_delta=3.222e-03
+[CRITIC] loss=0.21306 value=0.63814 return=0.64394 grad=1.0859 delta=6.348e-01
+[REWARD] total=0.03596 anchor_pos=0.6554 anchor_ori=0.5775 body_pos=0.8216 body_ori=0.2951 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=1.5678 phase0_length=48.6 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=1.6497 curr_length=45.0 curr_fail=0.9688 curr_complete=0.0312
+[TRAIN_RESET] count=3947 phase0_frac=0.1008 p50=65.0 p95=265.0 target_count=361 target_nonzero=0 curriculum_p50=78.0
+[PROGRESS] env_steps=13762560 iteration=7.293s throughput=26959.8
+[FLOW_CPS] update=80/500 loss=-0.00456 kl=0.016646 ratio=0.9996 clip=0.2395 grad=0.6699 delta=7.322e-01 backbone_delta=7.292e-01 cov_delta=6.636e-02 eta=0.296447 eta_delta=2.853e-03
+[CRITIC] loss=0.22974 value=0.74546 return=0.73502 grad=1.8389 delta=5.279e-01
+[REWARD] total=0.03639 anchor_pos=0.6421 anchor_ori=0.5752 body_pos=0.8213 body_ori=0.2994 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=1.8651 phase0_length=57.5 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=1.7684 curr_length=48.7 curr_fail=0.9692 curr_complete=0.0308
+[TRAIN_RESET] count=3735 phase0_frac=0.1028 p50=68.0 p95=259.0 target_count=360 target_nonzero=0 curriculum_p50=82.0
+[PROGRESS] env_steps=15728640 iteration=7.308s throughput=26903.4
+[FLOW_CPS] update=90/500 loss=-0.00491 kl=0.016752 ratio=0.9993 clip=0.2384 grad=0.7159 delta=6.531e-01 backbone_delta=6.506e-01 cov_delta=5.804e-02 eta=0.291070 eta_delta=2.390e-03
+[CRITIC] loss=0.25452 value=0.82133 return=0.80752 grad=2.0327 delta=5.287e-01
+[REWARD] total=0.03605 anchor_pos=0.6328 anchor_ori=0.5655 body_pos=0.8205 body_ori=0.2950 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=1.9171 phase0_length=61.5 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=1.9661 curr_length=53.4 curr_fail=0.9531 curr_complete=0.0469
+[TRAIN_RESET] count=3456 phase0_frac=0.0923 p50=70.0 p95=262.0 target_count=303 target_nonzero=0 curriculum_p50=82.0
+[PROGRESS] env_steps=17694720 iteration=7.122s throughput=27604.8
+[FLOW_CPS] update=100/500 loss=-0.00535 kl=0.015946 ratio=0.9988 clip=0.2277 grad=0.7212 delta=6.169e-01 backbone_delta=6.145e-01 cov_delta=5.526e-02 eta=0.286284 eta_delta=2.692e-03
+[CRITIC] loss=0.25123 value=0.83206 return=0.84436 grad=1.7414 delta=6.037e-01
+[REWARD] total=0.03709 anchor_pos=0.6261 anchor_ori=0.5630 body_pos=0.8266 body_ori=0.3048 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=2.0685 phase0_length=65.6 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=2.2019 curr_length=58.5 curr_fail=0.9449 curr_complete=0.0551
+[TRAIN_RESET] count=3220 phase0_frac=0.0904 p50=81.0 p95=267.0 target_count=262 target_nonzero=0 curriculum_p50=90.0
+[PROGRESS] env_steps=19660800 iteration=7.180s throughput=27380.8
+[VALIDATION_START] update=100 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.006s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.210s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.085s
+[VALIDATION_PROGRESS] step=100/500 done=0.03125 alive=0.96875 elapsed=14.069s
+[VALIDATION_PROGRESS] step=150/500 done=0.13574 alive=0.86426 elapsed=21.587s
+[VALIDATION_PROGRESS] step=200/500 done=0.96008 alive=0.03992 elapsed=29.476s
+[VALIDATION_PROGRESS] step=250/500 done=0.99988 alive=0.00012 elapsed=37.455s
+[VALIDATION_PROGRESS] step=295/500 done=1.00000 alive=0.00000 elapsed=44.479s
+[VALIDATION_DONE] update=100 time=44.544s
+[VAL] steps_mean=163.23 steps_min=72 steps_p50=164 steps_p95=197 steps_max=295 return=10.27759 done=1.00000
+[VAL_OUTCOME] failure=1.00000 motion_complete=0.00000 time_out=0.00000 censored=0.00000 reference_progress=0.50379
+[VAL_CAUSE] anchor_pos_bad=0.00024 anchor_ori_bad=0.00000 ee_body_bad=0.99988 failure_phase_p50=164.0 completion_phase_p50=-1.0
+[VAL_RESET] root_pos=0.000000 root_ori=0.000deg anchor_pos=0.010003 anchor_ori=0.000deg joint_pos=0.000000 joint_vel=0.000000 body_pos=0.002920 body_ori=0.000deg
+[VAL_TRACKING] target_ref_now=0.270593 target_ref_next=0.269252 torso_ori=11.150deg left_wrist_ori=14.818deg right_wrist_ori=12.308deg
+[VAL_CHUNK] action_boundary=0.112425 action_internal=0.073704 action_ratio=1.5254 joint_vel_ratio=1.4138 root_ang_ratio=1.2721 reset_action=0.317986
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_direct_residual_cps_u500_s0_20260731_120000/checkpoints/update_0100.pt
+[FLOW_CPS] update=110/500 loss=-0.00545 kl=0.016107 ratio=0.9989 clip=0.2289 grad=0.7339 delta=6.245e-01 backbone_delta=6.217e-01 cov_delta=5.855e-02 eta=0.281984 eta_delta=1.996e-03
+[CRITIC] loss=0.26056 value=0.93777 return=0.94140 grad=2.2887 delta=5.426e-01
+[REWARD] total=0.03779 anchor_pos=0.6197 anchor_ori=0.5619 body_pos=0.8307 body_ori=0.3119 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=2.4561 phase0_length=75.6 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=2.2817 curr_length=58.8 curr_fail=0.9424 curr_complete=0.0576
+[TRAIN_RESET] count=3065 phase0_frac=0.0881 p50=86.0 p95=264.0 target_count=253 target_nonzero=0 curriculum_p50=98.0
+[PROGRESS] env_steps=21626880 iteration=7.464s throughput=26339.9
+[FLOW_CPS] update=120/500 loss=-0.00542 kl=0.016736 ratio=0.9997 clip=0.2351 grad=0.7848 delta=6.145e-01 backbone_delta=6.120e-01 cov_delta=5.611e-02 eta=0.277474 eta_delta=2.445e-03
+[CRITIC] loss=0.28132 value=0.95520 return=0.96682 grad=2.9093 delta=4.802e-01
+[REWARD] total=0.03836 anchor_pos=0.6105 anchor_ori=0.5554 body_pos=0.8339 body_ori=0.3148 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=2.9818 phase0_length=87.3 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=2.4479 curr_length=62.3 curr_fail=0.9234 curr_complete=0.0766
+[TRAIN_RESET] count=2858 phase0_frac=0.0871 p50=87.0 p95=263.0 target_count=234 target_nonzero=0 curriculum_p50=97.0
+[PROGRESS] env_steps=23592960 iteration=7.292s throughput=26960.8
+[FLOW_CPS] update=130/500 loss=-0.00587 kl=0.015926 ratio=0.9993 clip=0.2271 grad=0.7993 delta=5.852e-01 backbone_delta=5.829e-01 cov_delta=5.109e-02 eta=0.273375 eta_delta=1.996e-03
+[CRITIC] loss=0.29108 value=1.03589 return=1.04674 grad=2.5689 delta=5.123e-01
+[REWARD] total=0.03883 anchor_pos=0.5967 anchor_ori=0.5466 body_pos=0.8358 body_ori=0.3224 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=3.1951 phase0_length=94.1 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=2.9323 curr_length=72.1 curr_fail=0.9318 curr_complete=0.0682
+[TRAIN_RESET] count=2665 phase0_frac=0.0852 p50=89.0 p95=264.0 target_count=215 target_nonzero=0 curriculum_p50=98.0
+[PROGRESS] env_steps=25559040 iteration=7.433s throughput=26451.7
+[FLOW_CPS] update=140/500 loss=-0.00513 kl=0.015571 ratio=0.9991 clip=0.2198 grad=0.8850 delta=5.316e-01 backbone_delta=5.292e-01 cov_delta=4.975e-02 eta=0.269626 eta_delta=2.076e-03
+[CRITIC] loss=0.28450 value=1.05464 return=1.08279 grad=2.3697 delta=5.177e-01
+[REWARD] total=0.03954 anchor_pos=0.5889 anchor_ori=0.5471 body_pos=0.8393 body_ori=0.3282 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=3.9124 phase0_length=109.5 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=2.9748 curr_length=73.2 curr_fail=0.9252 curr_complete=0.0748
+[TRAIN_RESET] count=2586 phase0_frac=0.0828 p50=99.0 p95=260.0 target_count=206 target_nonzero=0 curriculum_p50=108.0
+[PROGRESS] env_steps=27525120 iteration=7.439s throughput=26428.8
+[FLOW_CPS] update=150/500 loss=-0.00521 kl=0.016249 ratio=0.9989 clip=0.2277 grad=0.8804 delta=5.820e-01 backbone_delta=5.799e-01 cov_delta=4.930e-02 eta=0.265853 eta_delta=1.301e-03
+[CRITIC] loss=0.29893 value=1.10418 return=1.13769 grad=2.2630 delta=5.174e-01
+[REWARD] total=0.04010 anchor_pos=0.5734 anchor_ori=0.5337 body_pos=0.8420 body_ori=0.3369 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=4.2793 phase0_length=116.2 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=3.1624 curr_length=78.8 curr_fail=0.9102 curr_complete=0.0898
+[TRAIN_RESET] count=2381 phase0_frac=0.0739 p50=99.0 p95=263.0 target_count=165 target_nonzero=0 curriculum_p50=107.0
+[PROGRESS] env_steps=29491200 iteration=7.140s throughput=27534.4
+[VALIDATION_START] update=150 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.006s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.211s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.380s
+[VALIDATION_PROGRESS] step=100/500 done=0.00000 alive=1.00000 elapsed=14.479s
+[VALIDATION_PROGRESS] step=150/500 done=0.00085 alive=0.99915 elapsed=21.306s
+[VALIDATION_PROGRESS] step=200/500 done=0.52527 alive=0.47473 elapsed=28.577s
+[VALIDATION_PROGRESS] step=250/500 done=0.97241 alive=0.02759 elapsed=36.245s
+[VALIDATION_PROGRESS] step=300/500 done=0.99963 alive=0.00037 elapsed=43.599s
+[VALIDATION_PROGRESS] step=302/500 done=1.00000 alive=0.00000 elapsed=43.905s
+[VALIDATION_DONE] update=150 time=43.974s
+[VAL] steps_mean=205.50 steps_min=139 steps_p50=199 steps_p95=238 steps_max=302 return=13.94030 done=1.00000
+[VAL_OUTCOME] failure=1.00000 motion_complete=0.00000 time_out=0.00000 censored=0.00000 reference_progress=0.63427
+[VAL_CAUSE] anchor_pos_bad=0.00000 anchor_ori_bad=0.00000 ee_body_bad=1.00000 failure_phase_p50=199.0 completion_phase_p50=-1.0
+[VAL_RESET] root_pos=0.000000 root_ori=0.000deg anchor_pos=0.010003 anchor_ori=0.000deg joint_pos=0.000000 joint_vel=0.000000 body_pos=0.002920 body_ori=0.000deg
+[VAL_TRACKING] target_ref_now=0.263100 target_ref_next=0.260849 torso_ori=7.492deg left_wrist_ori=13.520deg right_wrist_ori=13.540deg
+[VAL_CHUNK] action_boundary=0.154786 action_internal=0.093301 action_ratio=1.6590 joint_vel_ratio=1.5718 root_ang_ratio=1.4119 reset_action=0.415235
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_direct_residual_cps_u500_s0_20260731_120000/checkpoints/update_0150.pt
+[FLOW_CPS] update=160/500 loss=-0.00591 kl=0.015331 ratio=0.9995 clip=0.2181 grad=0.9490 delta=5.012e-01 backbone_delta=4.991e-01 cov_delta=4.480e-02 eta=0.262198 eta_delta=1.903e-03
+[CRITIC] loss=0.33767 value=1.24986 return=1.25625 grad=2.7277 delta=5.566e-01
+[REWARD] total=0.04013 anchor_pos=0.5558 anchor_ori=0.5291 body_pos=0.8432 body_ori=0.3404 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=4.2020 phase0_length=113.7 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=3.4930 curr_length=83.4 curr_fail=0.8953 curr_complete=0.1047
+[TRAIN_RESET] count=2410 phase0_frac=0.0710 p50=107.0 p95=266.0 target_count=165 target_nonzero=0 curriculum_p50=114.0
+[PROGRESS] env_steps=31457280 iteration=7.192s throughput=27338.0
+[FLOW_CPS] update=170/500 loss=-0.00600 kl=0.013796 ratio=0.9993 clip=0.1962 grad=1.1203 delta=4.535e-01 backbone_delta=4.518e-01 cov_delta=3.899e-02 eta=0.258950 eta_delta=1.960e-03
+[CRITIC] loss=0.36383 value=1.39948 return=1.38450 grad=3.1316 delta=5.439e-01
+[REWARD] total=0.03993 anchor_pos=0.5408 anchor_ori=0.5192 body_pos=0.8439 body_ori=0.3393 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=5.0226 phase0_length=134.1 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=3.0696 curr_length=79.1 curr_fail=0.8894 curr_complete=0.1106
+[TRAIN_RESET] count=2156 phase0_frac=0.0686 p50=115.0 p95=265.0 target_count=139 target_nonzero=0 curriculum_p50=121.0
+[PROGRESS] env_steps=33423360 iteration=7.212s throughput=27261.3
+[FLOW_CPS] update=180/500 loss=-0.00430 kl=0.016899 ratio=0.9993 clip=0.2346 grad=1.1222 delta=4.828e-01 backbone_delta=4.810e-01 cov_delta=4.150e-02 eta=0.255800 eta_delta=1.541e-03
+[CRITIC] loss=0.38042 value=1.45849 return=1.44852 grad=2.7405 delta=5.954e-01
+[REWARD] total=0.03993 anchor_pos=0.5262 anchor_ori=0.5222 body_pos=0.8444 body_ori=0.3397 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=5.5089 phase0_length=146.0 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=3.3306 curr_length=84.4 curr_fail=0.8805 curr_complete=0.1195
+[TRAIN_RESET] count=2101 phase0_frac=0.0624 p50=118.0 p95=266.0 target_count=126 target_nonzero=0 curriculum_p50=125.0
+[PROGRESS] env_steps=35389440 iteration=7.277s throughput=27015.9
+[FLOW_CPS] update=190/500 loss=-0.00433 kl=0.015527 ratio=0.9995 clip=0.2168 grad=1.0169 delta=4.779e-01 backbone_delta=4.761e-01 cov_delta=4.076e-02 eta=0.252939 eta_delta=1.170e-03
+[CRITIC] loss=0.38624 value=1.57332 return=1.55920 grad=3.3786 delta=4.602e-01
+[REWARD] total=0.04054 anchor_pos=0.5201 anchor_ori=0.5228 body_pos=0.8499 body_ori=0.3471 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=5.4002 phase0_length=144.1 phase0_fail=1.0000 phase0_complete=0.0000 curr_return=4.0276 curr_length=100.0 curr_fail=0.8656 curr_complete=0.1344
+[TRAIN_RESET] count=2020 phase0_frac=0.0584 p50=126.0 p95=267.0 target_count=115 target_nonzero=0 curriculum_p50=132.0
+[PROGRESS] env_steps=37355520 iteration=7.359s throughput=26717.5
+[FLOW_CPS] update=200/500 loss=-0.00456 kl=0.016537 ratio=0.9994 clip=0.2287 grad=1.0333 delta=4.991e-01 backbone_delta=4.974e-01 cov_delta=4.194e-02 eta=0.250179 eta_delta=1.220e-03
+[CRITIC] loss=0.41581 value=1.66666 return=1.64327 grad=3.4973 delta=4.879e-01
+[REWARD] total=0.04062 anchor_pos=0.5031 anchor_ori=0.5255 body_pos=0.8532 body_ori=0.3494 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=5.7620 phase0_length=150.6 phase0_fail=0.9911 phase0_complete=0.0089 curr_return=3.6303 curr_length=90.4 curr_fail=0.8031 curr_complete=0.1969
+[TRAIN_RESET] count=1864 phase0_frac=0.0622 p50=130.0 p95=271.0 target_count=112 target_nonzero=0 curriculum_p50=136.0
+[PROGRESS] env_steps=39321600 iteration=7.092s throughput=27721.9
+[VALIDATION_START] update=200 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.006s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.204s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.312s
+[VALIDATION_PROGRESS] step=100/500 done=0.00000 alive=1.00000 elapsed=14.341s
+[VALIDATION_PROGRESS] step=150/500 done=0.00000 alive=1.00000 elapsed=21.033s
+[VALIDATION_PROGRESS] step=200/500 done=0.00000 alive=1.00000 elapsed=27.768s
+[VALIDATION_PROGRESS] step=250/500 done=0.00452 alive=0.99548 elapsed=34.832s
+[VALIDATION_PROGRESS] step=300/500 done=0.25317 alive=0.74683 elapsed=42.040s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=45.750s
+[VALIDATION_DONE] update=200 time=45.820s
+[VAL] steps_mean=307.57 steps_min=221 steps_p50=305 steps_p95=324 steps_max=324 return=19.92952 done=1.00000
+[VAL_OUTCOME] failure=0.87817 motion_complete=0.12183 time_out=0.00000 censored=0.00000 reference_progress=0.94929
+[VAL_CAUSE] anchor_pos_bad=0.00000 anchor_ori_bad=0.00000 ee_body_bad=0.87817 failure_phase_p50=304.0 completion_phase_p50=324.0
+[VAL_RESET] root_pos=0.000000 root_ori=0.000deg anchor_pos=0.010003 anchor_ori=0.000deg joint_pos=0.000000 joint_vel=0.000000 body_pos=0.002920 body_ori=0.000deg
+[VAL_TRACKING] target_ref_now=0.278997 target_ref_next=0.277048 torso_ori=7.161deg left_wrist_ori=13.168deg right_wrist_ori=15.534deg
+[VAL_CHUNK] action_boundary=0.174978 action_internal=0.098750 action_ratio=1.7719 joint_vel_ratio=1.5246 root_ang_ratio=1.3239 reset_action=0.502854
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_direct_residual_cps_u500_s0_20260731_120000/checkpoints/update_0200.pt
+[FLOW_CPS] update=210/500 loss=-0.00579 kl=0.014690 ratio=0.9996 clip=0.2054 grad=0.9565 delta=3.964e-01 backbone_delta=3.949e-01 cov_delta=3.402e-02 eta=0.247436 eta_delta=1.168e-03
+[CRITIC] loss=0.41246 value=1.72729 return=1.71330 grad=3.4679 delta=5.097e-01
+[REWARD] total=0.04079 anchor_pos=0.4918 anchor_ori=0.5342 body_pos=0.8556 body_ori=0.3515 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=6.3530 phase0_length=163.9 phase0_fail=0.9826 phase0_complete=0.0174 curr_return=4.1653 curr_length=104.1 curr_fail=0.7948 curr_complete=0.2052
+[TRAIN_RESET] count=1816 phase0_frac=0.0644 p50=129.0 p95=264.0 target_count=115 target_nonzero=0 curriculum_p50=137.0
+[PROGRESS] env_steps=41287680 iteration=7.295s throughput=26949.4
+[FLOW_CPS] update=220/500 loss=-0.00658 kl=0.015165 ratio=0.9992 clip=0.2118 grad=1.0585 delta=4.584e-01 backbone_delta=4.568e-01 cov_delta=3.808e-02 eta=0.244611 eta_delta=1.819e-03
+[CRITIC] loss=0.37712 value=1.69863 return=1.69895 grad=2.7932 delta=5.709e-01
+[REWARD] total=0.04120 anchor_pos=0.4875 anchor_ori=0.5393 body_pos=0.8603 body_ori=0.3578 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=7.3843 phase0_length=183.4 phase0_fail=0.9459 phase0_complete=0.0541 curr_return=5.1853 curr_length=123.5 curr_fail=0.7321 curr_complete=0.2679
+[TRAIN_RESET] count=1746 phase0_frac=0.0659 p50=146.0 p95=270.0 target_count=111 target_nonzero=0 curriculum_p50=153.0
+[PROGRESS] env_steps=43253760 iteration=6.985s throughput=28148.0
+[FLOW_CPS] update=230/500 loss=-0.00536 kl=0.015591 ratio=0.9990 clip=0.2168 grad=1.2388 delta=4.254e-01 backbone_delta=4.239e-01 cov_delta=3.636e-02 eta=0.241986 eta_delta=1.365e-03
+[CRITIC] loss=0.37187 value=1.70050 return=1.71150 grad=2.7261 delta=6.682e-01
+[REWARD] total=0.04174 anchor_pos=0.4869 anchor_ori=0.5504 body_pos=0.8664 body_ori=0.3668 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=8.2419 phase0_length=200.5 phase0_fail=0.9510 phase0_complete=0.0490 curr_return=4.0636 curr_length=99.3 curr_fail=0.6834 curr_complete=0.3166
+[TRAIN_RESET] count=1653 phase0_frac=0.0617 p50=148.0 p95=273.0 target_count=102 target_nonzero=0 curriculum_p50=157.0
+[PROGRESS] env_steps=45219840 iteration=7.024s throughput=27991.2
+[FLOW_CPS] update=240/500 loss=-0.00480 kl=0.014079 ratio=0.9994 clip=0.1957 grad=1.2073 delta=3.371e-01 backbone_delta=3.360e-01 cov_delta=2.750e-02 eta=0.239511 eta_delta=1.390e-03
+[CRITIC] loss=0.39212 value=1.90607 return=1.88778 grad=2.5833 delta=6.646e-01
+[REWARD] total=0.04232 anchor_pos=0.4862 anchor_ori=0.5630 body_pos=0.8705 body_ori=0.3743 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=8.5778 phase0_length=209.5 phase0_fail=0.8804 phase0_complete=0.1196 curr_return=4.8604 curr_length=114.9 curr_fail=0.6258 curr_complete=0.3742
+[TRAIN_RESET] count=1602 phase0_frac=0.0574 p50=155.0 p95=272.0 target_count=92 target_nonzero=0 curriculum_p50=162.0
+[PROGRESS] env_steps=47185920 iteration=7.117s throughput=27623.6
+[FLOW_CPS] update=250/500 loss=-0.00645 kl=0.015688 ratio=0.9994 clip=0.2137 grad=1.1878 delta=3.602e-01 backbone_delta=3.587e-01 cov_delta=3.306e-02 eta=0.237039 eta_delta=1.168e-03
+[CRITIC] loss=0.39653 value=1.97937 return=1.95687 grad=3.4688 delta=5.085e-01
+[REWARD] total=0.04248 anchor_pos=0.4841 anchor_ori=0.5557 body_pos=0.8747 body_ori=0.3818 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=8.7259 phase0_length=208.8 phase0_fail=0.8721 phase0_complete=0.1279 curr_return=4.8316 curr_length=112.8 curr_fail=0.5410 curr_complete=0.4590
+[TRAIN_RESET] count=1672 phase0_frac=0.0526 p50=153.0 p95=269.0 target_count=86 target_nonzero=0 curriculum_p50=159.0
+[PROGRESS] env_steps=49152000 iteration=7.267s throughput=27055.5
+[VALIDATION_START] update=250 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.006s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.200s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.376s
+[VALIDATION_PROGRESS] step=100/500 done=0.00000 alive=1.00000 elapsed=14.468s
+[VALIDATION_PROGRESS] step=150/500 done=0.00000 alive=1.00000 elapsed=21.247s
+[VALIDATION_PROGRESS] step=200/500 done=0.00000 alive=1.00000 elapsed=27.975s
+[VALIDATION_PROGRESS] step=250/500 done=0.00000 alive=1.00000 elapsed=35.034s
+[VALIDATION_PROGRESS] step=300/500 done=0.00000 alive=1.00000 elapsed=42.018s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=45.586s
+[VALIDATION_DONE] update=250 time=45.654s
+[VAL] steps_mean=323.67 steps_min=305 steps_p50=324 steps_p95=324 steps_max=324 return=21.21613 done=1.00000
+[VAL_OUTCOME] failure=0.05591 motion_complete=0.94409 time_out=0.00000 censored=0.00000 reference_progress=0.99899
+[VAL_CAUSE] anchor_pos_bad=0.00000 anchor_ori_bad=0.00000 ee_body_bad=0.05591 failure_phase_p50=319.0 completion_phase_p50=324.0
+[VAL_RESET] root_pos=0.000000 root_ori=0.000deg anchor_pos=0.010003 anchor_ori=0.000deg joint_pos=0.000000 joint_vel=0.000000 body_pos=0.002920 body_ori=0.000deg
+[VAL_TRACKING] target_ref_now=0.263501 target_ref_next=0.261375 torso_ori=7.078deg left_wrist_ori=14.703deg right_wrist_ori=15.222deg
+[VAL_CHUNK] action_boundary=0.192334 action_internal=0.101146 action_ratio=1.9016 joint_vel_ratio=1.5582 root_ang_ratio=1.3506 reset_action=0.545492
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_direct_residual_cps_u500_s0_20260731_120000/checkpoints/update_0250.pt
+[FLOW_CPS] update=260/500 loss=-0.00668 kl=0.015534 ratio=0.9998 clip=0.2148 grad=1.1424 delta=3.595e-01 backbone_delta=3.581e-01 cov_delta=3.098e-02 eta=0.234403 eta_delta=1.590e-03
+[CRITIC] loss=0.37928 value=1.90718 return=1.90946 grad=4.2108 delta=5.083e-01
+[REWARD] total=0.04308 anchor_pos=0.4729 anchor_ori=0.5745 body_pos=0.8828 body_ori=0.3864 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=9.1208 phase0_length=222.6 phase0_fail=0.7738 phase0_complete=0.2262 curr_return=5.5757 curr_length=126.3 curr_fail=0.5024 curr_complete=0.4976
+[TRAIN_RESET] count=1557 phase0_frac=0.0552 p50=159.0 p95=273.0 target_count=84 target_nonzero=0 curriculum_p50=166.0
+[PROGRESS] env_steps=51118080 iteration=7.122s throughput=27606.4
+[FLOW_CPS] update=270/500 loss=-0.00665 kl=0.014586 ratio=0.9993 clip=0.2007 grad=1.1710 delta=3.429e-01 backbone_delta=3.417e-01 cov_delta=2.826e-02 eta=0.232103 eta_delta=1.469e-03
+[CRITIC] loss=0.35324 value=1.96285 return=1.96609 grad=3.2531 delta=5.818e-01
+[REWARD] total=0.04388 anchor_pos=0.4785 anchor_ori=0.5751 body_pos=0.8857 body_ori=0.3950 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=10.3761 phase0_length=241.5 phase0_fail=0.7059 phase0_complete=0.2941 curr_return=5.1727 curr_length=118.0 curr_fail=0.4529 curr_complete=0.5471
+[TRAIN_RESET] count=1521 phase0_frac=0.0447 p50=170.0 p95=272.0 target_count=68 target_nonzero=0 curriculum_p50=175.0
+[PROGRESS] env_steps=53084160 iteration=7.195s throughput=27326.6
+[FLOW_CPS] update=280/500 loss=-0.00671 kl=0.016341 ratio=0.9994 clip=0.2255 grad=1.1243 delta=3.791e-01 backbone_delta=3.776e-01 cov_delta=3.329e-02 eta=0.229686 eta_delta=1.320e-03
+[CRITIC] loss=0.33053 value=1.93140 return=1.95963 grad=3.1637 delta=4.999e-01
+[REWARD] total=0.04527 anchor_pos=0.4824 anchor_ori=0.5905 body_pos=0.8911 body_ori=0.4106 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=10.5012 phase0_length=243.6 phase0_fail=0.7432 phase0_complete=0.2568 curr_return=5.4652 curr_length=121.8 curr_fail=0.4114 curr_complete=0.5886
+[TRAIN_RESET] count=1535 phase0_frac=0.0489 p50=170.0 p95=273.0 target_count=74 target_nonzero=0 curriculum_p50=175.0
+[PROGRESS] env_steps=55050240 iteration=7.225s throughput=27212.3
+[FLOW_CPS] update=290/500 loss=-0.00602 kl=0.015519 ratio=0.9990 clip=0.2131 grad=1.1140 delta=3.480e-01 backbone_delta=3.468e-01 cov_delta=2.895e-02 eta=0.227205 eta_delta=1.687e-03
+[CRITIC] loss=0.32633 value=1.91873 return=1.95242 grad=3.0032 delta=5.485e-01
+[REWARD] total=0.04585 anchor_pos=0.4865 anchor_ori=0.5986 body_pos=0.8932 body_ori=0.4136 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=11.2528 phase0_length=251.5 phase0_fail=0.6329 phase0_complete=0.3671 curr_return=5.8959 curr_length=129.0 curr_fail=0.4080 curr_complete=0.5920
+[TRAIN_RESET] count=1562 phase0_frac=0.0512 p50=174.0 p95=274.0 target_count=79 target_nonzero=0 curriculum_p50=181.0
+[PROGRESS] env_steps=57016320 iteration=7.327s throughput=26832.2
+[FLOW_CPS] update=300/500 loss=-0.00556 kl=0.016277 ratio=0.9998 clip=0.2195 grad=1.2086 delta=3.610e-01 backbone_delta=3.597e-01 cov_delta=3.048e-02 eta=0.224858 eta_delta=1.743e-03
+[CRITIC] loss=0.32824 value=2.01943 return=2.04249 grad=2.5491 delta=6.183e-01
+[REWARD] total=0.04689 anchor_pos=0.4916 anchor_ori=0.6154 body_pos=0.8992 body_ori=0.4271 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=11.4230 phase0_length=255.7 phase0_fail=0.6667 phase0_complete=0.3333 curr_return=5.3395 curr_length=112.9 curr_fail=0.3350 curr_complete=0.6650
+[TRAIN_RESET] count=1502 phase0_frac=0.0513 p50=179.0 p95=272.0 target_count=75 target_nonzero=0 curriculum_p50=186.0
+[PROGRESS] env_steps=58982400 iteration=7.130s throughput=27574.7
+[VALIDATION_START] update=300 max_steps=500 envs=8192 fixed_seed=0
+[VALIDATION_RESET_START]
+[VALIDATION_RESET_DONE] time=0.006s
+[VALIDATION_PROGRESS] step=1/500 done=0.00000 alive=1.00000 elapsed=0.201s
+[VALIDATION_PROGRESS] step=50/500 done=0.00000 alive=1.00000 elapsed=7.464s
+[VALIDATION_PROGRESS] step=100/500 done=0.00000 alive=1.00000 elapsed=14.685s
+[VALIDATION_PROGRESS] step=150/500 done=0.00000 alive=1.00000 elapsed=21.554s
+[VALIDATION_PROGRESS] step=200/500 done=0.00000 alive=1.00000 elapsed=28.268s
+[VALIDATION_PROGRESS] step=250/500 done=0.00000 alive=1.00000 elapsed=35.262s
+[VALIDATION_PROGRESS] step=300/500 done=0.00000 alive=1.00000 elapsed=42.282s
+[VALIDATION_PROGRESS] step=324/500 done=1.00000 alive=0.00000 elapsed=45.738s
+[VALIDATION_DONE] update=300 time=45.806s
+[VAL] steps_mean=324.00 steps_min=315 steps_p50=324 steps_p95=324 steps_max=324 return=22.40247 done=1.00000
+[VAL_OUTCOME] failure=0.00037 motion_complete=0.99963 time_out=0.00000 censored=0.00000 reference_progress=1.00000
+[VAL_CAUSE] anchor_pos_bad=0.00000 anchor_ori_bad=0.00000 ee_body_bad=0.00037 failure_phase_p50=321.0 completion_phase_p50=324.0
+[VAL_RESET] root_pos=0.000000 root_ori=0.000deg anchor_pos=0.010003 anchor_ori=0.000deg joint_pos=0.000000 joint_vel=0.000000 body_pos=0.002920 body_ori=0.000deg
+[VAL_TRACKING] target_ref_now=0.253852 target_ref_next=0.251587 torso_ori=5.641deg left_wrist_ori=12.304deg right_wrist_ori=15.933deg
+[VAL_CHUNK] action_boundary=0.168805 action_internal=0.086320 action_ratio=1.9556 joint_vel_ratio=1.5432 root_ang_ratio=1.5202 reset_action=0.548108
+[CHECKPOINT] saved /home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_direct_residual_cps_u500_s0_20260731_120000/checkpoints/update_0300.pt
+[FLOW_CPS] update=310/500 loss=-0.00621 kl=0.015619 ratio=0.9996 clip=0.2130 grad=1.1781 delta=2.979e-01 backbone_delta=2.967e-01 cov_delta=2.689e-02 eta=0.222574 eta_delta=1.089e-03
+[CRITIC] loss=0.30998 value=2.24354 return=2.24379 grad=2.9966 delta=6.087e-01
+[REWARD] total=0.04741 anchor_pos=0.4947 anchor_ori=0.6255 body_pos=0.9022 body_ori=0.4258 identity=1.490e-08
+[HEALTH] finite=1 action_violation=0.000e+00 phase0_return=12.4552 phase0_length=270.3 phase0_fail=0.5278 phase0_complete=0.4722 curr_return=5.6729 curr_length=121.8 curr_fail=0.3032 curr_complete=0.6968
+[TRAIN_RESET] count=1454 phase0_frac=0.0502 p50=188.0 p95=272.0 target_count=72 target_nonzero=0 curriculum_p50=193.0
+[PROGRESS] env_steps=60948480 iteration=7.130s throughput=27573.1

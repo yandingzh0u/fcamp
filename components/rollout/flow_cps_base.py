@@ -1,13 +1,12 @@
 
 
-"""Flow-CPS: causal flow policy with trace-normalized low-rank CPS exploration.
+"""Flow-CPS with direct residual exploration and an identifiable global scale.
 
-The actor keeps one stochastic path: a deterministic residual flow backbone plus
-in-flow CPS exploration. Fresh noise is sampled in the 4xaction_dim trajectory
-space through a learned diagonal-plus-low-rank covariance whose trace is
-normalized to preserve the scalar CPS noise budget. The exact covariance
-transition density is used for the clipped policy ratio/KL; there is no action-Gaussian
-exploration branch or hand-written failure penalty.
+The actor keeps the proven causal residual decoder and per-frame PPO contract.
+At every flow step, CPS noise is injected directly into residual/action-increment
+coordinates.  All H offsets draw independent innovations from the same learned
+joint covariance shape; a separate learned scalar owns the total noise budget.
+The exact per-offset transition density is used by clipped PPO.
 """
 
 from __future__ import annotations
@@ -48,16 +47,27 @@ class FlowCPSBase:
             activation=cfg.activation,
             action_squash_scale=float(cfg.action_squash_scale),
         ).to(env.device)
-        self.cps_noise_level = float(cfg.cps_noise_level)
         steps = int(cfg.flow_steps)
-        self._cps_flat_dim = self.horizon_h * self.num_act
         self.cps_cov_rank = int(cfg.cps_cov_rank)
         init_diag = math.log(math.exp(1.0) - 1.0)
         self._policy.cps_diag_raw = nn.Parameter(
-            torch.full((steps, self._cps_flat_dim), init_diag, device=env.device)
+            torch.full((steps, self.num_act), init_diag, device=env.device)
         )
         self._policy.cps_lowrank_raw = nn.Parameter(
-            1.0e-3 * torch.randn(steps, self._cps_flat_dim, self.cps_cov_rank, device=env.device)
+            1.0e-3
+            * torch.randn(
+                steps,
+                self.num_act,
+                self.cps_cov_rank,
+                device=env.device,
+            )
+        )
+        eta_init = float(cfg.cps_noise_init)
+        eta_eps = 1.0e-4
+        eta_unit = (eta_init - eta_eps) / (1.0 - 2.0 * eta_eps)
+        eta_raw_init = math.log(eta_unit / (1.0 - eta_unit))
+        self._policy.cps_eta_raw = nn.Parameter(
+            torch.tensor(eta_raw_init, device=env.device)
         )
         self.chunk_dim = self._policy.chunk_dim
 
@@ -190,8 +200,12 @@ class FlowCPSBase:
         steps = int(self.cfg.flow_steps)
         sigma_schedule = torch.linspace(1.0, 0.0, steps + 1, device=actor_obs.device, dtype=actor_obs.dtype)
         for step_index in range(steps):
-            next_path, _, _ = self._cps_backbone_step(obs_prep, latent, sigma_schedule, step_index)
-            latent = self._residual_from_path(next_path).reshape(batch, self.chunk_dim)
+            latent, _, _ = self._cps_backbone_step(
+                obs_prep,
+                latent,
+                sigma_schedule,
+                step_index,
+            )
         return latent
 
     def _flow_mean_actions(self, actor_obs: torch.Tensor, prev_action: torch.Tensor | None = None) -> torch.Tensor:
@@ -210,7 +224,18 @@ class FlowCPSBase:
         sigma_next = sigma_schedule[step_index + 1].to(device=reference.device, dtype=reference.dtype)
         delta_sigma = torch.clamp(sigma - sigma_next, min=0.0)
         sqrt_delta = torch.sqrt(delta_sigma)
-        eta = torch.as_tensor(self.cps_noise_level, device=reference.device, dtype=reference.dtype)
+        eta_eps = torch.as_tensor(
+            1.0e-4,
+            device=reference.device,
+            dtype=reference.dtype,
+        )
+        eta_unit = torch.sigmoid(
+            self._policy.cps_eta_raw.to(
+                device=reference.device,
+                dtype=reference.dtype,
+            )
+        )
+        eta = eta_eps + (1.0 - 2.0 * eta_eps) * eta_unit
         beta = 0.5 * math.pi * eta
         del sigma_next
         # Mean-preserving Action-CPS applies coefficient preservation to the
@@ -222,6 +247,16 @@ class FlowCPSBase:
         predicted_coeff = torch.sqrt(predicted_sq)
         return predicted_coeff, noise_coeff, eta
 
+    def _cps_eta_value(self) -> torch.Tensor:
+        eta_eps = torch.as_tensor(
+            1.0e-4,
+            device=self._policy.cps_eta_raw.device,
+            dtype=self._policy.cps_eta_raw.dtype,
+        )
+        return eta_eps + (1.0 - 2.0 * eta_eps) * torch.sigmoid(
+            self._policy.cps_eta_raw
+        )
+
     def _cps_covariance_factors(
         self,
         step_index: int,
@@ -229,16 +264,34 @@ class FlowCPSBase:
         device: torch.device,
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        diag = F.softplus(self._policy.cps_diag_raw[step_index].to(device=device, dtype=dtype)) + 1.0e-4
-        lowrank = self._policy.cps_lowrank_raw[step_index].to(device=device, dtype=dtype)
-        trace = (diag.square().sum() + lowrank.square().sum()).clamp(min=1.0e-12)
-        scale = torch.sqrt(trace / float(self._cps_flat_dim))
+        diag = (
+            F.softplus(
+                self._policy.cps_diag_raw[step_index].to(
+                    device=device,
+                    dtype=dtype,
+                )
+            )
+            + 1.0e-4
+        )
+        lowrank = self._policy.cps_lowrank_raw[step_index].to(
+            device=device,
+            dtype=dtype,
+        )
+        trace = (
+            diag.square().sum() + lowrank.square().sum()
+        ).clamp(min=1.0e-12)
+        scale = torch.sqrt(trace / float(self.num_act))
         diag = diag / scale
         lowrank = lowrank / scale
-        cov = torch.diag_embed(diag.square()) + lowrank @ lowrank.transpose(0, 1)
+        cov = (
+            torch.diag_embed(diag.square())
+            + lowrank @ lowrank.transpose(0, 1)
+        )
         chol = torch.linalg.cholesky(cov)
         log_diag_chol = torch.log(torch.diagonal(chol).clamp(min=1.0e-8))
-        trace_normalized = (diag.square().sum() + lowrank.square().sum()) / float(self._cps_flat_dim)
+        trace_normalized = (
+            diag.square().sum() + lowrank.square().sum()
+        ) / float(self.num_act)
         return diag, lowrank, cov, chol, log_diag_chol, trace_normalized
 
     def _cps_backbone_step(
@@ -252,45 +305,13 @@ class FlowCPSBase:
         sigma = sigma_schedule[step_index]
         timestep_batch = torch.full((batch,), float(sigma.item()), device=mean_latent.device, dtype=mean_latent.dtype)
         model_output = self._policy.velocity_field(obs_prep, mean_latent, timestep_batch)
-        latent = mean_latent.view(batch, self.horizon_h, self.num_act)
         mean_next = flow_ode_mean(model_output, mean_latent, sigma_schedule, step_index)
-        predicted_coeff, noise_coeff, _ = self._cps_step_coeffs(step_index, sigma_schedule, latent)
-        next_mean_path = self._path_from_residual(mean_next.view(batch, self.horizon_h, self.num_act))
-        return next_mean_path, predicted_coeff, noise_coeff
-
-    @staticmethod
-    def _path_from_residual(residual: torch.Tensor) -> torch.Tensor:
-        return torch.cumsum(residual, dim=-2)
-
-    @staticmethod
-    def _residual_from_path(path: torch.Tensor) -> torch.Tensor:
-        prev = torch.cat([torch.zeros_like(path[..., :1, :]), path[..., :-1, :]], dim=-2)
-        return path - prev
-
-    @staticmethod
-    def _chunk_path_from_innovations(innovations: torch.Tensor) -> torch.Tensor:
-        """Causal, invertible frame smoother for action-path exploration noise.
-
-        Innovations are independent in density space. Their normalized
-        cumulative path is an action-level trajectory perturbation, not a
-        residual-latent perturbation.
-        """
-        horizon = innovations.shape[-2]
-        norm = torch.sqrt(
-            torch.arange(1, horizon + 1, device=innovations.device, dtype=innovations.dtype)
-        ).view(*((1,) * (innovations.ndim - 2)), horizon, 1)
-        return torch.cumsum(innovations, dim=-2) / norm
-
-    @staticmethod
-    def _innovations_from_chunk_path(path_noise: torch.Tensor) -> torch.Tensor:
-        horizon = path_noise.shape[-2]
-        norm = torch.sqrt(
-            torch.arange(1, horizon + 1, device=path_noise.device, dtype=path_noise.dtype)
-        ).view(*((1,) * (path_noise.ndim - 2)), horizon, 1)
-        cumulative = path_noise * norm
-        first = cumulative[..., :1, :]
-        rest = cumulative[..., 1:, :] - cumulative[..., :-1, :]
-        return torch.cat([first, rest], dim=-2)
+        predicted_coeff, noise_coeff, _ = self._cps_step_coeffs(
+            step_index,
+            sigma_schedule,
+            mean_latent,
+        )
+        return mean_next, predicted_coeff, noise_coeff
 
     def _sample_cps_innovation(
         self,
@@ -301,11 +322,30 @@ class FlowCPSBase:
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        diag, lowrank, _, _, _, _ = self._cps_covariance_factors(step_index, device=device, dtype=dtype)
-        eps_diag = torch.randn(batch, self._cps_flat_dim, device=device, dtype=dtype)
-        eps_rank = torch.randn(batch, self.cps_cov_rank, device=device, dtype=dtype)
-        innovation = eps_diag * diag.view(1, -1) + eps_rank @ lowrank.transpose(0, 1)
-        return (innovation * noise_coeff).view(batch, self.horizon_h, self.num_act)
+        diag, lowrank, _, _, _, _ = self._cps_covariance_factors(
+            step_index,
+            device=device,
+            dtype=dtype,
+        )
+        eps_diag = torch.randn(
+            batch,
+            self.horizon_h,
+            self.num_act,
+            device=device,
+            dtype=dtype,
+        )
+        eps_rank = torch.randn(
+            batch,
+            self.horizon_h,
+            self.cps_cov_rank,
+            device=device,
+            dtype=dtype,
+        )
+        innovation = (
+            eps_diag * diag.view(1, 1, self.num_act)
+            + torch.matmul(eps_rank, lowrank.transpose(0, 1))
+        )
+        return innovation * noise_coeff
 
     def _cps_innovation_log_prob(
         self,
@@ -313,9 +353,8 @@ class FlowCPSBase:
         noise_coeff: torch.Tensor,
         step_index: int,
     ) -> torch.Tensor:
-        # Exact low-rank-plus-diagonal CPS density. Cholesky orders dimensions
-        # by frame, so grouping component log-probs back into frames gives a
-        # causal conditional decomposition of the joint chunk density.
+        # Exact shared joint covariance density.  Offsets use independent
+        # random realizations but the same learned action-space shape.
         batch = innovation.shape[0]
         safe_std = torch.clamp(noise_coeff, min=1.0e-6)
         _, _, _, chol, log_diag_chol, _ = self._cps_covariance_factors(
@@ -323,7 +362,10 @@ class FlowCPSBase:
             device=innovation.device,
             dtype=innovation.dtype,
         )
-        flat = innovation.reshape(batch, self._cps_flat_dim) / safe_std
+        flat = innovation.reshape(
+            batch * self.horizon_h,
+            self.num_act,
+        ) / safe_std
         whitened = torch.linalg.solve_triangular(
             chol,
             flat.transpose(0, 1),
@@ -331,10 +373,13 @@ class FlowCPSBase:
         ).transpose(0, 1)
         component_log_prob = (
             -0.5 * (whitened.square() + math.log(2.0 * math.pi))
-            - log_diag_chol.view(1, self._cps_flat_dim)
+            - log_diag_chol.view(1, self.num_act)
             - torch.log(safe_std)
         )
-        return component_log_prob.view(batch, self.horizon_h, self.num_act).sum(dim=-1)
+        return component_log_prob.sum(dim=-1).view(
+            batch,
+            self.horizon_h,
+        )
 
     def _sample_cps_path(
         self,
@@ -350,23 +395,23 @@ class FlowCPSBase:
 
         latent_path = torch.zeros(batch, steps + 1, self.chunk_dim, device=actor_obs.device, dtype=actor_obs.dtype)
         step_log_probs = torch.zeros(batch, steps, self.horizon_h, device=actor_obs.device, dtype=actor_obs.dtype)
-        step_noise_coeffs = torch.zeros(
-            batch, steps, self.horizon_h, self.num_act, device=actor_obs.device, dtype=actor_obs.dtype
+        innovation_square_sums = torch.zeros(
+            self.horizon_h,
+            device=actor_obs.device,
+            dtype=actor_obs.dtype,
         )
         latent_path[:, 0, :] = sampled_latent
 
         for step_index in range(steps):
-            next_mean_path, predicted_coeff, noise_coeff = self._cps_backbone_step(
+            mean_next, predicted_coeff, noise_coeff = self._cps_backbone_step(
                 obs_prep,
                 mean_latent,
                 sigma_schedule,
                 step_index,
             )
-            offset = sampled_latent.view(batch, self.horizon_h, self.num_act) - mean_latent.view(
-                batch, self.horizon_h, self.num_act
+            conditional_mean = mean_next + predicted_coeff * (
+                sampled_latent - mean_latent
             )
-            offset_path = self._path_from_residual(offset)
-            mean_path = next_mean_path + predicted_coeff * offset_path
             innovation = self._sample_cps_innovation(
                 batch=batch,
                 step_index=step_index,
@@ -374,16 +419,32 @@ class FlowCPSBase:
                 device=actor_obs.device,
                 dtype=actor_obs.dtype,
             )
-            random_path = self._chunk_path_from_innovations(innovation)
-            sample_path = mean_path + random_path
-            sample = self._residual_from_path(sample_path)
-            step_log_probs[:, step_index, :] = self._cps_innovation_log_prob(innovation, noise_coeff, step_index)
-            step_noise_coeffs[:, step_index] = noise_coeff
-            mean_latent = self._residual_from_path(next_mean_path).reshape(batch, self.chunk_dim)
+            sample = conditional_mean.view(
+                batch,
+                self.horizon_h,
+                self.num_act,
+            ) + innovation
+            step_log_probs[:, step_index, :] = (
+                self._cps_innovation_log_prob(
+                    innovation,
+                    noise_coeff,
+                    step_index,
+                )
+            )
+            innovation_square_sums += innovation.square().sum(dim=(0, 2))
+            mean_latent = mean_next
             sampled_latent = sample.reshape(batch, self.chunk_dim)
             latent_path[:, step_index + 1, :] = sampled_latent
 
-        return sampled_latent, latent_path, step_log_probs, step_noise_coeffs
+        innovation_mean_squares = innovation_square_sums / float(
+            batch * steps * self.num_act
+        )
+        return (
+            sampled_latent,
+            latent_path,
+            step_log_probs,
+            innovation_mean_squares,
+        )
 
     def _recompute_cps_path_stats(
         self,
@@ -401,23 +462,27 @@ class FlowCPSBase:
 
         for step_index in range(steps):
             sampled_latent = latent_path[:, step_index, :]
-            next_latent = latent_path[:, step_index + 1, :].view(batch, self.horizon_h, self.num_act)
-            next_mean_path, predicted_coeff, noise_coeff = self._cps_backbone_step(
+            next_latent = latent_path[:, step_index + 1, :]
+            mean_next, predicted_coeff, noise_coeff = self._cps_backbone_step(
                 obs_prep,
                 mean_latent,
                 sigma_schedule,
                 step_index,
             )
-            offset = sampled_latent.view(batch, self.horizon_h, self.num_act) - mean_latent.view(
-                batch, self.horizon_h, self.num_act
+            conditional_mean = mean_next + predicted_coeff * (
+                sampled_latent - mean_latent
             )
-            offset_path = self._path_from_residual(offset)
-            mean_path = next_mean_path + predicted_coeff * offset_path
-            next_path = self._path_from_residual(next_latent)
-            path_noise = next_path - mean_path
-            innovation = self._innovations_from_chunk_path(path_noise)
-            step_log_probs[:, step_index, :] = self._cps_innovation_log_prob(innovation, noise_coeff, step_index)
-            mean_latent = self._residual_from_path(next_mean_path).reshape(batch, self.chunk_dim)
+            innovation = (
+                next_latent - conditional_mean
+            ).view(batch, self.horizon_h, self.num_act)
+            step_log_probs[:, step_index, :] = (
+                self._cps_innovation_log_prob(
+                    innovation,
+                    noise_coeff,
+                    step_index,
+                )
+            )
+            mean_latent = mean_next
 
         return step_log_probs
 

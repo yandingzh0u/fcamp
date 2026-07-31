@@ -31,7 +31,7 @@ def test_fixed_reward_config_is_production_pose_only_recipe() -> None:
     assert cfg.parameters.rollout_env_steps % cfg.parameters.horizon == 0
     assert cfg.parameters.flow_steps == 4
     assert cfg.parameters.action_squash_scale == 5.0
-    assert cfg.parameters.cps_noise_level == 0.8
+    assert cfg.parameters.cps_noise_init == 0.36
     assert cfg.parameters.cps_cov_rank == 8
     assert cfg.parameters.desired_kl == 0.01
     assert cfg.parameters.policy_lr == 0.0003
@@ -104,11 +104,27 @@ def test_validation_has_no_fractional_early_stop() -> None:
 
 def test_flow_cps_config_has_no_legacy_algorithm_fields() -> None:
     fields_by_name = {field.name for field in fields(FlowCPSConfig)}
+    assert "cps_noise_init" in fields_by_name
+    assert "cps_noise_level" not in fields_by_name
     assert "init_noise_std" not in fields_by_name
     assert "num_generations" not in fields_by_name
     assert "tail_bootstrap_steps" not in fields_by_name
     assert "actor_density" not in fields_by_name
     assert "failure_penalty" not in fields_by_name
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0.0, 1.0e-4, 0.9999, 1.0],
+)
+def test_cps_noise_init_respects_bounded_eta_parameterization(
+    value: float,
+) -> None:
+    with pytest.raises(ValueError, match="cps_noise_init"):
+        load_config(
+            CONFIG,
+            [f"parameters.cps_noise_init={value}"],
+        )
 
 
 def test_task_binds_motion_and_terrain() -> None:

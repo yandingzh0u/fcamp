@@ -10,10 +10,16 @@ import shutil
 
 import torch
 
+from components.rollout.fixed_reward_contract import (
+    FIXED_REWARD_CHECKPOINT_CONTRACT,
+)
+
 from .config import config_from_checkpoint_dict
 
 
-FIXED_REWARD_SCHEMA_VERSION = 1
+FIXED_REWARD_SCHEMA_VERSION = int(
+    FIXED_REWARD_CHECKPOINT_CONTRACT["fixed_reward_schema_version"]
+)
 _CHECKPOINT_TOP_LEVEL_KEYS = frozenset(
     {
         "update_idx",
@@ -45,13 +51,12 @@ _ALGO_STATE_KEYS = frozenset(
         "learning_rate",
         "critic_learning_rate",
         "actor_obs_normalizer",
-        "fixed_reward_schema_version",
         "stream_ids",
         "phase0_stream_count",
         "phase0_stream_fraction",
         "phase0_attempt_tracker",
     }
-)
+) | frozenset(FIXED_REWARD_CHECKPOINT_CONTRACT)
 _REMOVED_STATE_KEY_MARKERS = (
     "amp_",
     "disc_",
@@ -103,6 +108,29 @@ def audit_fixed_reward_checkpoint_payload(payload: dict) -> None:
         # audit scoped to the new schema preserves a clear legacy error.
         return
 
+    # Check the complete algorithm contract before inspecting or restoring
+    # any policy/optimizer state. In particular, schema-1 checkpoints must
+    # never partially initialize the direct-residual CPS policy.
+    if not isinstance(algo_state, Mapping):
+        raise ValueError("fixed_reward checkpoint algo_state must be a mapping.")
+    schema_version = algo_state.get("fixed_reward_schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version != FIXED_REWARD_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "fixed_reward checkpoint schema version mismatch: "
+            f"expected={FIXED_REWARD_SCHEMA_VERSION}, "
+            f"actual={schema_version!r}"
+        )
+    for key, expected in FIXED_REWARD_CHECKPOINT_CONTRACT.items():
+        actual = algo_state.get(key)
+        if actual != expected:
+            raise ValueError(
+                "fixed_reward checkpoint semantic contract mismatch: "
+                f"{key} expected={expected!r}, actual={actual!r}"
+            )
+
     top_level_keys = set(payload)
     missing = _CHECKPOINT_REQUIRED_KEYS - top_level_keys
     unknown = top_level_keys - _CHECKPOINT_TOP_LEVEL_KEYS
@@ -133,23 +161,11 @@ def audit_fixed_reward_checkpoint_payload(payload: dict) -> None:
             f"actual={sorted(policy_modules)}"
         )
 
-    if not isinstance(algo_state, dict):
-        raise ValueError("fixed_reward checkpoint algo_state must be a mapping.")
     if set(algo_state) != _ALGO_STATE_KEYS:
         raise ValueError(
             "fixed_reward checkpoint algo_state schema mismatch: "
             f"expected={sorted(_ALGO_STATE_KEYS)}, "
             f"actual={sorted(algo_state)}"
-        )
-    schema_version = algo_state.get("fixed_reward_schema_version")
-    if (
-        type(schema_version) is not int
-        or schema_version != FIXED_REWARD_SCHEMA_VERSION
-    ):
-        raise ValueError(
-            "fixed_reward checkpoint schema version mismatch: "
-            f"expected={FIXED_REWARD_SCHEMA_VERSION}, "
-            f"actual={schema_version!r}"
         )
 
 

@@ -293,6 +293,16 @@ class FixedRewardFlowCPS(FlowCPSBase):
                 f"{saved!r}, expected {expected}; legacy FCAMP/AMP checkpoints "
                 "cannot be loaded"
             )
+        for key, expected_value in (
+            FIXED_REWARD_CHECKPOINT_CONTRACT.items()
+        ):
+            saved_value = state.get(key)
+            if saved_value != expected_value:
+                raise ValueError(
+                    "fixed_reward checkpoint semantic contract mismatch: "
+                    f"{key} expected={expected_value!r}, "
+                    f"actual={saved_value!r}"
+                )
         legacy = self._legacy_checkpoint_keys(state)
         legacy.update(self._legacy_checkpoint_keys(policy_state))
         if legacy:
@@ -677,6 +687,10 @@ class FixedRewardFlowCPS(FlowCPSBase):
         action_abs_max = 0.0
         action_bound_violation_max = 0.0
         reward_identity_abs_max = 0.0
+        cps_innovation_mean_square_sum = torch.zeros(
+            horizon,
+            device=device,
+        )
 
         with torch.no_grad():
             for chunk_idx in range(chunks):
@@ -691,11 +705,16 @@ class FixedRewardFlowCPS(FlowCPSBase):
                     final_latent,
                     latent_path,
                     old_log_probs,
-                    _,
+                    innovation_mean_squares,
                 ) = self._sample_cps_path(actor_obs_n)
                 self._ensure_finite("action/final_latent", final_latent)
                 self._ensure_finite("action/latent_path", latent_path)
                 self._ensure_finite("action/old_log_prob", old_log_probs)
+                self._ensure_finite(
+                    "cps/innovation_mean_squares",
+                    innovation_mean_squares,
+                )
+                cps_innovation_mean_square_sum += innovation_mean_squares
                 action_chunk = self._policy._action_transform(
                     final_latent,
                     prev_action=previous_action,
@@ -942,6 +961,9 @@ class FixedRewardFlowCPS(FlowCPSBase):
             raise RuntimeError("fixed_reward rollout contains no valid samples")
         self._obs = obs
         self._critic_obs = critic_obs
+        cps_offset_innovation_rms = torch.sqrt(
+            cps_innovation_mean_square_sum / float(chunks)
+        )
         rollout = {
             "actor_obs": actor_obs_buf,
             "actor_obs_raw": actor_obs_raw_buf,
@@ -969,6 +991,7 @@ class FixedRewardFlowCPS(FlowCPSBase):
             "collection_start_phases": collection_start_phases,
             "action_abs_max": action_abs_max,
             "action_bound_violation_max": action_bound_violation_max,
+            "cps_offset_innovation_rms": cps_offset_innovation_rms,
             "next_observation": obs,
         }
         self._assign_credit(rollout)
@@ -1104,6 +1127,40 @@ class FixedRewardFlowCPS(FlowCPSBase):
             ).float().square().sum()
         return float(torch.sqrt(squared).item())
 
+    @staticmethod
+    def _named_parameter_snapshot(
+        module: nn.Module,
+        predicate,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            name: parameter.detach().clone()
+            for name, parameter in module.named_parameters()
+            if parameter.requires_grad and predicate(name)
+        }
+
+    @staticmethod
+    def _named_parameter_delta_l2(
+        module: nn.Module,
+        before: dict[str, torch.Tensor],
+    ) -> float:
+        if not before:
+            raise RuntimeError("parameter group is empty")
+        current = dict(module.named_parameters())
+        squared = torch.zeros(
+            (),
+            device=next(iter(current.values())).device,
+        )
+        for name, old_parameter in before.items():
+            if name not in current:
+                raise RuntimeError(
+                    f"trainable parameter {name!r} disappeared"
+                )
+            squared += (
+                current[name].detach()
+                - old_parameter.to(current[name])
+            ).float().square().sum()
+        return float(torch.sqrt(squared).item())
+
     def _actor_update(self, rollout: dict) -> dict[str, float]:
         device = self.env.device
         chunks, n_envs = rollout["valid"].shape[:2]
@@ -1182,6 +1239,18 @@ class FixedRewardFlowCPS(FlowCPSBase):
         lr_increase_steps = 0
         lr_hold_steps = 0
         before = self._snapshot_parameters(self._policy)
+        backbone_before = self._named_parameter_snapshot(
+            self._policy,
+            lambda name: not name.startswith("cps_"),
+        )
+        covariance_before = self._named_parameter_snapshot(
+            self._policy,
+            lambda name: name in {
+                "cps_diag_raw",
+                "cps_lowrank_raw",
+            },
+        )
+        eta_before = self._policy.cps_eta_raw.detach().clone()
         self._ensure_parameters_finite("actor/before", self._policy)
 
         for epoch in range(int(self.cfg.policy_epochs)):
@@ -1434,6 +1503,28 @@ class FixedRewardFlowCPS(FlowCPSBase):
         parameter_delta = self._parameter_delta_l2(self._policy, before)
         if not math.isfinite(parameter_delta) or parameter_delta <= 0.0:
             raise RuntimeError("fixed_reward actor parameters did not update")
+        backbone_delta = self._named_parameter_delta_l2(
+            self._policy,
+            backbone_before,
+        )
+        covariance_delta = self._named_parameter_delta_l2(
+            self._policy,
+            covariance_before,
+        )
+        eta_delta = float(
+            (
+                self._policy.cps_eta_raw.detach() - eta_before
+            ).abs().item()
+        )
+        for name, value in (
+            ("backbone", backbone_delta),
+            ("covariance", covariance_delta),
+            ("eta", eta_delta),
+        ):
+            if not math.isfinite(value):
+                raise FloatingPointError(
+                    f"fixed_reward actor {name} parameter delta is non-finite"
+                )
         denominator = float(steps)
         metrics = {
             "flow_cps/policy_loss": totals["policy_loss"] / denominator,
@@ -1450,6 +1541,9 @@ class FixedRewardFlowCPS(FlowCPSBase):
                 totals["grad_norm"] / denominator
             ),
             "flow_cps/actor_parameter_delta_l2": parameter_delta,
+            "flow_cps/backbone_parameter_delta_l2": backbone_delta,
+            "flow_cps/covariance_parameter_delta_l2": covariance_delta,
+            "flow_cps/eta_parameter_delta_abs": eta_delta,
             "flow_cps/actor_lr_start": actor_lr_start,
             "flow_cps/actor_lr": float(self.learning_rate),
             "flow_cps/kl_target_per_step": float(self.cfg.desired_kl),
@@ -1820,6 +1914,100 @@ class FixedRewardFlowCPS(FlowCPSBase):
                 metrics[f"{prefix}/failure_phase_p95"] = -1.0
         return metrics
 
+    @torch.no_grad()
+    def _cps_health_metrics(self) -> dict[str, float]:
+        steps = int(self.cfg.flow_steps)
+        sigma_schedule = torch.linspace(
+            1.0,
+            0.0,
+            steps + 1,
+            device=self.env.device,
+            dtype=self._policy.cps_diag_raw.dtype,
+        )
+        eta = self._cps_eta_value()
+        self._ensure_finite("cps/eta", eta)
+        eta_value = float(eta.item())
+        if not 0.0 < eta_value < 1.0:
+            raise RuntimeError("CPS global eta left (0, 1)")
+        metrics: dict[str, float] = {
+            "cps/eta": eta_value,
+            "cps/eta_raw": float(self._policy.cps_eta_raw.item()),
+            "health/covariance_psd": 1.0,
+        }
+        for step_index in range(steps):
+            (
+                _,
+                _,
+                covariance,
+                chol,
+                _,
+                average_variance,
+            ) = self._cps_covariance_factors(
+                step_index,
+                device=torch.device(self.env.device),
+                dtype=self._policy.cps_diag_raw.dtype,
+            )
+            predicted_coeff, noise_coeff, step_eta = (
+                self._cps_step_coeffs(
+                    step_index,
+                    sigma_schedule,
+                    self._policy.cps_diag_raw,
+                )
+            )
+            for name, tensor in (
+                ("covariance", covariance),
+                ("cholesky", chol),
+                ("average_variance", average_variance),
+                ("eta", step_eta),
+                ("noise_coeff", noise_coeff),
+                ("predicted_coeff", predicted_coeff),
+            ):
+                self._ensure_finite(
+                    f"cps/step_{step_index}/{name}",
+                    tensor,
+                )
+            chol_diag = torch.diagonal(chol)
+            if bool((chol_diag <= 0.0).any()):
+                raise RuntimeError(
+                    f"CPS covariance step {step_index} is not positive definite"
+                )
+            average_variance_value = float(average_variance.item())
+            if abs(average_variance_value - 1.0) > 1.0e-5:
+                raise RuntimeError(
+                    "CPS covariance shape normalization drifted: "
+                    f"step={step_index}, average_variance="
+                    f"{average_variance_value:.9g}"
+                )
+            prefix = f"cps/step_{step_index}"
+            metrics.update(
+                {
+                    f"{prefix}/predicted_coeff": float(
+                        predicted_coeff.item()
+                    ),
+                    f"{prefix}/noise_coeff": float(
+                        noise_coeff.item()
+                    ),
+                    f"{prefix}/covariance_trace": float(
+                        torch.trace(covariance).item()
+                    ),
+                    f"{prefix}/shape_average_variance": (
+                        average_variance_value
+                    ),
+                    f"{prefix}/innovation_average_variance": float(
+                        noise_coeff.square().item()
+                        * average_variance_value
+                    ),
+                    f"{prefix}/cholesky_diag_min": float(
+                        chol_diag.min().item()
+                    ),
+                    f"{prefix}/cholesky_diag_max": float(
+                        chol_diag.max().item()
+                    ),
+                    f"{prefix}/covariance_psd": 1.0,
+                }
+            )
+        return metrics
+
     def _soft_health_metrics(
         self,
         metrics: dict[str, float],
@@ -2054,6 +2242,18 @@ class FixedRewardFlowCPS(FlowCPSBase):
             }
         )
         self._add_sampler_metrics(metrics)
+        innovation_rms = rollout["cps_offset_innovation_rms"]
+        self._ensure_finite("cps/offset_innovation_rms", innovation_rms)
+        for offset, value in enumerate(innovation_rms):
+            metrics[f"cps/offset_{offset}_innovation_rms"] = float(
+                value.item()
+            )
+        innovation_min = float(innovation_rms.min().item())
+        innovation_max = float(innovation_rms.max().item())
+        metrics["cps/offset_innovation_rms_ratio"] = (
+            innovation_max / max(innovation_min, 1.0e-12)
+        )
+        metrics.update(self._cps_health_metrics())
         self._ensure_parameters_finite("actor/final", self._policy)
         self._ensure_parameters_finite("critic/final", self.critic)
         metrics["system/parameters_finite"] = 1.0
@@ -2073,7 +2273,11 @@ class FixedRewardFlowCPS(FlowCPSBase):
             f"ratio={metrics.get('flow_cps/ratio', 0.0):.4f} "
             f"clip={metrics.get('flow_cps/clip_fraction', 0.0):.4f} "
             f"grad={metrics.get('flow_cps/actor_grad_norm', 0.0):.4f} "
-            f"delta={metrics.get('flow_cps/actor_parameter_delta_l2', 0.0):.3e}",
+            f"delta={metrics.get('flow_cps/actor_parameter_delta_l2', 0.0):.3e} "
+            f"backbone_delta={metrics.get('flow_cps/backbone_parameter_delta_l2', 0.0):.3e} "
+            f"cov_delta={metrics.get('flow_cps/covariance_parameter_delta_l2', 0.0):.3e} "
+            f"eta={metrics.get('cps/eta', 0.0):.6f} "
+            f"eta_delta={metrics.get('flow_cps/eta_parameter_delta_abs', 0.0):.3e}",
             flush=True,
         )
         print(
@@ -2110,7 +2314,10 @@ class FixedRewardFlowCPS(FlowCPSBase):
     def log_banner(self) -> None:
         print(
             "[FLOW_CPS] method=fixed_reward actor=causal_flow_cps "
-            "reward=pose_only streams=phase0_10pct,curriculum_90pct",
+            "decoder=cumulative_residual CPS=direct_residual "
+            "covariance=shared_offset_shape scale=learned_global_eta "
+            "ppo=per_frame_conditional_factor reward=pose_only "
+            "streams=phase0_10pct,curriculum_90pct",
             flush=True,
         )
         print(
@@ -2124,9 +2331,12 @@ class FixedRewardFlowCPS(FlowCPSBase):
             "0.1*undesired_contacts)*dt",
             flush=True,
         )
+        schema = FIXED_REWARD_CHECKPOINT_CONTRACT[
+            "fixed_reward_schema_version"
+        ]
         print(
             "[HEALTH] finite_guards=state,observation,action,reward,value,"
             "return,advantage,loss,gradient,parameter "
-            "fixed_reward_schema=1",
+            f"fixed_reward_schema={schema}",
             flush=True,
         )

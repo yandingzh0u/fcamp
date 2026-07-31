@@ -13,6 +13,9 @@ from engine.checkpoint import (
     audit_fixed_reward_checkpoint_payload,
 )
 from engine.config import load_config
+from components.rollout.fixed_reward_contract import (
+    FIXED_REWARD_CHECKPOINT_CONTRACT,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,11 +34,11 @@ def _payload() -> dict:
         "optimizer": {"state": {}, "param_groups": []},
         "metrics": {"reward/mean": 0.05},
         "algo_state": {
+            **FIXED_REWARD_CHECKPOINT_CONTRACT,
             "critic_optimizer": {"state": {}, "param_groups": []},
             "learning_rate": 3.0e-4,
             "critic_learning_rate": 3.0e-4,
             "actor_obs_normalizer": {},
-            "fixed_reward_schema_version": 1,
             "stream_ids": torch.tensor([0, 1]),
             "phase0_stream_count": 1,
             "phase0_stream_fraction": 0.1,
@@ -64,7 +67,7 @@ def _payload() -> dict:
     }
 
 
-def test_schema_one_checkpoint_round_trip_passes_recursive_audit(
+def test_schema_four_checkpoint_round_trip_passes_recursive_audit(
     tmp_path,
 ) -> None:
     path = tmp_path / "checkpoint.pt"
@@ -85,6 +88,10 @@ def test_schema_one_checkpoint_round_trip_passes_recursive_audit(
         "critic_learning_rate",
         "actor_obs_normalizer",
         "fixed_reward_schema_version",
+        "policy_semantics",
+        "action_semantics",
+        "cps_semantics",
+        "gae_semantics",
         "stream_ids",
         "phase0_stream_count",
         "phase0_stream_fraction",
@@ -118,15 +125,34 @@ def test_checkpoint_audit_rejects_removed_state_recursively(
         audit_fixed_reward_checkpoint_payload(payload)
 
 
-def test_checkpoint_audit_rejects_wrong_schema_before_restore() -> None:
+def test_checkpoint_audit_rejects_schema_one_before_restore() -> None:
     payload = _payload()
-    payload["algo_state"]["fixed_reward_schema_version"] = 2
+    payload["algo_state"]["fixed_reward_schema_version"] = 1
 
     with pytest.raises(ValueError, match="schema version mismatch"):
         audit_fixed_reward_checkpoint_payload(payload)
 
 
-def test_schema_one_checkpoint_cannot_omit_its_config() -> None:
+@pytest.mark.parametrize(
+    "semantic_key",
+    [
+        "policy_semantics",
+        "action_semantics",
+        "cps_semantics",
+        "gae_semantics",
+    ],
+)
+def test_checkpoint_audit_rejects_semantic_mismatch_before_restore(
+    semantic_key: str,
+) -> None:
+    payload = _payload()
+    payload["algo_state"][semantic_key] = "wrong_semantics"
+
+    with pytest.raises(ValueError, match="semantic contract mismatch"):
+        audit_fixed_reward_checkpoint_payload(payload)
+
+
+def test_schema_four_checkpoint_cannot_omit_its_config() -> None:
     payload = _payload()
     del payload["config"]
 
@@ -153,6 +179,12 @@ class _PreflightFailureAlgorithm:
         raise ValueError("preflight sentinel")
 
 
+class _AuditMustFailAlgorithm:
+    def __init__(self) -> None:
+        self.policy = _LoadRecorder()
+        self.optimizer = _LoadRecorder()
+
+
 def test_algorithm_preflight_precedes_all_weight_and_optimizer_loads(
     tmp_path,
 ) -> None:
@@ -176,6 +208,50 @@ def test_algorithm_preflight_precedes_all_weight_and_optimizer_loads(
     )
 
     with pytest.raises(ValueError, match="preflight sentinel"):
+        Checkpointer(trainer).load(path)
+
+    assert not algo.policy.loaded
+    assert not algo.optimizer.loaded
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value", "error"),
+    [
+        ("fixed_reward_schema_version", 1, "schema version mismatch"),
+        (
+            "cps_semantics",
+            "legacy_path_smoothed_cps_v1",
+            "semantic contract mismatch",
+        ),
+    ],
+)
+def test_schema_and_semantics_fail_before_weight_or_optimizer_restore(
+    tmp_path,
+    field: str,
+    bad_value,
+    error: str,
+) -> None:
+    cfg = load_config(ROOT / "configs" / "fixed_reward_largebox.yaml")
+    payload = _payload()
+    payload["config"] = asdict(cfg)
+    payload["algo_state"][field] = bad_value
+    path = tmp_path / "incompatible.pt"
+    torch.save(payload, path)
+
+    algo = _AuditMustFailAlgorithm()
+    trainer = SimpleNamespace(
+        cfg=cfg,
+        algo=algo,
+        env_cfg=SimpleNamespace(
+            num_envs=cfg.environment.num_envs,
+            sim_dt=cfg.environment.sim_dt,
+        ),
+        algo_cfg=cfg.parameters,
+        train_cfg=cfg.training,
+        env=SimpleNamespace(device="cpu"),
+    )
+
+    with pytest.raises(ValueError, match=error):
         Checkpointer(trainer).load(path)
 
     assert not algo.policy.loaded

@@ -42,7 +42,7 @@ class FlowCPSConfig:
     activation: str
     action_squash_scale: float
     flow_steps: int
-    cps_noise_level: float
+    cps_noise_init: float
     cps_cov_rank: int
     rollout_env_steps: int
     discount_gamma: float
@@ -315,9 +315,10 @@ def _validate_fixed_reward(params: FixedRewardConfig) -> None:
         raise ValueError(
             "parameters.rollout_env_steps must be divisible by parameters.horizon"
         )
-    if not (0.0 < params.cps_noise_level < 1.0):
+    if not (1.0e-4 < params.cps_noise_init < 1.0 - 1.0e-4):
         raise ValueError(
-            "Flow-CPS requires parameters.cps_noise_level in (0, 1)"
+            "Flow-CPS requires parameters.cps_noise_init in "
+            "(1e-4, 1-1e-4)"
         )
     if params.cps_cov_rank < 0:
         raise ValueError("Flow-CPS requires parameters.cps_cov_rank >= 0")
