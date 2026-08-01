@@ -21,7 +21,7 @@ from engine.config import load_config
 
 parser = argparse.ArgumentParser(description="Train a humanoid imitation method.")
 parser.add_argument("--config", type=str, required=True, help="Path to the YAML config (the single source of defaults).")
-parser.add_argument("--set", dest="overrides", action="append", default=[], help="Override an existing config leaf, e.g. --set parameters.horizon=1. Repeatable.")
+parser.add_argument("--set", dest="overrides", action="append", default=[], help="Override an existing config leaf, e.g. --set environment.num_envs=128. Repeatable.")
 parser.add_argument("--run_name", type=str, default="", help="Run name; sets checkpoint/log dirs under runs/.")
 parser.add_argument("--validate_only", action="store_true", default=False, help="Load a checkpoint and run one validation rollout.")
 AppLauncher.add_app_launcher_args(parser)

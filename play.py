@@ -88,12 +88,12 @@ def main() -> None:
     algo.policy.load_state_dict(payload["policy"])
     algo.policy.eval()
 
-    horizon = algo.horizon
     reset_start_phase = environment.motion_start_phase
     reset_phases = torch.full((env.num_envs,), max(0, reset_start_phase), dtype=torch.long, device=env.device)
     current_obs = algo.evaluation_reset(reset_phases)
-    cached_chunk: torch.Tensor | None = None
-    chunk_index = horizon
+    previous_action = env.last_action.detach().clone()
+    previous_action_delta = torch.zeros_like(previous_action)
+    has_previous_action_delta = False
     total_steps = 0
 
     use_real_time = (args_cli.real_time or not args_cli.headless) and not args_cli.no_real_time
@@ -107,19 +107,25 @@ def main() -> None:
         flush=True,
     )
     print(
-        f"[INFO] horizon={horizon} action_dim={env.action_dim} "
+        f"[INFO] control=closed_loop_h1 action_dim={env.action_dim} "
         f"observation_noise={environment.observation_noise} interval_pushes={environment.interval_pushes} "
         f"reset_noise={environment.reset_noise}",
         flush=True,
     )
 
     while simulation_app.is_running():
-        if cached_chunk is None or chunk_index >= cached_chunk.shape[1]:
-            with torch.inference_mode():
-                cached_chunk = algo.deterministic_actions(current_obs)
-            chunk_index = 0
-        action = cached_chunk[:, chunk_index, :]
-        chunk_index += 1
+        with torch.inference_mode():
+            action = algo.deterministic_action(current_obs)
+        action_delta_vector = action - previous_action
+        action_delta = action_delta_vector.abs().mean()
+        action_d2 = (
+            (action_delta_vector - previous_action_delta).abs().mean()
+            if has_previous_action_delta
+            else torch.full((), -1.0, device=action.device)
+        )
+        previous_action = action.detach().clone()
+        previous_action_delta = action_delta_vector.detach().clone()
+        has_previous_action_delta = True
         current_obs, reward, done, info = algo.evaluation_step(action)
         total_steps += 1
 
@@ -140,6 +146,8 @@ def main() -> None:
                 f"reference_dt={float(env.dt):.5f} "
                 f"frame_delta={frame_delta_mean:.3f} "
                 f"action_abs={float(action.abs().mean().item()):.5f} "
+                f"action_delta={float(action_delta.item()):.5f} "
+                f"action_d2={float(action_d2.item()):.5f} "
                 f"reward={float(reward.mean().item()):.5f} "
                 f"done={float(done.float().mean().item()):.5f} "
                 f"height={float(info['debug_terms']['robot_anchor_height'].mean().item()):.5f} "
@@ -166,8 +174,9 @@ def main() -> None:
         if need_reset:
             print(f"[INFO] Reset at step {total_steps} ({reason}). phase={float(env.phase_steps[0].item()):.2f}", flush=True)
             current_obs = algo.evaluation_reset(reset_phases)
-            cached_chunk = None
-            chunk_index = horizon
+            previous_action = env.last_action.detach().clone()
+            previous_action_delta.zero_()
+            has_previous_action_delta = False
 
     print(f"[INFO] Playback finished after {total_steps} steps.", flush=True)
 

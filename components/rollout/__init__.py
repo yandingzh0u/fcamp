@@ -1,1 +1,1 @@
-"""Rollout utilities and Flow-CPS internals."""
+"""Fixed-reward rollout utilities."""

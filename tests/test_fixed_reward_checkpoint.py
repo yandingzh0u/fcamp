@@ -29,7 +29,7 @@ def _payload() -> dict:
             "actor.weight": torch.zeros(1, 1),
             "actor_obs_normalizer.count": torch.tensor(0),
             "critic.weight": torch.zeros(1, 1),
-            "prefix_context_normalizer.count": torch.tensor(0),
+            "critic_obs_normalizer.count": torch.tensor(0),
         },
         "optimizer": {"state": {}, "param_groups": []},
         "metrics": {"reward/mean": 0.05},
@@ -38,7 +38,6 @@ def _payload() -> dict:
             "critic_optimizer": {"state": {}, "param_groups": []},
             "learning_rate": 3.0e-4,
             "critic_learning_rate": 3.0e-4,
-            "actor_obs_normalizer": {},
             "stream_ids": torch.tensor([0, 1]),
             "phase0_stream_count": 1,
             "phase0_stream_fraction": 0.1,
@@ -67,7 +66,7 @@ def _payload() -> dict:
     }
 
 
-def test_schema_four_checkpoint_round_trip_passes_recursive_audit(
+def test_schema_fourteen_checkpoint_round_trip_passes_recursive_audit(
     tmp_path,
 ) -> None:
     path = tmp_path / "checkpoint.pt"
@@ -80,17 +79,18 @@ def test_schema_four_checkpoint_round_trip_passes_recursive_audit(
         "actor.weight",
         "actor_obs_normalizer.count",
         "critic.weight",
-        "prefix_context_normalizer.count",
+        "critic_obs_normalizer.count",
     }
     assert set(restored["algo_state"]) == {
         "critic_optimizer",
         "learning_rate",
         "critic_learning_rate",
-        "actor_obs_normalizer",
         "fixed_reward_schema_version",
+        "control_semantics",
         "policy_semantics",
         "action_semantics",
         "cps_semantics",
+        "critic_semantics",
         "gae_semantics",
         "stream_ids",
         "phase0_stream_count",
@@ -125,9 +125,12 @@ def test_checkpoint_audit_rejects_removed_state_recursively(
         audit_fixed_reward_checkpoint_payload(payload)
 
 
-def test_checkpoint_audit_rejects_schema_one_before_restore() -> None:
+@pytest.mark.parametrize("legacy_schema", [1, 4, 13])
+def test_checkpoint_audit_rejects_legacy_schema_before_restore(
+    legacy_schema: int,
+) -> None:
     payload = _payload()
-    payload["algo_state"]["fixed_reward_schema_version"] = 1
+    payload["algo_state"]["fixed_reward_schema_version"] = legacy_schema
 
     with pytest.raises(ValueError, match="schema version mismatch"):
         audit_fixed_reward_checkpoint_payload(payload)
@@ -139,6 +142,8 @@ def test_checkpoint_audit_rejects_schema_one_before_restore() -> None:
         "policy_semantics",
         "action_semantics",
         "cps_semantics",
+        "control_semantics",
+        "critic_semantics",
         "gae_semantics",
     ],
 )
@@ -152,7 +157,7 @@ def test_checkpoint_audit_rejects_semantic_mismatch_before_restore(
         audit_fixed_reward_checkpoint_payload(payload)
 
 
-def test_schema_four_checkpoint_cannot_omit_its_config() -> None:
+def test_schema_fourteen_checkpoint_cannot_omit_its_config() -> None:
     payload = _payload()
     del payload["config"]
 

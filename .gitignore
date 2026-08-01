@@ -5,14 +5,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Training artifacts are local-only by default.
-runs/*
-# Keep only the explicit FCAMP regression oracle named by the test protocol.
-!runs/fcamp_stageA_atomic_tracking_u500_s0_20260724_110839/
-runs/fcamp_stageA_atomic_tracking_u500_s0_20260724_110839/*
-!runs/fcamp_stageA_atomic_tracking_u500_s0_20260724_110839/logs/
-runs/fcamp_stageA_atomic_tracking_u500_s0_20260724_110839/logs/*
-!runs/fcamp_stageA_atomic_tracking_u500_s0_20260724_110839/logs/train.log
+# Training artifacts are local-only except for the human-readable train logs.
+runs/**
+!runs/**/
+!runs/**/train.log
 
 .vscode/
 .idea/

@@ -42,7 +42,7 @@ _POLICY_MODULE_NAMES = frozenset(
         "actor",
         "actor_obs_normalizer",
         "critic",
-        "prefix_context_normalizer",
+        "critic_obs_normalizer",
     }
 )
 _ALGO_STATE_KEYS = frozenset(
@@ -50,7 +50,6 @@ _ALGO_STATE_KEYS = frozenset(
         "critic_optimizer",
         "learning_rate",
         "critic_learning_rate",
-        "actor_obs_normalizer",
         "stream_ids",
         "phase0_stream_count",
         "phase0_stream_fraction",
@@ -109,8 +108,7 @@ def audit_fixed_reward_checkpoint_payload(payload: dict) -> None:
         return
 
     # Check the complete algorithm contract before inspecting or restoring
-    # any policy/optimizer state. In particular, schema-1 checkpoints must
-    # never partially initialize the direct-residual CPS policy.
+    # any policy or optimizer state.
     if not isinstance(algo_state, Mapping):
         raise ValueError("fixed_reward checkpoint algo_state must be a mapping.")
     schema_version = algo_state.get("fixed_reward_schema_version")

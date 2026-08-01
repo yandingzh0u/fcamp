@@ -6,7 +6,6 @@ import yaml
 
 from engine.config import (
     FixedRewardConfig,
-    FlowCPSConfig,
     TrainingConfig,
     config_from_checkpoint_dict,
     config_from_dict,
@@ -26,17 +25,15 @@ def test_fixed_reward_config_is_production_pose_only_recipe() -> None:
     assert isinstance(cfg.parameters, FixedRewardConfig)
     assert cfg.environment.root_velocity_mode == "link"
     assert cfg.environment.num_envs == 8192
-    assert cfg.parameters.horizon == 4
     assert cfg.parameters.rollout_env_steps == 24
-    assert cfg.parameters.rollout_env_steps % cfg.parameters.horizon == 0
     assert cfg.parameters.flow_steps == 4
-    assert cfg.parameters.action_squash_scale == 5.0
+    assert cfg.parameters.action_limit == 5.0
     assert cfg.parameters.cps_noise_init == 0.36
     assert cfg.parameters.cps_cov_rank == 8
     assert cfg.parameters.desired_kl == 0.01
-    assert cfg.parameters.policy_lr == 0.0003
+    assert cfg.parameters.policy_lr == 0.00005
     assert cfg.parameters.value_lr == 0.0003
-    assert cfg.parameters.streams.phase0_fraction == pytest.approx(0.10)
+    assert cfg.parameters.phase0_fraction == pytest.approx(0.10)
     assert cfg.training.seed == 0
     assert cfg.training.max_updates == 500
     assert cfg.training.log_every == 10
@@ -52,17 +49,19 @@ def test_fixed_reward_config_is_production_pose_only_recipe() -> None:
     )
 
 
-def test_fixed_reward_has_one_critic_and_no_removed_sections() -> None:
+def test_fixed_reward_parameters_are_flat_and_have_no_horizon() -> None:
     tree = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
 
-    assert "critic" in tree["parameters"]
+    assert "horizon" not in tree["parameters"]
+    assert "action_squash_scale" not in tree["parameters"]
+    assert "action_limit" in tree["parameters"]
+    assert "critic_hidden_dims" in tree["parameters"]
+    assert "phase0_fraction" in tree["parameters"]
+    assert "critic" not in tree["parameters"]
     assert "critics" not in tree["parameters"]
+    assert "streams" not in tree["parameters"]
     assert "style_prior" not in tree["parameters"]
     assert "credit" not in tree["parameters"]
-    assert set(tree["parameters"]["critic"]) == {
-        "encoder_hidden_dims",
-        "head_hidden_dims",
-    }
 
 
 def test_fixed_reward_requires_two_streams_supported_reset_and_link_velocity() -> None:
@@ -93,7 +92,7 @@ def test_smoke_overrides_preserve_the_same_recipe() -> None:
     assert cfg.environment.num_envs == 128
     assert cfg.training.max_updates == 2
     assert cfg.training.validation_every == 1
-    assert cfg.parameters.critic.encoder_hidden_dims == (512, 256, 128)
+    assert cfg.parameters.critic_hidden_dims == (512, 256, 128)
 
 
 def test_validation_has_no_fractional_early_stop() -> None:
@@ -102,9 +101,16 @@ def test_validation_has_no_fractional_early_stop() -> None:
     }
 
 
-def test_flow_cps_config_has_no_legacy_algorithm_fields() -> None:
-    fields_by_name = {field.name for field in fields(FlowCPSConfig)}
+def test_fixed_reward_config_has_only_single_step_algorithm_fields() -> None:
+    fields_by_name = {field.name for field in fields(FixedRewardConfig)}
     assert "cps_noise_init" in fields_by_name
+    assert "action_limit" in fields_by_name
+    assert "critic_hidden_dims" in fields_by_name
+    assert "phase0_fraction" in fields_by_name
+    assert "horizon" not in fields_by_name
+    assert "action_squash_scale" not in fields_by_name
+    assert "critic" not in fields_by_name
+    assert "streams" not in fields_by_name
     assert "cps_noise_level" not in fields_by_name
     assert "init_noise_std" not in fields_by_name
     assert "num_generations" not in fields_by_name
@@ -161,7 +167,7 @@ def test_checkpoint_config_round_trip_is_strict() -> None:
     cfg = config_from_checkpoint_dict(tree)
 
     assert cfg.method == "fixed_reward"
-    assert cfg.parameters.critic.head_hidden_dims == (128, 64)
+    assert cfg.parameters.critic_hidden_dims == (512, 256, 128)
 
 
 @pytest.mark.parametrize(
@@ -169,11 +175,12 @@ def test_checkpoint_config_round_trip_is_strict() -> None:
     [
         "parameters.policy_lr=0.0",
         "parameters.value_lr=0.0",
-        "parameters.critic.encoder_hidden_dims=[512,0]",
-        "parameters.critic.head_hidden_dims=[0]",
-        "parameters.streams.phase0_fraction=0.0",
-        "parameters.streams.phase0_fraction=0.2",
-        "parameters.streams.phase0_fraction=1.0",
+        "parameters.action_limit=0.0",
+        "parameters.actor_hidden_dims=[512,0]",
+        "parameters.critic_hidden_dims=[512,0]",
+        "parameters.phase0_fraction=0.0",
+        "parameters.phase0_fraction=0.2",
+        "parameters.phase0_fraction=1.0",
     ],
 )
 def test_fixed_reward_rejects_degenerate_optimizers_and_critic(
@@ -181,3 +188,19 @@ def test_fixed_reward_rejects_degenerate_optimizers_and_critic(
 ) -> None:
     with pytest.raises(ValueError):
         load_config(CONFIG, [override])
+
+
+@pytest.mark.parametrize(
+    "removed_override",
+    [
+        "parameters.horizon=1",
+        "parameters.action_squash_scale=5.0",
+        "parameters.critic.hidden_dims=[128]",
+        "parameters.streams.phase0_fraction=0.1",
+    ],
+)
+def test_removed_configuration_paths_cannot_be_reintroduced(
+    removed_override: str,
+) -> None:
+    with pytest.raises(KeyError, match="Unknown override path"):
+        load_config(CONFIG, [removed_override])

@@ -14,7 +14,7 @@ from envs.g1_mimic import G1MimicEnv
 from method.fixed_reward import FixedRewardFlowCPS
 
 
-VALIDATION_PROTOCOL_VERSION = 6.0
+VALIDATION_PROTOCOL_VERSION = 7.0
 
 
 class CoreTrainer:

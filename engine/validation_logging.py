@@ -77,10 +77,18 @@ def _log_validation_block(
     )
     print(
         f"[{label}_TRACKING] "
-        f"target_ref_now="
-        f"{_value(metrics, prefix, 'action_target_ref_now_abs'):.6f} "
-        f"target_ref_next="
-        f"{_value(metrics, prefix, 'action_target_ref_next_abs'):.6f} "
+        f"joint_pos_mae="
+        f"{_value(metrics, prefix, 'tracking/joint_pos_mae/mean'):.6f} "
+        f"joint_vel_mae="
+        f"{_value(metrics, prefix, 'tracking/joint_vel_mae/mean'):.6f} "
+        f"root_lin_mae="
+        f"{_value(metrics, prefix, 'tracking/root_lin_vel_mae/mean'):.6f} "
+        f"root_ang_mae="
+        f"{_value(metrics, prefix, 'tracking/root_ang_vel_mae/mean'):.6f} "
+        f"pd_target_ref_now="
+        f"{_value(metrics, prefix, 'pd_target_vs_reference_joint_mae_now'):.6f} "
+        f"pd_target_ref_next="
+        f"{_value(metrics, prefix, 'pd_target_vs_reference_joint_mae_next'):.6f} "
         f"torso_ori={_value(metrics, prefix, 'diag_torso_ori_deg'):.3f}deg "
         f"left_wrist_ori="
         f"{_value(metrics, prefix, 'diag_left_wrist_ori_deg'):.3f}deg "
@@ -89,18 +97,21 @@ def _log_validation_block(
         flush=True,
     )
     print(
-        f"[{label}_CHUNK] "
-        f"action_boundary="
-        f"{_value(metrics, prefix, 'chunk_action_delta_boundary_mean'):.6f} "
-        f"action_internal="
-        f"{_value(metrics, prefix, 'chunk_action_delta_internal_mean'):.6f} "
-        f"action_ratio="
-        f"{_value(metrics, prefix, 'chunk_action_delta_boundary_internal_ratio'):.4f} "
-        f"joint_vel_ratio="
-        f"{_value(metrics, prefix, 'chunk_joint_vel_jump_boundary_internal_ratio'):.4f} "
-        f"root_ang_ratio="
-        f"{_value(metrics, prefix, 'chunk_root_ang_vel_jump_boundary_internal_ratio'):.4f} "
-        f"reset_action="
-        f"{_value(metrics, prefix, 'chunk_action_delta_reset_first_mean'):.6f}",
+        f"[{label}_DYNAMICS] "
+        f"action_delta="
+        f"{_value(metrics, prefix, 'dynamics/action_delta/mean'):.6f} "
+        f"action_delta_p95="
+        f"{_value(metrics, prefix, 'dynamics/action_delta/p95'):.6f} "
+        f"action_d2={_value(metrics, prefix, 'dynamics/action_d2/mean'):.6f} "
+        f"action_d2_p95="
+        f"{_value(metrics, prefix, 'dynamics/action_d2/p95'):.6f} "
+        f"joint_vel_jump="
+        f"{_value(metrics, prefix, 'dynamics/joint_vel_jump/mean'):.6f} "
+        f"root_lin_jump="
+        f"{_value(metrics, prefix, 'dynamics/root_lin_vel_jump/mean'):.6f} "
+        f"root_ang_jump="
+        f"{_value(metrics, prefix, 'dynamics/root_ang_vel_jump/mean'):.6f} "
+        f"initial_action_delta="
+        f"{_value(metrics, prefix, 'initial/action_delta/mean'):.6f}",
         flush=True,
     )

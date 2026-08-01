@@ -34,13 +34,13 @@ class EnvironmentConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class FlowCPSConfig:
-    """Shared Flow-CPS actor and optimizer settings."""
+class FixedRewardConfig:
+    """Closed-loop, single-step fixed-reward Flow-CPS configuration."""
 
-    horizon: int
     actor_hidden_dims: tuple[int, ...]
+    critic_hidden_dims: tuple[int, ...]
     activation: str
-    action_squash_scale: float
+    action_limit: float
     flow_steps: int
     cps_noise_init: float
     cps_cov_rank: int
@@ -59,27 +59,7 @@ class FlowCPSConfig:
     init_at_random_ep_len: bool
     max_grad_norm: float
     kl_early_stop_factor: float
-
-
-@dataclass(frozen=True, slots=True)
-class FixedRewardCriticConfig:
-    encoder_hidden_dims: tuple[int, ...]
-    head_hidden_dims: tuple[int, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class FixedRewardStreamsConfig:
-    """Fixed phase-zero trajectory-attempt/curriculum mixture."""
-
     phase0_fraction: float
-
-
-@dataclass(frozen=True, slots=True)
-class FixedRewardConfig(FlowCPSConfig):
-    """Task-only fixed-pose-reward Flow-CPS training configuration."""
-
-    critic: FixedRewardCriticConfig
-    streams: FixedRewardStreamsConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,8 +98,7 @@ def _construct(cls, values: dict[str, Any]):
     converted = dict(values)
     for name in (
         "actor_hidden_dims",
-        "encoder_hidden_dims",
-        "head_hidden_dims",
+        "critic_hidden_dims",
     ):
         if name in converted:
             converted[name] = tuple(int(value) for value in converted[name])
@@ -127,21 +106,7 @@ def _construct(cls, values: dict[str, Any]):
 
 
 def _construct_fixed_reward(values: dict[str, Any]) -> FixedRewardConfig:
-    nested = dict(values)
-    try:
-        nested["critic"] = _construct(
-            FixedRewardCriticConfig,
-            dict(nested["critic"]),
-        )
-        nested["streams"] = _construct(
-            FixedRewardStreamsConfig,
-            dict(nested["streams"]),
-        )
-    except KeyError as exc:
-        raise KeyError(
-            f"FixedRewardConfig missing nested section: {exc.args[0]}"
-        ) from exc
-    return _construct(FixedRewardConfig, nested)
+    return _construct(FixedRewardConfig, dict(values))
 
 
 def _apply_overrides(tree: dict[str, Any], overrides: list[str]) -> None:
@@ -305,16 +270,12 @@ def _validate(config: ExperimentConfig) -> None:
 
 
 def _validate_fixed_reward(params: FixedRewardConfig) -> None:
-    if params.horizon < 1:
-        raise ValueError("Flow-CPS requires parameters.horizon >= 1")
     if params.flow_steps < 1:
         raise ValueError("Flow-CPS requires parameters.flow_steps >= 1")
     if params.rollout_env_steps <= 0:
         raise ValueError("Flow-CPS requires parameters.rollout_env_steps > 0")
-    if params.rollout_env_steps % params.horizon:
-        raise ValueError(
-            "parameters.rollout_env_steps must be divisible by parameters.horizon"
-        )
+    if params.action_limit <= 0.0:
+        raise ValueError("Flow-CPS requires parameters.action_limit > 0")
     if not (1.0e-4 < params.cps_noise_init < 1.0 - 1.0e-4):
         raise ValueError(
             "Flow-CPS requires parameters.cps_noise_init in "
@@ -326,17 +287,17 @@ def _validate_fixed_reward(params: FixedRewardConfig) -> None:
         raise ValueError("Flow-CPS requires parameters.policy_lr > 0")
     if params.value_lr <= 0.0:
         raise ValueError("Flow-CPS requires parameters.value_lr > 0")
-    if abs(float(params.streams.phase0_fraction) - 0.10) > 1.0e-12:
+    if abs(float(params.phase0_fraction) - 0.10) > 1.0e-12:
         raise ValueError(
-            "fixed_reward requires streams.phase0_fraction=0.10"
+            "fixed_reward requires parameters.phase0_fraction=0.10"
         )
-    critic = params.critic
-    if (
-        not critic.encoder_hidden_dims
-        or not critic.head_hidden_dims
-        or any(width < 1 for width in critic.encoder_hidden_dims)
-        or any(width < 1 for width in critic.head_hidden_dims)
+    if not params.actor_hidden_dims or any(
+        width < 1 for width in params.actor_hidden_dims
+    ):
+        raise ValueError("fixed_reward actor dimensions must be positive")
+    if not params.critic_hidden_dims or any(
+        width < 1 for width in params.critic_hidden_dims
     ):
         raise ValueError(
-            "fixed_reward critic encoder/head dimensions must be positive"
+            "fixed_reward critic dimensions must be positive"
         )

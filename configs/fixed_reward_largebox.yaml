@@ -24,14 +24,12 @@ environment:
   root_velocity_mode: link
 
 parameters:
-  horizon: 4
   actor_hidden_dims: [512, 256, 128]
+  critic_hidden_dims: [512, 256, 128]
   activation: elu
-  action_squash_scale: 5.0
+  action_limit: 5.0
   flow_steps: 4
-  # Direct-residual CPS: one learnable global exploration scale.  The 0.36
-  # initialization matches the old path-smoothed CPS action-space noise energy
-  # for H=4; it is an initialization, not a schedule or annealing rule.
+  # Initial value of the learned global CPS exploration scale.
   cps_noise_init: 0.36
   cps_cov_rank: 8
   rollout_env_steps: 24
@@ -42,20 +40,14 @@ parameters:
   policy_epochs: 5
   num_mini_batches: 4
   micro_batch_size: 4096
-  policy_lr: 0.0003
+  policy_lr: 0.00005
   value_lr: 0.0003
   weight_decay: 0.0
   critic_weight_decay: 0.0
   init_at_random_ep_len: true
   max_grad_norm: 1.0
   kl_early_stop_factor: 4.0
-
-  critic:
-    encoder_hidden_dims: [512, 256, 128]
-    head_hidden_dims: [128, 64]
-
-  streams:
-    phase0_fraction: 0.10
+  phase0_fraction: 0.10
 
 training:
   seed: 0

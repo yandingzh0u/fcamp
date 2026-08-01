@@ -7,7 +7,7 @@ from isaaclab.utils.math import quat_error_magnitude
 
 from envs.spec import EE_Z_TERMINATION_THRESHOLD
 from .env_state import restore_env_state, snapshot_env_state
-from .validation_metrics import ChunkBoundaryDiagnostics, terminal_phase_metrics
+from .validation_metrics import StepDiagnostics, terminal_phase_metrics
 
 
 def classify_mimickit_done_terms(
@@ -106,7 +106,6 @@ def run_validation_rollout(
     env = trainer.env
     policy = algo.policy
     tcfg = trainer.train_cfg
-    horizon = algo.horizon
     num_envs = env.num_envs
 
     was_training = policy.training
@@ -147,16 +146,14 @@ def run_validation_rollout(
     print(f"[VALIDATION_RESET_DONE] time={time.perf_counter() - reset_t0:.3f}s", flush=True)
     reset_metrics = _reset_alignment_metrics(env, "validation")
     _, initial_joint_vel = env.get_action_joint_state()
-    initial_root_ang_vel = env.get_mimic_root_velocity_w()[:, 3:]
-    chunk_diagnostics = ChunkBoundaryDiagnostics(
-        horizon=horizon,
+    initial_root_velocity = env.get_mimic_root_velocity_w()
+    step_diagnostics = StepDiagnostics(
         initial_action=env.last_action,
         initial_joint_vel=initial_joint_vel,
-        initial_root_ang_vel=initial_root_ang_vel,
+        initial_root_lin_vel=initial_root_velocity[:, :3],
+        initial_root_ang_vel=initial_root_velocity[:, 3:],
     )
 
-    cached_chunk: torch.Tensor | None = None
-    chunk_index = horizon
     done = torch.zeros(num_envs, dtype=torch.bool, device=env.device)
     survived_steps = torch.zeros(num_envs, dtype=torch.long, device=env.device)
     latest_phase_steps = validation_phase.float().clone()
@@ -193,14 +190,16 @@ def run_validation_rollout(
     done_joint_vel_err_record = torch.zeros(num_envs, device=env.device)
     done_body_pos_err_record = torch.zeros(num_envs, track_body_count, device=env.device)
     done_body_z_err_record = torch.zeros(num_envs, track_body_count, device=env.device)
-    done_action_ref_now_record = torch.zeros(num_envs, device=env.device)
-    done_action_ref_next_record = torch.zeros(num_envs, device=env.device)
-    action_ref_now_accum = torch.zeros(num_envs, device=env.device)
-    action_ref_next_accum = torch.zeros(num_envs, device=env.device)
-    action_ref_next_joint_accum = torch.zeros(env.action_dim, device=env.device)
-    action_ref_next_joint_count = torch.zeros((), device=env.device)
-    done_action_ref_next_joint_record = torch.zeros(num_envs, env.action_dim, device=env.device)
-    action_ref_steps = torch.zeros(num_envs, device=env.device)
+    done_pd_target_ref_now_record = torch.zeros(num_envs, device=env.device)
+    done_pd_target_ref_next_record = torch.zeros(num_envs, device=env.device)
+    pd_target_ref_now_accum = torch.zeros(num_envs, device=env.device)
+    pd_target_ref_next_accum = torch.zeros(num_envs, device=env.device)
+    pd_target_ref_next_joint_accum = torch.zeros(env.action_dim, device=env.device)
+    pd_target_ref_next_joint_count = torch.zeros((), device=env.device)
+    done_pd_target_ref_next_joint_record = torch.zeros(
+        num_envs, env.action_dim, device=env.device
+    )
+    pd_target_ref_steps = torch.zeros(num_envs, device=env.device)
     diag_keys = [
         "diag_torso_ori_deg", "diag_left_wrist_ori_deg", "diag_right_wrist_ori_deg",
         "diag_left_elbow_ori_deg", "diag_right_elbow_ori_deg",
@@ -215,46 +214,44 @@ def run_validation_rollout(
             for step_idx in range(max_steps):
                 if not trainer.simulation_app.is_running():
                     break
-                if cached_chunk is None or chunk_index >= cached_chunk.shape[1]:
-                    cached_chunk = algo.deterministic_actions(current_obs)
-                    chunk_index = 0
-                primitive_offset = step_idx % horizon
-                action = cached_chunk[:, chunk_index, :]
+                action = algo.deterministic_action(current_obs)
                 if bool(done.any()):
                     action = torch.where(done.unsqueeze(-1), torch.zeros_like(action), action)
-                chunk_index += 1
                 active_mask = ~done
                 action_target = env.default_action_joint_pos + env.action_scale * torch.clamp(action, -100.0, 100.0)
 
                 current_obs, reward, step_done, info = algo.evaluation_step(action)
                 reference_post = env.motion.get_frame(info["reference_phase_steps"])
                 robot_joint_pos, robot_joint_vel = env.get_action_joint_state()
-                robot_root_ang_vel = env.get_mimic_root_velocity_w()[:, 3:]
-                chunk_diagnostics.update(
+                robot_root_velocity = env.get_mimic_root_velocity_w()
+                step_diagnostics.update(
                     active_mask=active_mask,
-                    chunk_offset=primitive_offset,
                     action=action,
                     joint_pos=robot_joint_pos,
                     joint_vel=robot_joint_vel,
-                    root_ang_vel=robot_root_ang_vel,
+                    root_lin_vel=robot_root_velocity[:, :3],
+                    root_ang_vel=robot_root_velocity[:, 3:],
                     reference_joint_pos=reference_post["joint_pos"],
                     reference_joint_vel=reference_post["joint_vel"],
+                    reference_root_lin_vel=reference_post["root_lin_vel_w"],
                     reference_root_ang_vel=reference_post["root_ang_vel_w"],
                 )
                 latest_phase_steps = info["termination_phase_steps"].float().clone()
                 ref_now = env.motion.get_frame(info["phase_start_steps"])["joint_pos"]
                 ref_next = env.motion.get_frame(info["reference_phase_steps"])["joint_pos"]
-                action_ref_now_by_joint = torch.abs(action_target - ref_now)
-                action_ref_next_by_joint = torch.abs(action_target - ref_next)
-                action_ref_now = action_ref_now_by_joint.mean(dim=-1)
-                action_ref_next = action_ref_next_by_joint.mean(dim=-1)
+                pd_target_ref_now_by_joint = torch.abs(action_target - ref_now)
+                pd_target_ref_next_by_joint = torch.abs(action_target - ref_next)
+                pd_target_ref_now = pd_target_ref_now_by_joint.mean(dim=-1)
+                pd_target_ref_next = pd_target_ref_next_by_joint.mean(dim=-1)
                 active_f = active_mask.float()
-                action_ref_now_accum += active_f * action_ref_now
-                action_ref_next_accum += active_f * action_ref_next
+                pd_target_ref_now_accum += active_f * pd_target_ref_now
+                pd_target_ref_next_accum += active_f * pd_target_ref_next
                 if bool(active_mask.any()):
-                    action_ref_next_joint_accum += action_ref_next_by_joint[active_mask].sum(dim=0)
-                    action_ref_next_joint_count += active_mask.float().sum()
-                action_ref_steps += active_f
+                    pd_target_ref_next_joint_accum += pd_target_ref_next_by_joint[
+                        active_mask
+                    ].sum(dim=0)
+                    pd_target_ref_next_joint_count += active_mask.float().sum()
+                pd_target_ref_steps += active_f
                 new_done = active_mask & step_done
                 if bool(new_done.any()):
                     done_terms = info["done_terms"]
@@ -286,9 +283,11 @@ def run_validation_rollout(
                     body_z_err = torch.abs(robot_body_pos[..., 2] - reference["body_pos_w"][..., 2])
                     done_action_abs_record[new_done] = action[new_done].abs().mean(dim=-1)
                     done_action_max_record[new_done] = action[new_done].abs().max(dim=-1).values
-                    done_action_ref_now_record[new_done] = action_ref_now[new_done]
-                    done_action_ref_next_record[new_done] = action_ref_next[new_done]
-                    done_action_ref_next_joint_record[new_done] = action_ref_next_by_joint[new_done]
+                    done_pd_target_ref_now_record[new_done] = pd_target_ref_now[new_done]
+                    done_pd_target_ref_next_record[new_done] = pd_target_ref_next[new_done]
+                    done_pd_target_ref_next_joint_record[new_done] = (
+                        pd_target_ref_next_by_joint[new_done]
+                    )
                     done_root_pos_err_record[new_done] = torch.linalg.norm(
                         env.robot.data.root_pos_w[new_done] - reference["root_pos_w"][new_done],
                         dim=-1,
@@ -326,7 +325,6 @@ def run_validation_rollout(
                     )
                 if bool(done.all()):
                     break
-        validation_first_push_step = env.first_push_step.clone()
         final_phase_record = torch.where(done, death_phase_record, latest_phase_steps)
     finally:
         env.observation_noise = original_obs_noise
@@ -369,7 +367,7 @@ def run_validation_rollout(
         "validation/reference_progress_p95": float(torch.quantile(reference_progress, 0.95).item()),
         "validation/full_motion_control_steps": float(env.full_motion_control_steps()),
     }
-    metrics.update(chunk_diagnostics.metrics())
+    metrics.update(step_diagnostics.metrics())
     metrics.update(reset_metrics)
     timeout, motion_complete, failure = classify_mimickit_done_terms(done, done_term_record)
     metrics.update({
@@ -407,50 +405,47 @@ def run_validation_rollout(
         )
     if "pose_fail" in done_term_record:
         metrics["validation/pose_fail_frac"] = float(done_term_record["pose_fail"].float().mean().item())
-    _pushed = validation_first_push_step >= 0
-    _died = failure
-    metrics["validation/push_applied_frac"] = float(_pushed.float().mean().item())
-    metrics["validation/died_before_push_frac"] = float((_died & ~_pushed).float().mean().item())
-    metrics["validation/pushed_then_died_frac"] = float((_died & _pushed).float().mean().item())
-    _pushed_steps = validation_first_push_step[_pushed]
-    metrics["validation/first_push_step_count"] = float(_pushed_steps.numel())
-    metrics["validation/first_push_step_mean"] = (
-        float(_pushed_steps.float().mean().item()) if _pushed_steps.numel() > 0 else -1.0
-    )
-    if bool((action_ref_steps > 0).any()):
-        safe_action_steps = action_ref_steps.clamp(min=1.0)
-        metrics["validation/action_target_ref_now_abs"] = float(
-            (action_ref_now_accum / safe_action_steps).mean().item()
+    if bool((pd_target_ref_steps > 0).any()):
+        safe_action_steps = pd_target_ref_steps.clamp(min=1.0)
+        metrics["validation/pd_target_vs_reference_joint_mae_now"] = float(
+            (pd_target_ref_now_accum / safe_action_steps).mean().item()
         )
-        metrics["validation/action_target_ref_next_abs"] = float(
-            (action_ref_next_accum / safe_action_steps).mean().item()
+        metrics["validation/pd_target_vs_reference_joint_mae_next"] = float(
+            (pd_target_ref_next_accum / safe_action_steps).mean().item()
         )
-        if float(action_ref_next_joint_count.item()) > 0.0:
-            action_joint_mean = action_ref_next_joint_accum / action_ref_next_joint_count.clamp(min=1.0)
+        if float(pd_target_ref_next_joint_count.item()) > 0.0:
+            action_joint_mean = (
+                pd_target_ref_next_joint_accum
+                / pd_target_ref_next_joint_count.clamp(min=1.0)
+            )
             top_count = min(3, int(env.action_dim))
             top_indices = torch.argsort(action_joint_mean, descending=True)[:top_count]
             for rank, joint_index in enumerate(top_indices, start=1):
                 idx = int(joint_index.item())
-                metrics[f"validation/action_target_ref_next_top{rank}_joint_index"] = float(idx)
-                metrics[f"validation/action_target_ref_next_top{rank}_joint_err"] = float(
-                    action_joint_mean[idx].item()
-                )
+                metrics[
+                    "validation/pd_target_vs_reference_next_top"
+                    f"{rank}_joint_index"
+                ] = float(idx)
+                metrics[
+                    "validation/pd_target_vs_reference_next_top"
+                    f"{rank}_joint_mae"
+                ] = float(action_joint_mean[idx].item())
 
 
     if bool(failure.any()):
-        failed_phases = death_phase_record[failure]
         metrics.update({
-            "validation/fail_phase_mean": float(failed_phases.float().mean().item()),
-            "validation/fail_phase_min": float(failed_phases.min().item()),
-            "validation/fail_phase_max": float(failed_phases.max().item()),
             "validation/ee_z_max": float(done_debug_record["ee_z_error_max"][failure].mean().item()),
             "validation/ee_z_mean": float(done_debug_record["ee_z_error_mean"][failure].mean().item()),
             "validation/anchor_z": float(done_debug_record["anchor_z_error"][failure].mean().item()),
             "validation/anchor_gravity": float(done_debug_record["anchor_gravity_z_error"][failure].mean().item()),
             "validation/fail_action_abs": float(done_action_abs_record[failure].mean().item()),
             "validation/fail_action_max": float(done_action_max_record[failure].mean().item()),
-            "validation/fail_action_target_ref_now_abs": float(done_action_ref_now_record[failure].mean().item()),
-            "validation/fail_action_target_ref_next_abs": float(done_action_ref_next_record[failure].mean().item()),
+            "validation/fail_pd_target_vs_reference_joint_mae_now": float(
+                done_pd_target_ref_now_record[failure].mean().item()
+            ),
+            "validation/fail_pd_target_vs_reference_joint_mae_next": float(
+                done_pd_target_ref_next_record[failure].mean().item()
+            ),
             "validation/fail_root_pos_err": float(done_root_pos_err_record[failure].mean().item()),
             "validation/fail_root_ori_deg": float(done_root_ori_deg_record[failure].mean().item()),
             "validation/fail_anchor_pos_err": float(done_anchor_pos_err_record[failure].mean().item()),
@@ -460,15 +455,21 @@ def run_validation_rollout(
             "validation/fail_body_pos_err": float(done_body_pos_err_record[failure].mean().item()),
             "validation/fail_body_z_err": float(done_body_z_err_record[failure].mean().item()),
         })
-        fail_action_joint_mean = done_action_ref_next_joint_record[failure].mean(dim=0)
+        fail_action_joint_mean = done_pd_target_ref_next_joint_record[
+            failure
+        ].mean(dim=0)
         top_count = min(3, int(env.action_dim))
         top_indices = torch.argsort(fail_action_joint_mean, descending=True)[:top_count]
         for rank, joint_index in enumerate(top_indices, start=1):
             idx = int(joint_index.item())
-            metrics[f"validation/fail_action_target_ref_next_top{rank}_joint_index"] = float(idx)
-            metrics[f"validation/fail_action_target_ref_next_top{rank}_joint_err"] = float(
-                fail_action_joint_mean[idx].item()
-            )
+            metrics[
+                "validation/fail_pd_target_vs_reference_next_top"
+                f"{rank}_joint_index"
+            ] = float(idx)
+            metrics[
+                "validation/fail_pd_target_vs_reference_next_top"
+                f"{rank}_joint_mae"
+            ] = float(fail_action_joint_mean[idx].item())
         body_pos_mean = done_body_pos_err_record[failure].mean(dim=0)
         body_z_mean = done_body_z_err_record[failure].mean(dim=0)
         body_pos_top_idx = int(torch.argmax(body_pos_mean).item())
