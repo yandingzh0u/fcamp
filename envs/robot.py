@@ -114,7 +114,7 @@ class G1Env:
             dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)
-        # Flow-CPS explicitly installs its algorithmic command domain after the
+        # The policy explicitly installs its algorithmic command domain after the
         # policy is built.  Joint-position metadata never defines that domain:
         # normalized actions are PD target commands, not physical joint poses.
         self._policy_action_low: torch.Tensor | None = None
@@ -157,7 +157,7 @@ class G1Env:
         low: torch.Tensor,
         high: torch.Tensor,
     ) -> None:
-        """Install the policy-owned command domain used by fixed-reward Flow-CPS.
+        """Install the policy-owned command domain used by fixed-reward training.
 
         This domain is deliberately independent of URDF joint-position limits.
         The simulator writer maps the command to a PD target without projection.

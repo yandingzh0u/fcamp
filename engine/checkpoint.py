@@ -48,18 +48,28 @@ _POLICY_MODULE_NAMES = frozenset(
 _ALGO_STATE_KEYS = frozenset(
     {
         "critic_optimizer",
-        "learning_rate",
+        "actor_learning_rate",
         "critic_learning_rate",
         "stream_ids",
         "phase0_stream_count",
         "phase0_stream_fraction",
         "phase0_attempt_tracker",
+        "actor_optimizer_steps_total",
+        "critic_optimizer_steps_total",
     }
 ) | frozenset(FIXED_REWARD_CHECKPOINT_CONTRACT)
 _REMOVED_STATE_KEY_MARKERS = (
     "amp_",
+    "cps_",
+    "cps/",
     "disc_",
     "discriminator",
+    "flow_",
+    "flow_factor",
+    "latent_path",
+    "low_rank",
+    "state_conditioned",
+    "woodbury",
     "mixed_reward",
     "channel_",
     "history",
@@ -351,7 +361,7 @@ class Checkpointer:
         t.start_update = int(payload.get("update_idx", 0)) + 1
         completed_updates = t.start_update - 1
         if hasattr(t, "env_cfg") and hasattr(t, "algo_cfg"):
-            transitions_per_update = int(t.env_cfg.num_envs) * int(t.algo_cfg.rollout_env_steps)
+            transitions_per_update = int(t.env_cfg.num_envs) * int(t.algo_cfg.num_steps_per_env)
             fallback_transitions = completed_updates * transitions_per_update
             t.env_transitions_total = int(payload.get("env_transitions_total", fallback_transitions))
             t.train_wall_seconds_total = float(payload.get("train_wall_seconds_total", 0.0))

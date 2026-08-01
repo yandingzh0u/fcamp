@@ -35,30 +35,31 @@ class EnvironmentConfig:
 
 @dataclass(frozen=True, slots=True)
 class FixedRewardConfig:
-    """Closed-loop, single-step fixed-reward Flow-CPS configuration."""
+    """HOLOSOMA G1 WBT PPO configuration on the fixed-reward task."""
 
     actor_hidden_dims: tuple[int, ...]
     critic_hidden_dims: tuple[int, ...]
     activation: str
-    action_limit: float
-    flow_steps: int
-    cps_noise_init: float
-    cps_cov_rank: int
-    rollout_env_steps: int
-    discount_gamma: float
-    gae_lambda: float
-    clip_range: float
-    desired_kl: float
-    policy_epochs: int
+    action_clip_value: float
+    num_steps_per_env: int
+    num_learning_epochs: int
     num_mini_batches: int
-    micro_batch_size: int
-    policy_lr: float
-    value_lr: float
-    weight_decay: float
+    clip_param: float
+    gamma: float
+    lam: float
+    value_loss_coef: float
+    entropy_coef: float
+    actor_learning_rate: float
+    critic_learning_rate: float
+    actor_weight_decay: float
     critic_weight_decay: float
-    init_at_random_ep_len: bool
     max_grad_norm: float
-    kl_early_stop_factor: float
+    schedule: str
+    desired_kl: float
+    init_noise_std: float
+    init_at_random_ep_len: bool
+    empirical_normalization: bool
+    use_symmetry: bool
     phase0_fraction: float
 
 
@@ -270,34 +271,39 @@ def _validate(config: ExperimentConfig) -> None:
 
 
 def _validate_fixed_reward(params: FixedRewardConfig) -> None:
-    if params.flow_steps < 1:
-        raise ValueError("Flow-CPS requires parameters.flow_steps >= 1")
-    if params.rollout_env_steps <= 0:
-        raise ValueError("Flow-CPS requires parameters.rollout_env_steps > 0")
-    if params.action_limit <= 0.0:
-        raise ValueError("Flow-CPS requires parameters.action_limit > 0")
-    if not (1.0e-4 < params.cps_noise_init < 1.0 - 1.0e-4):
-        raise ValueError(
-            "Flow-CPS requires parameters.cps_noise_init in "
-            "(1e-4, 1-1e-4)"
-        )
-    if params.cps_cov_rank < 0:
-        raise ValueError("Flow-CPS requires parameters.cps_cov_rank >= 0")
-    if params.policy_lr <= 0.0:
-        raise ValueError("Flow-CPS requires parameters.policy_lr > 0")
-    if params.value_lr <= 0.0:
-        raise ValueError("Flow-CPS requires parameters.value_lr > 0")
+    exact = {
+        "actor_hidden_dims": (512, 256, 128),
+        "critic_hidden_dims": (512, 256, 128),
+        "activation": "ELU",
+        "action_clip_value": 100.0,
+        "num_steps_per_env": 24,
+        "num_learning_epochs": 5,
+        "num_mini_batches": 4,
+        "clip_param": 0.2,
+        "gamma": 0.99,
+        "lam": 0.95,
+        "value_loss_coef": 1.0,
+        "entropy_coef": 0.005,
+        "actor_learning_rate": 1.0e-3,
+        "critic_learning_rate": 1.0e-3,
+        "actor_weight_decay": 0.0,
+        "critic_weight_decay": 0.0,
+        "max_grad_norm": 1.0,
+        "schedule": "adaptive",
+        "desired_kl": 0.01,
+        "init_noise_std": 1.0,
+        "init_at_random_ep_len": True,
+        "empirical_normalization": True,
+        "use_symmetry": False,
+    }
+    for name, expected in exact.items():
+        actual = getattr(params, name)
+        if actual != expected:
+            raise ValueError(
+                "fixed_reward must match the audited HOLOSOMA G1 WBT PPO: "
+                f"parameters.{name} expected={expected!r}, actual={actual!r}"
+            )
     if abs(float(params.phase0_fraction) - 0.10) > 1.0e-12:
         raise ValueError(
             "fixed_reward requires parameters.phase0_fraction=0.10"
-        )
-    if not params.actor_hidden_dims or any(
-        width < 1 for width in params.actor_hidden_dims
-    ):
-        raise ValueError("fixed_reward actor dimensions must be positive")
-    if not params.critic_hidden_dims or any(
-        width < 1 for width in params.critic_hidden_dims
-    ):
-        raise ValueError(
-            "fixed_reward critic dimensions must be positive"
         )

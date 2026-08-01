@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
 import torch
 
 
@@ -28,7 +29,7 @@ _g1_mimic.G1MimicEnv = object
 sys.modules["envs.g1_mimic"] = _g1_mimic
 
 _fixed_reward = ModuleType("method.fixed_reward")
-_fixed_reward.FixedRewardFlowCPS = object
+_fixed_reward.FixedRewardPPO = object
 sys.modules["method.fixed_reward"] = _fixed_reward
 
 try:
@@ -100,6 +101,10 @@ class _Checkpointer:
         return False
 
 
+class _FailingValidationCheckpointer(_Checkpointer):
+    pass
+
+
 def test_each_update_accounts_only_its_formal_rollout() -> None:
     trainer = CoreTrainer.__new__(CoreTrainer)
     trainer.simulation_app = _SimulationApp()
@@ -112,7 +117,7 @@ def test_each_update_accounts_only_its_formal_rollout() -> None:
         target_validation_steps=0,
     )
     trainer.env_cfg = SimpleNamespace(num_envs=2, sim_dt=0.02)
-    trainer.algo_cfg = SimpleNamespace(rollout_env_steps=4)
+    trainer.algo_cfg = SimpleNamespace(num_steps_per_env=4)
     trainer.env = _Environment()
     trainer.algo = _Algorithm()
     trainer.current_observation = torch.tensor([[1.0]])
@@ -133,3 +138,39 @@ def test_each_update_accounts_only_its_formal_rollout() -> None:
     assert metrics["samples/env_transitions_total"] == 8.0
     assert trainer.env_transitions_total == 8
     assert not any(key.startswith("warmup/") for key in metrics)
+
+
+def test_periodic_checkpoint_is_saved_before_validation(monkeypatch) -> None:
+    trainer = CoreTrainer.__new__(CoreTrainer)
+    trainer.simulation_app = _SimulationApp()
+    trainer.train_cfg = SimpleNamespace(
+        resume="",
+        max_updates=1,
+        log_every=2,
+        validation_every=1,
+        save_every=1,
+        validation_fixed_seed=0,
+        validation_directional_start_phase=-1,
+        target_validation_steps=0,
+    )
+    trainer.env_cfg = SimpleNamespace(num_envs=2, sim_dt=0.02)
+    trainer.algo_cfg = SimpleNamespace(num_steps_per_env=4)
+    trainer.env = _Environment()
+    trainer.algo = _Algorithm()
+    trainer.current_observation = torch.tensor([[1.0]])
+    trainer.start_update = 1
+    trainer.env_transitions_total = 0
+    trainer.train_wall_seconds_total = 0.0
+    trainer.checkpoint_dir = SimpleNamespace()
+    trainer.metrics_logger = _MetricsLogger()
+    trainer.checkpointer = _FailingValidationCheckpointer()
+
+    monkeypatch.setattr("engine.trainer.validation_max_steps", lambda *_: 1)
+
+    def fail_validation(*_args, **_kwargs):
+        assert trainer.checkpointer.saved_updates == [1]
+        raise RuntimeError("validation sentinel")
+
+    monkeypatch.setattr("engine.trainer.run_validation_rollout", fail_validation)
+    with pytest.raises(RuntimeError, match="validation sentinel"):
+        trainer.train()

@@ -11,14 +11,19 @@ from .validation_logging import log_validation_metrics
 from .validation import run_validation_rollout, validation_max_steps
 from .metrics_logger import MetricsLogger
 from envs.g1_mimic import G1MimicEnv
-from method.fixed_reward import FixedRewardFlowCPS
+from method.fixed_reward import FixedRewardPPO
 
 
-VALIDATION_PROTOCOL_VERSION = 7.0
+VALIDATION_PROTOCOL_VERSION = 10.0
 
 
 class CoreTrainer:
-    def __init__(self, simulation_app, cfg: ExperimentConfig, checkpoint_dir: Path):
+    def __init__(
+        self,
+        simulation_app,
+        cfg: ExperimentConfig,
+        checkpoint_dir: Path,
+    ):
         self.simulation_app = simulation_app
         self.cfg = cfg
         self.env_cfg = cfg.environment
@@ -37,7 +42,7 @@ class CoreTrainer:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_logger = MetricsLogger(self.checkpoint_dir.parent / "logs")
 
-        self.algo = FixedRewardFlowCPS(self.algo_cfg, self.env)
+        self.algo = FixedRewardPPO(self.algo_cfg, self.env)
         self.algo.build()
         self.checkpointer = Checkpointer(self)
 
@@ -68,7 +73,7 @@ class CoreTrainer:
             metrics = self.algo.update(rollout, collect_time)
             metrics.update(reset_metrics)
             formal_iteration_s = time.perf_counter() - t0
-            formal_transitions = int(self.env_cfg.num_envs) * int(self.algo_cfg.rollout_env_steps)
+            formal_transitions = int(self.env_cfg.num_envs) * int(self.algo_cfg.num_steps_per_env)
             transitions_update = formal_transitions
             iteration_s = formal_iteration_s
             self.env_transitions_total += formal_transitions
@@ -111,6 +116,15 @@ class CoreTrainer:
                     flush=True,
                 )
 
+            should_save = update_idx == tcfg.max_updates or (
+                tcfg.save_every > 0 and update_idx % tcfg.save_every == 0
+            )
+            # Persist the completed optimizer transaction before validation.
+            # A simulator-side validation failure must never erase the only
+            # periodic training checkpoint.
+            if should_save:
+                self.checkpointer.save(update_idx, metrics)
+
             if tcfg.validation_every > 0 and update_idx % tcfg.validation_every == 0:
                 fixed_seed = (
                     tcfg.validation_fixed_seed
@@ -128,7 +142,12 @@ class CoreTrainer:
                 metrics["validation/fixed_seed"] = float(fixed_seed)
                 metrics["validation/protocol_version"] = VALIDATION_PROTOCOL_VERSION
                 metrics["validation/max_steps"] = float(val_max_steps)
-                metrics.update(run_validation_rollout(self, fixed_seed=fixed_seed))
+                metrics.update(
+                    run_validation_rollout(
+                        self,
+                        fixed_seed=fixed_seed,
+                    )
+                )
                 dir_phase = tcfg.validation_directional_start_phase
                 if dir_phase >= 0:
                     dir_metrics = run_validation_rollout(
@@ -149,10 +168,6 @@ class CoreTrainer:
             if "validation/steps_mean" in metrics:
                 self.metrics_logger.write_validation_summary(update_idx, metrics)
 
-            if (
-                update_idx == tcfg.max_updates or (tcfg.save_every > 0 and update_idx % tcfg.save_every == 0)
-            ):
-                self.checkpointer.save(update_idx, metrics)
             if self.checkpointer.target_reached(metrics):
                 self.checkpointer.save(update_idx, metrics, filename="success.pt")
                 print(
@@ -170,7 +185,11 @@ class CoreTrainer:
             if self.train_cfg.validation_fixed_seed >= 0
             else self.train_cfg.seed
         )
-        metrics = run_validation_rollout(self, fixed_seed=fixed_seed)
+        metrics = run_validation_rollout(
+            self,
+            fixed_seed=fixed_seed,
+            restore_training_state=False,
+        )
         metrics["validation/fixed_seed"] = float(fixed_seed)
         metrics["validation/protocol_version"] = VALIDATION_PROTOCOL_VERSION
         metrics["validation/max_steps"] = float(validation_max_steps(self.train_cfg, self.env))

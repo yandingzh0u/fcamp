@@ -41,6 +41,10 @@ def main() -> None:
 
     run_name = args_cli.run_name or f"{cfg.method}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir = REPO_ROOT / "runs" / run_name
+    if run_dir.exists() and any(run_dir.iterdir()):
+        raise FileExistsError(
+            f"Run directory already exists and is not empty: {run_dir}"
+        )
     log_dir = run_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "train.log"
@@ -125,7 +129,11 @@ def main() -> None:
     print(f"[RUN] resolved_config_sha256={resolved['resolved_config_sha256']}", flush=True)
     print(f"[RUN] source_snapshot_sha256={snapshot_sha256}", flush=True)
 
-    trainer = CoreTrainer(simulation_app, cfg, run_dir / "checkpoints")
+    trainer = CoreTrainer(
+        simulation_app,
+        cfg,
+        run_dir / "checkpoints",
+    )
     try:
         if args_cli.validate_only:
             trainer.validate_only()

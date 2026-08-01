@@ -1,21 +1,25 @@
-"""Single-step closed-loop fixed-reward Flow-CPS PPO."""
+"""Fixed-reward G1 training with the audited HOLOSOMA G1 WBT PPO.
+
+Only the environment adapter (reward, reset streams, termination and Isaac
+Lab stepping) is MimicKit-specific.  The actor, critic, probability law,
+normalization, rollout storage, GAE, minibatching, losses, optimizer order,
+KL scheduler and numerical hyperparameters follow HOLOSOMA commit
+``c5c836c68f423ac4565f57801ff4ff47ea56e5ac``.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import time
 from collections import deque
 
 import torch
 from torch import nn
+from torch.distributions import Normal, kl_divergence
 
-from components.credit.task_credit import (
-    compute_task_gae,
-    normalize_actor_advantage,
-    resolve_terminal_masks,
-)
-from components.normalization.running_stats import EmpiricalNormalization
-from components.optim.kl_scheduler import adaptive_lr_from_kl
+from components.credit.task_credit import resolve_terminal_masks
 from components.rollout.fixed_reward_contract import (
     FIXED_REWARD_CHECKPOINT_CONTRACT,
 )
@@ -25,8 +29,12 @@ from components.rollout.training_streams import (
     Phase0AttemptTracker,
     Phase0CurriculumStreams,
 )
-from models.flow_cps_policy import FlowMatchingPolicy
-from models.value_critic import ValueCritic
+from models.holosoma_ppo import (
+    EmpiricalNormalization,
+    PPOActor,
+    PPOCritic,
+    RolloutStorage,
+)
 
 
 RAW_POSE_TERMS = (
@@ -59,31 +67,51 @@ REWARD_METRIC_NAMES = {
     "undesired_contacts": "undesired_contacts",
 }
 
+HOLOSOMA_UPSTREAM_COMMIT = "c5c836c68f423ac4565f57801ff4ff47ea56e5ac"
+HOLOSOMA_SOURCE_SHA256 = {
+    "ppo.py": "3da7ce871ad98b6400d663721825e4b345f4c3198371b98e74e57c6113ef0e10",
+    "ppo_modules.py": "508ff6485ec1ea3ef33aee749cb7e069623b183d06ea6a17a37cedb516575024",
+    "data_utils.py": "ffd8a69af140becb98450c954139b62a9b16b33c87e83c96edd2179be45f85de",
+    "algo.py": "c520db1f660de7ac1090409821668fe9df640aa99bc4651bcb5cc56a02d90310",
+    "g1_experiment.py": "592ebec1e2bfa18d2c5862a3aeba11d3682b80a8e45db9f4c90380345eaa87bc",
+}
+HOLOSOMA_PPO_MANIFEST = {
+    "activation": "ELU",
+    "actor_hidden_dims": [512, 256, 128],
+    "actor_learning_rate": 0.001,
+    "actor_weight_decay": 0.0,
+    "action_clip_value": 100.0,
+    "critic_hidden_dims": [512, 256, 128],
+    "critic_learning_rate": 0.001,
+    "critic_weight_decay": 0.0,
+    "desired_kl": 0.01,
+    "empirical_normalization": True,
+    "entropy_coef": 0.005,
+    "gamma": 0.99,
+    "init_noise_std": 1.0,
+    "lam": 0.95,
+    "max_grad_norm": 1.0,
+    "num_learning_epochs": 5,
+    "num_mini_batches": 4,
+    "num_steps_per_env": 24,
+    "schedule": "adaptive",
+    "use_symmetry": False,
+    "value_loss_coef": 1.0,
+    "clip_param": 0.2,
+}
+HOLOSOMA_STATIC_PARITY_SHA256 = hashlib.sha256(
+    json.dumps(
+        HOLOSOMA_PPO_MANIFEST,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
 
-def _distribution_metrics(
-    prefix: str,
-    values: torch.Tensor,
-    mask: torch.Tensor | None = None,
-) -> dict[str, float]:
+
+def _distribution_metrics(prefix: str, values: torch.Tensor) -> dict[str, float]:
     flat = values.detach().float().reshape(-1)
-    if mask is not None:
-        selected = mask.detach().bool().reshape(-1)
-        if values.ndim > mask.ndim:
-            repeats = values.numel() // mask.numel()
-            selected = selected.repeat_interleave(repeats)
-        flat = flat[selected]
     if flat.numel() == 0:
-        return {
-            f"{prefix}/count": 0.0,
-            f"{prefix}/mean": -1.0,
-            f"{prefix}/rms": -1.0,
-            f"{prefix}/min": -1.0,
-            f"{prefix}/max": -1.0,
-            f"{prefix}/p05": -1.0,
-            f"{prefix}/p50": -1.0,
-            f"{prefix}/p95": -1.0,
-            f"{prefix}/p99": -1.0,
-        }
+        raise RuntimeError(f"{prefix} has no samples")
     quantiles = torch.quantile(
         flat,
         torch.tensor([0.05, 0.50, 0.95, 0.99], device=flat.device),
@@ -101,8 +129,8 @@ def _distribution_metrics(
     }
 
 
-class FixedRewardFlowCPS:
-    """PPO with one real observation and one absolute Flow action per step."""
+class FixedRewardPPO:
+    """HOLOSOMA PPO connected to the fixed-reward G1 environment."""
 
     def __init__(self, cfg, env) -> None:
         self.cfg = cfg
@@ -115,63 +143,82 @@ class FixedRewardFlowCPS:
         self.actor_obs_dim = int(env.observation_dim)
         self.critic_obs_dim = int(env.critic_observation_dim)
 
-        self._policy = FlowMatchingPolicy(
-            obs_dim=self.actor_obs_dim,
-            action_dim=self.num_act,
-            hidden_dims=cfg.actor_hidden_dims,
-            activation=cfg.activation,
-            action_limit=float(cfg.action_limit),
-            flow_steps=int(cfg.flow_steps),
-            cps_noise_init=float(cfg.cps_noise_init),
-            cps_cov_rank=int(cfg.cps_cov_rank),
+        self.actor = PPOActor(
+            observation_dim=self.actor_obs_dim,
+            hidden_dims=tuple(cfg.actor_hidden_dims),
+            activation=str(cfg.activation),
+            num_actions=self.num_act,
+            init_noise_std=float(cfg.init_noise_std),
         ).to(env.device)
-        self.critic = ValueCritic(
+        self.critic = PPOCritic(
             observation_dim=self.critic_obs_dim,
-            hidden_dims=cfg.critic_hidden_dims,
-            activation=cfg.activation,
+            hidden_dims=tuple(cfg.critic_hidden_dims),
+            activation=str(cfg.activation),
         ).to(env.device)
+        if not bool(cfg.empirical_normalization):
+            raise RuntimeError("Audited HOLOSOMA G1 WBT PPO requires normalization")
         self.actor_obs_normalizer = EmpiricalNormalization(
-            self.actor_obs_dim, env.device
+            self.actor_obs_dim,
+            env.device,
         )
         self.critic_obs_normalizer = EmpiricalNormalization(
-            self.critic_obs_dim, env.device
+            self.critic_obs_dim,
+            env.device,
         )
 
-        self.learning_rate = float(cfg.policy_lr)
-        self.critic_learning_rate = float(cfg.value_lr)
-        self.min_lr = 1.0e-5
-        self.max_lr = 1.0e-2
+        self.actor_learning_rate = float(cfg.actor_learning_rate)
+        self.critic_learning_rate = float(cfg.critic_learning_rate)
+        self.max_actor_learning_rate = max(self.actor_learning_rate, 1.0e-2)
+        self.min_actor_learning_rate = min(self.actor_learning_rate, 1.0e-5)
+        self.max_critic_learning_rate = max(self.critic_learning_rate, 1.0e-2)
+        self.min_critic_learning_rate = min(self.critic_learning_rate, 1.0e-5)
         self.actor_optimizer = torch.optim.AdamW(
-            self._policy.parameters(),
-            lr=self.learning_rate,
-            betas=(0.9, 0.999),
-            eps=1.0e-8,
-            weight_decay=float(cfg.weight_decay),
+            self.actor.parameters(),
+            lr=self.actor_learning_rate,
+            weight_decay=float(cfg.actor_weight_decay),
         )
         self.critic_optimizer = torch.optim.AdamW(
             self.critic.parameters(),
             lr=self.critic_learning_rate,
-            betas=(0.9, 0.999),
-            eps=1.0e-8,
             weight_decay=float(cfg.critic_weight_decay),
         )
         self._policy_module = nn.ModuleDict(
             {
-                "actor": self._policy,
+                "actor": self.actor,
                 "actor_obs_normalizer": self.actor_obs_normalizer,
                 "critic": self.critic,
                 "critic_obs_normalizer": self.critic_obs_normalizer,
             }
         )
 
-        action_limit = float(cfg.action_limit)
+        action_clip = float(cfg.action_clip_value)
         self.action_low = torch.full(
-            (self.num_act,), -action_limit, device=env.device
+            (self.num_act,), -action_clip, device=env.device
         )
         self.action_high = torch.full(
-            (self.num_act,), action_limit, device=env.device
+            (self.num_act,), action_clip, device=env.device
         )
         env.enable_strict_action_contract(self.action_low, self.action_high)
+
+        self.storage = RolloutStorage(
+            env.num_envs,
+            int(cfg.num_steps_per_env),
+            device=env.device,
+        )
+        self.storage.register("actor_obs", (self.actor_obs_dim,), torch.float)
+        self.storage.register("critic_obs", (self.critic_obs_dim,), torch.float)
+        for key, shape, dtype in (
+            ("actions", (self.num_act,), torch.float),
+            ("rewards", (1,), torch.float),
+            ("dones", (1,), torch.bool),
+            ("values", (1,), torch.float),
+            ("returns", (1,), torch.float),
+            ("advantages", (1,), torch.float),
+            ("actions_log_prob", (1,), torch.float),
+            ("action_mean", (self.num_act,), torch.float),
+            ("action_sigma", (self.num_act,), torch.float),
+        ):
+            self.storage.register(key, shape, dtype)
 
         self.training_streams = Phase0CurriculumStreams.create(
             env.num_envs,
@@ -187,8 +234,6 @@ class FixedRewardFlowCPS:
         )
 
         self._update_index = 0
-        self._high_kl_streak = 0
-        self._nonpositive_reward_streak = 0
         self._stream_return_sum = torch.zeros(
             env.num_envs, dtype=torch.float32, device=env.device
         )
@@ -207,6 +252,11 @@ class FixedRewardFlowCPS:
         self._has_action_delta = torch.zeros(
             env.num_envs, dtype=torch.bool, device=env.device
         )
+        self._actor_optimizer_steps_total = 0
+        self._critic_optimizer_steps_total = 0
+        self._last_minibatch_fingerprint = ""
+        self._obs = None
+        self._critic_obs = None
 
     @property
     def policy(self) -> nn.Module:
@@ -216,10 +266,71 @@ class FixedRewardFlowCPS:
     def optimizer(self) -> torch.optim.Optimizer:
         return self.actor_optimizer
 
+    @staticmethod
+    def _ensure_finite(name: str, value: torch.Tensor) -> None:
+        if not torch.is_tensor(value):
+            raise TypeError(f"{name} must be a tensor")
+        if not bool(torch.isfinite(value).all()):
+            raise FloatingPointError(f"{name} contains non-finite values")
+
+    @staticmethod
+    def _snapshot_parameters(module: nn.Module) -> dict[str, torch.Tensor]:
+        return {
+            name: parameter.detach().clone()
+            for name, parameter in module.named_parameters()
+        }
+
+    @staticmethod
+    def _parameter_delta(
+        before: dict[str, torch.Tensor], module: nn.Module
+    ) -> float:
+        total = torch.zeros((), device=next(module.parameters()).device)
+        for name, parameter in module.named_parameters():
+            total += (parameter.detach() - before[name]).double().square().sum()
+        return float(torch.sqrt(total).item())
+
+    def _ensure_runtime_state_finite(self) -> None:
+        data = getattr(getattr(self.env, "robot", None), "data", None)
+        if data is None:
+            return
+        for name in ("joint_pos", "joint_vel", "root_state_w", "body_state_w"):
+            value = getattr(data, name, None)
+            if torch.is_tensor(value):
+                self._ensure_finite(f"state/{name}", value)
+
+    def _ensure_train_state_finite(self) -> None:
+        for module_name, module in (
+            ("actor", self.actor),
+            ("critic", self.critic),
+        ):
+            for parameter_name, parameter in module.named_parameters():
+                self._ensure_finite(
+                    f"{module_name}/parameter/{parameter_name}", parameter
+                )
+                if parameter.grad is not None:
+                    self._ensure_finite(
+                        f"{module_name}/gradient/{parameter_name}",
+                        parameter.grad,
+                    )
+        for optimizer_name, optimizer in (
+            ("actor", self.actor_optimizer),
+            ("critic", self.critic_optimizer),
+        ):
+            for state_index, state in enumerate(optimizer.state.values()):
+                for state_name, value in state.items():
+                    if torch.is_tensor(value):
+                        self._ensure_finite(
+                            f"{optimizer_name}_optimizer/{state_index}/{state_name}",
+                            value,
+                        )
+
+    # ------------------------------------------------------------------
+    # Evaluation adapter
+    # ------------------------------------------------------------------
+    @torch.no_grad()
     def deterministic_action(self, observation: torch.Tensor) -> torch.Tensor:
-        normalized = self.actor_obs_normalizer(observation)
-        self._ensure_finite("evaluation/actor_observation", normalized)
-        action = self._policy.deterministic_action(normalized)
+        normalized = self.actor_obs_normalizer(observation, update=False)
+        action = self.actor.act_inference(normalized)
         self._ensure_finite("evaluation/action", action)
         return action
 
@@ -235,199 +346,85 @@ class FixedRewardFlowCPS:
         del state
 
     # ------------------------------------------------------------------
-    # Numerical contracts
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _ensure_finite(name: str, value: torch.Tensor) -> None:
-        if not torch.is_tensor(value):
-            raise TypeError(f"{name} must be a tensor")
-        if not bool(torch.isfinite(value).all()):
-            raise FloatingPointError(f"{name} contains non-finite values")
-
-    def _ensure_runtime_state_finite(self) -> None:
-        data = getattr(getattr(self.env, "robot", None), "data", None)
-        if data is None:
-            return
-        for name in ("joint_pos", "joint_vel", "root_state_w", "body_state_w"):
-            value = getattr(data, name, None)
-            if torch.is_tensor(value):
-                self._ensure_finite(f"state/{name}", value)
-
-    def _ensure_gradients_finite(
-        self,
-        name: str,
-        module: nn.Module,
-        grad_norm: torch.Tensor | float,
-    ) -> None:
-        self._ensure_finite(f"{name}/gradient_norm", torch.as_tensor(grad_norm))
-        for parameter_name, parameter in module.named_parameters():
-            if parameter.grad is not None:
-                self._ensure_finite(
-                    f"{name}/gradient/{parameter_name}", parameter.grad
-                )
-
-    def _ensure_parameters_finite(self, name: str, module: nn.Module) -> None:
-        for parameter_name, parameter in module.named_parameters():
-            self._ensure_finite(
-                f"{name}/parameter/{parameter_name}", parameter
-            )
-
-    def _ensure_optimizer_finite(
-        self, name: str, optimizer: torch.optim.Optimizer
-    ) -> None:
-        for parameter_index, state in enumerate(optimizer.state.values()):
-            for state_name, value in state.items():
-                if torch.is_tensor(value):
-                    self._ensure_finite(
-                        f"{name}/state/{parameter_index}/{state_name}", value
-                    )
-
-    def _ensure_normalizer_finite(
-        self, name: str, normalizer: EmpiricalNormalization
-    ) -> None:
-        for buffer_name in ("_mean", "_var", "_std", "count"):
-            self._ensure_finite(
-                f"{name}/{buffer_name}", getattr(normalizer, buffer_name)
-            )
-        if bool((normalizer._var < 0).any()) or bool(
-            (normalizer._std < 0).any()
-        ):
-            raise FloatingPointError(f"{name} contains a negative scale")
-
-    # ------------------------------------------------------------------
     # Checkpoint contract
     # ------------------------------------------------------------------
-    @staticmethod
-    def _removed_state_keys(mapping: object) -> set[str]:
-        if not isinstance(mapping, dict):
-            return set()
-        forbidden = (
-            "amp_",
-            "disc_",
-            "discriminator",
-            "style_prior",
-            "mixed_reward",
-            "channel_",
-            "history",
-            "replay",
-            "mmd",
-            "world_model",
-        )
-        return {
-            str(key)
-            for key in mapping
-            if any(token in str(key).lower() for token in forbidden)
-        }
-
-    def _validate_checkpoint_contract(
-        self, state: object, policy_state: object | None = None
-    ) -> None:
+    def _validate_checkpoint_contract(self, state: object) -> None:
         if not isinstance(state, dict):
-            raise ValueError(
-                "fixed_reward checkpoint lacks schema 14; start a fresh run"
-            )
+            raise ValueError("fixed_reward checkpoint lacks schema 17")
         for key, expected in FIXED_REWARD_CHECKPOINT_CONTRACT.items():
-            actual = state.get(key)
-            if actual != expected:
+            if state.get(key) != expected:
                 raise ValueError(
                     "fixed_reward checkpoint semantic contract mismatch: "
-                    f"{key} expected={expected!r}, actual={actual!r}"
+                    f"{key} expected={expected!r}, actual={state.get(key)!r}"
                 )
-        removed = self._removed_state_keys(state)
-        removed.update(self._removed_state_keys(policy_state))
-        if removed:
-            raise ValueError(
-                "fixed_reward checkpoint contains removed state: "
-                + ", ".join(sorted(removed))
-            )
 
     def validate_checkpoint_payload(self, payload: dict) -> None:
-        state = payload.get("algo_state") if isinstance(payload, dict) else None
-        policy_state = payload.get("policy") if isinstance(payload, dict) else None
-        self._validate_checkpoint_contract(state, policy_state)
+        self._validate_checkpoint_contract(payload.get("algo_state"))
 
     def extra_checkpoint_state(self) -> dict:
-        return {
+        state = {
             **FIXED_REWARD_CHECKPOINT_CONTRACT,
             "critic_optimizer": self.critic_optimizer.state_dict(),
-            "learning_rate": float(self.learning_rate),
+            "actor_learning_rate": float(self.actor_learning_rate),
             "critic_learning_rate": float(self.critic_learning_rate),
             "stream_ids": self.training_streams.stream_ids.detach().cpu(),
             "phase0_stream_count": int(
                 self.training_streams.phase0_ids.numel()
             ),
-            "phase0_stream_fraction": float(
-                self.training_streams.phase0_fraction
-            ),
+            "phase0_stream_fraction": float(self.cfg.phase0_fraction),
             "phase0_attempt_tracker": self.phase0_attempts.state_dict(),
+            "actor_optimizer_steps_total": int(
+                self._actor_optimizer_steps_total
+            ),
+            "critic_optimizer_steps_total": int(
+                self._critic_optimizer_steps_total
+            ),
         }
+        return state
 
     def load_extra_checkpoint_state(
         self, payload: dict, reset_optimizer: bool = False
     ) -> None:
         self._validate_checkpoint_contract(payload)
-        if reset_optimizer:
-            self.learning_rate = float(self.cfg.policy_lr)
-            self.critic_learning_rate = float(self.cfg.value_lr)
-        else:
-            self.learning_rate = float(payload["learning_rate"])
-            self.critic_learning_rate = float(payload["critic_learning_rate"])
+        if not reset_optimizer:
             self.critic_optimizer.load_state_dict(payload["critic_optimizer"])
-        for group in self.actor_optimizer.param_groups:
-            group["lr"] = self.learning_rate
-        for group in self.critic_optimizer.param_groups:
-            group["lr"] = self.critic_learning_rate
-
-        saved_stream_ids = payload.get("stream_ids")
-        if not torch.is_tensor(saved_stream_ids) or not torch.equal(
-            saved_stream_ids.to(dtype=torch.int8, device="cpu"),
-            self.training_streams.stream_ids.detach().to("cpu"),
-        ):
-            raise ValueError("checkpoint training-stream assignment differs")
-        if int(payload.get("phase0_stream_count", -1)) != int(
+            self.actor_learning_rate = float(payload["actor_learning_rate"])
+            self.critic_learning_rate = float(payload["critic_learning_rate"])
+            for group in self.actor_optimizer.param_groups:
+                group["lr"] = self.actor_learning_rate
+            for group in self.critic_optimizer.param_groups:
+                group["lr"] = self.critic_learning_rate
+            self._actor_optimizer_steps_total = int(
+                payload["actor_optimizer_steps_total"]
+            )
+            self._critic_optimizer_steps_total = int(
+                payload["critic_optimizer_steps_total"]
+            )
+        saved_streams = torch.as_tensor(
+            payload["stream_ids"],
+            device=self.env.device,
+            dtype=self.training_streams.stream_ids.dtype,
+        )
+        if not torch.equal(saved_streams, self.training_streams.stream_ids):
+            raise ValueError("checkpoint stream assignment differs")
+        if int(payload["phase0_stream_count"]) != int(
             self.training_streams.phase0_ids.numel()
         ):
             raise ValueError("checkpoint phase0 stream count differs")
         if not math.isclose(
-            float(payload.get("phase0_stream_fraction", -1.0)),
-            float(self.training_streams.phase0_fraction),
+            float(payload["phase0_stream_fraction"]),
+            float(self.cfg.phase0_fraction),
             rel_tol=0.0,
             abs_tol=1.0e-12,
         ):
-            raise ValueError("checkpoint stream objective differs")
+            raise ValueError("checkpoint stream fraction differs")
         self.phase0_attempts.load_state_dict(
-            payload.get("phase0_attempt_tracker")
+            payload["phase0_attempt_tracker"]
         )
 
     # ------------------------------------------------------------------
-    # Reset and normalization
+    # Reset and episode accounting
     # ------------------------------------------------------------------
-    @torch.no_grad()
-    def _update_normalizer(
-        self, normalizer: EmpiricalNormalization, samples: torch.Tensor
-    ) -> None:
-        flat = samples.reshape(-1, samples.shape[-1])
-        if flat.shape[0] == 0:
-            raise RuntimeError("normalizer received no samples")
-        batch_size = min(max(1, int(self.cfg.micro_batch_size)), 1024)
-        for start in range(0, flat.shape[0], batch_size):
-            batch = flat[start : start + batch_size]
-            self._ensure_finite("normalizer/input", batch)
-            normalizer._update(batch)
-        self._ensure_normalizer_finite("normalizer", normalizer)
-
-    @torch.no_grad()
-    def _evaluate_values(self, observations: torch.Tensor) -> torch.Tensor:
-        shape = observations.shape[:-1]
-        flat = observations.reshape(-1, self.critic_obs_dim)
-        batch_size = max(1, int(self.cfg.micro_batch_size))
-        values: list[torch.Tensor] = []
-        for start in range(0, flat.shape[0], batch_size):
-            value = self.critic(flat[start : start + batch_size])
-            self._ensure_finite("critic/value", value)
-            values.append(value)
-        return torch.cat(values).reshape(shape)
-
     def _reset_training_streams(
         self, *, randomize_curriculum_episode_age: bool
     ) -> torch.Tensor:
@@ -441,7 +438,8 @@ class FixedRewardFlowCPS:
             lambda count: env.sample_phase_indices(count, horizon=1),
         )
         observation = env.reset(
-            phase_indices=phases, reset_stream_ids=reset_streams
+            phase_indices=phases,
+            reset_stream_ids=reset_streams,
         )
         if (
             randomize_curriculum_episode_age
@@ -468,6 +466,10 @@ class FixedRewardFlowCPS:
         return observation
 
     def initial_reset(self) -> torch.Tensor:
+        self.actor.train()
+        self.critic.train()
+        self.actor_obs_normalizer.train()
+        self.critic_obs_normalizer.train()
         return self._reset_training_streams(
             randomize_curriculum_episode_age=True
         )
@@ -485,6 +487,8 @@ class FixedRewardFlowCPS:
     def reset_for_update(self, update_idx: int) -> torch.Tensor:
         self._update_index = int(update_idx)
         self.phase0_attempts.begin_update()
+        if self._obs is None:
+            raise RuntimeError("algorithm has not been reset")
         return self._obs
 
     def _record_episode_stats(
@@ -515,9 +519,6 @@ class FixedRewardFlowCPS:
         self._stream_return_sum[done_ids] = 0.0
         self._stream_length_sum[done_ids] = 0.0
 
-    # ------------------------------------------------------------------
-    # Rollout and GAE
-    # ------------------------------------------------------------------
     def _reward_contributions(
         self, terms: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
@@ -525,124 +526,102 @@ class FixedRewardFlowCPS:
         for name, weight in REWARD_TERM_WEIGHTS.items():
             if name not in terms:
                 raise KeyError(f"reward terms are missing {name}")
-            self._ensure_finite(f"reward/raw/{name}", terms[name])
             result[name] = float(weight) * terms[name] * float(self.env.dt)
         return result
 
+    # ------------------------------------------------------------------
+    # HOLOSOMA rollout and GAE
+    # ------------------------------------------------------------------
     def collect(self, current_obs: torch.Tensor) -> dict:
         env = self.env
+        cfg = self.cfg
+        time_steps = int(cfg.num_steps_per_env)
+        num_envs = int(env.num_envs)
         device = env.device
-        time_steps = int(self.cfg.rollout_env_steps)
-        num_envs = env.num_envs
-        flow_steps = int(self.cfg.flow_steps)
+        if self.storage.step != 0:
+            raise RuntimeError("rollout storage was not cleared after update")
 
-        actor_obs = torch.empty(
-            time_steps, num_envs, self.actor_obs_dim, device=device
-        )
-        actor_obs_raw = torch.empty_like(actor_obs)
-        critic_obs = torch.empty(
-            time_steps, num_envs, self.critic_obs_dim, device=device
-        )
-        critic_obs_raw = torch.empty_like(critic_obs)
-        next_critic_obs = torch.empty_like(critic_obs)
-        latent_paths = torch.empty(
-            time_steps,
-            num_envs,
-            flow_steps + 1,
-            self.num_act,
-            device=device,
-        )
-        old_log_probs = torch.empty(
-            time_steps, num_envs, flow_steps, device=device
-        )
-        actions = torch.empty(
-            time_steps, num_envs, self.num_act, device=device
-        )
-        mean_actions = torch.empty_like(actions)
-        reward = torch.empty(time_steps, num_envs, device=device)
-        raw_terms = {
-            name: torch.empty_like(reward)
-            for name in (*RAW_POSE_TERMS, *RAW_PENALTY_TERMS)
-        }
-        contributions = {
-            name: torch.empty_like(reward) for name in REWARD_TERM_WEIGHTS
-        }
+        reward_raw = torch.empty(time_steps, num_envs, device=device)
+        reward_train = torch.empty_like(reward_raw)
         done = torch.zeros(
             time_steps, num_envs, dtype=torch.bool, device=device
         )
         failure = torch.zeros_like(done)
         timeout = torch.zeros_like(done)
         motion_complete = torch.zeros_like(done)
-        intervention_edge = torch.zeros_like(done)
+        action_raw = torch.empty(
+            time_steps, num_envs, self.num_act, device=device
+        )
+        action_applied = torch.empty_like(action_raw)
+        action_mean = torch.empty_like(action_raw)
+        action_delta = torch.empty_like(action_raw)
+        action_d2 = torch.empty_like(action_raw)
+        action_delta_valid = torch.zeros_like(done)
+        action_d2_valid = torch.zeros_like(done)
+        joint_vel_jump = torch.empty_like(reward_raw)
+        root_lin_vel_jump = torch.empty_like(reward_raw)
+        root_ang_vel_jump = torch.empty_like(reward_raw)
+        raw_terms = {
+            name: torch.empty_like(reward_raw)
+            for name in (*RAW_POSE_TERMS, *RAW_PENALTY_TERMS)
+        }
+        contributions = {
+            name: torch.empty_like(reward_raw)
+            for name in REWARD_TERM_WEIGHTS
+        }
         terminal_phase = torch.full(
             (time_steps, num_envs),
             -1.0,
             dtype=torch.float32,
             device=device,
         )
-        action_delta = torch.empty_like(actions)
-        action_d2 = torch.empty_like(actions)
-        action_delta_valid = torch.zeros_like(done)
-        action_d2_valid = torch.zeros_like(done)
-        reset_action = torch.zeros_like(done)
-        joint_vel_jump = torch.empty_like(reward)
-        root_lin_vel_jump = torch.empty_like(reward)
-        root_ang_vel_jump = torch.empty_like(reward)
-
         observation = current_obs
-        value_observation = self._critic_obs
+        if self._critic_obs is None:
+            raise RuntimeError("critic observation has not been initialized")
+        critic_observation = self._critic_obs
         collection_start_phases = env.phase_steps.detach().clone()
         reward_identity_abs_max = 0.0
-        action_bound_violation_max = 0.0
-        innovation_square_sum = torch.zeros(flow_steps, device=device)
+        raw_clip_count = 0
 
+        # HOLOSOMA wraps collection in inference_mode.  MimicKit's environment
+        # replaces persistent phase/sampler tensors while stepping, so its
+        # equivalent adapter must use no_grad to keep those tensors mutable
+        # during later validation and reset.  Policy outputs and probabilities
+        # are otherwise identical and remain detached from autograd.
         with torch.no_grad():
             for step_index in range(time_steps):
-                self._ensure_finite("observation/current", observation)
+                self._ensure_finite("actor_observation/raw", observation)
                 self._ensure_finite(
-                    "critic_observation/current", value_observation
+                    "critic_observation/raw", critic_observation
                 )
                 normalized_actor_obs = self.actor_obs_normalizer(observation)
                 normalized_critic_obs = self.critic_obs_normalizer(
-                    value_observation
+                    critic_observation
                 )
-                self._ensure_finite(
-                    "observation/actor_normalized", normalized_actor_obs
-                )
-                self._ensure_finite(
-                    "observation/critic_normalized", normalized_critic_obs
-                )
-
-                (
-                    action,
-                    latent_path,
-                    step_log_prob,
-                    sample_diagnostics,
-                ) = self._policy.sample(normalized_actor_obs)
-                mean_action = sample_diagnostics["mean_action"]
+                sampled_action = self.actor.act(normalized_actor_obs)
+                values = self.critic.evaluate(normalized_critic_obs).detach()
+                log_prob = self.actor.get_actions_log_prob(sampled_action).detach()
+                means = self.actor.action_mean.detach()
+                sigmas = self.actor.action_std.detach()
                 for name, tensor in (
-                    ("action", action),
-                    ("mean_action", mean_action),
-                    ("latent_path", latent_path),
-                    ("log_probability", step_log_prob),
+                    ("action", sampled_action),
+                    ("value", values),
+                    ("log_prob", log_prob),
+                    ("mean", means),
+                    ("sigma", sigmas),
                 ):
                     self._ensure_finite(f"policy/{name}", tensor)
 
-                below = (self.action_low - action).clamp_min(0.0)
-                above = (action - self.action_high).clamp_min(0.0)
-                action_bound_violation_max = max(
-                    action_bound_violation_max,
-                    float(torch.maximum(below, above).max().item()),
+                applied_action = torch.clamp(
+                    sampled_action,
+                    -float(cfg.action_clip_value),
+                    float(cfg.action_clip_value),
                 )
+                raw_clip_count += int((sampled_action != applied_action).sum().item())
                 previous_action = env.last_action.detach().clone()
-                delta = action - previous_action
-                has_delta = self._has_action_delta.clone()
+                delta = applied_action - previous_action
                 second_delta = delta - self._previous_action_delta
-                action_delta[step_index] = delta
-                action_d2[step_index] = second_delta
-                action_delta_valid[step_index] = has_delta
-                action_d2_valid[step_index] = has_delta
-                reset_action[step_index] = ~has_delta
+                has_delta = self._has_action_delta.clone()
                 self._previous_action_delta.copy_(delta)
                 self._has_action_delta.fill_(True)
 
@@ -653,17 +632,11 @@ class FixedRewardFlowCPS:
                     step_reward,
                     step_done,
                     info,
-                ) = env.step(action)
+                ) = env.step(sampled_action)
                 terminal_critic_obs = env.get_critic_observation()
                 _, joint_vel_after = env.get_action_joint_state()
                 root_velocity_after = env.get_mimic_root_velocity_w()
                 self._ensure_runtime_state_finite()
-                for name, tensor in (
-                    ("next_observation", next_observation),
-                    ("next_critic_observation", terminal_critic_obs),
-                    ("reward", step_reward),
-                ):
-                    self._ensure_finite(name, tensor)
                 if float(step_reward.max().item()) > 0.100001:
                     raise RuntimeError(
                         "fixed reward exceeded its single-step maximum"
@@ -691,13 +664,11 @@ class FixedRewardFlowCPS:
                     | done_terms["anchor_ori_bad"].bool()
                     | done_terms["ee_body_bad"].bool()
                 )
-                step_failure, step_timeout, step_complete = (
-                    resolve_terminal_masks(
-                        step_done.bool(),
-                        done_terms["time_out"].bool(),
-                        done_terms["motion_complete"].bool(),
-                        failures,
-                    )
+                step_failure, step_timeout, step_complete = resolve_terminal_masks(
+                    step_done.bool(),
+                    done_terms["time_out"].bool(),
+                    done_terms["motion_complete"].bool(),
+                    failures,
                 )
                 self.phase0_attempts.observe_step(
                     torch.ones_like(step_done, dtype=torch.bool),
@@ -707,25 +678,46 @@ class FixedRewardFlowCPS:
                     step_complete,
                 )
 
-                actor_obs[step_index] = normalized_actor_obs
-                actor_obs_raw[step_index] = observation
-                critic_obs[step_index] = normalized_critic_obs
-                critic_obs_raw[step_index] = value_observation
-                next_critic_obs[step_index] = self.critic_obs_normalizer(
-                    terminal_critic_obs
+                final_rewards = torch.zeros_like(step_reward)
+                if bool(step_timeout.any()):
+                    final_critic_normalized = self.critic_obs_normalizer(
+                        terminal_critic_obs,
+                        update=False,
+                    )
+                    final_values = self.critic.evaluate(
+                        final_critic_normalized
+                    ).detach()
+                    final_rewards += float(cfg.gamma) * torch.squeeze(
+                        final_values
+                        * step_timeout.unsqueeze(1).to(device=device),
+                        1,
+                    )
+                stored_reward = step_reward + final_rewards
+
+                self.storage.add(
+                    actor_obs=normalized_actor_obs,
+                    critic_obs=normalized_critic_obs,
+                    actions=sampled_action,
+                    values=values,
+                    actions_log_prob=log_prob.unsqueeze(1),
+                    action_mean=means,
+                    action_sigma=sigmas,
+                    rewards=stored_reward.view(-1, 1),
+                    dones=step_done.bool().view(-1, 1),
                 )
-                latent_paths[step_index] = latent_path
-                old_log_probs[step_index] = step_log_prob
-                actions[step_index] = action
-                mean_actions[step_index] = mean_action
-                reward[step_index] = step_reward
+                action_raw[step_index] = sampled_action
+                action_applied[step_index] = applied_action
+                action_mean[step_index] = means
+                action_delta[step_index] = delta
+                action_d2[step_index] = second_delta
+                action_delta_valid[step_index] = has_delta
+                action_d2_valid[step_index] = has_delta
+                reward_raw[step_index] = step_reward
+                reward_train[step_index] = stored_reward
                 done[step_index] = step_done.bool()
                 failure[step_index] = step_failure
                 timeout[step_index] = step_timeout
                 motion_complete[step_index] = step_complete
-                intervention_edge[step_index] = info[
-                    "intervention_edge_mask"
-                ].bool()
                 joint_vel_jump[step_index] = (
                     joint_vel_after - joint_vel_before
                 ).abs().mean(dim=-1)
@@ -742,1050 +734,567 @@ class FixedRewardFlowCPS:
                     terminal_phase[step_index, step_done.bool()] = info[
                         "termination_phase_steps"
                     ][step_done.bool()].float()
-
-                innovation_rms = sample_diagnostics[
-                    "innovation_rms_per_flow_step"
-                ]
-                self._ensure_finite("cps/innovation_rms", innovation_rms)
-                innovation_square_sum += innovation_rms.square()
                 self._record_episode_stats(step_reward, step_done.bool())
 
                 observation = next_observation
-                value_observation = terminal_critic_obs
+                critic_observation = terminal_critic_obs
                 done_ids = step_done.bool().nonzero(
                     as_tuple=False
                 ).squeeze(-1)
                 if done_ids.numel() > 0:
-                    reset_phases, reset_streams = (
-                        self.training_streams.reset_phases(
-                            done_ids,
-                            lambda count: env.sample_phase_indices(
-                                count, horizon=1
-                            ),
-                        )
+                    reset_phases, reset_streams = self.training_streams.reset_phases(
+                        done_ids,
+                        lambda count: env.sample_phase_indices(count, horizon=1),
                     )
                     reset_observation = env.reset_envs(
                         done_ids,
                         phase_indices=reset_phases,
                         reset_stream_ids=reset_streams,
                     )
-                    self._ensure_finite(
-                        "observation/partial_reset", reset_observation
-                    )
                     observation[done_ids] = reset_observation
-                    value_observation = env.get_critic_observation()
+                    critic_observation = env.get_critic_observation()
                     self._previous_action_delta[done_ids] = 0.0
                     self._has_action_delta[done_ids] = False
+                    self.actor.reset(step_done)
+                    self.critic.reset(step_done)
                     self.phase0_attempts.start(done_ids)
 
-            values = self._evaluate_values(critic_obs)
-            next_values = self._evaluate_values(next_critic_obs)
+            last_critic_obs = self.critic_obs_normalizer(
+                critic_observation,
+                update=False,
+            )
+            last_values = self.critic.evaluate(last_critic_obs).detach()
+            returns, advantages = self._compute_returns_and_advantages(
+                last_values,
+                self.storage["values"],
+                self.storage["dones"],
+                self.storage["rewards"],
+            )
+            self.storage["returns"] = returns
+            self.storage["advantages"] = advantages
 
-        if action_bound_violation_max > 1.0e-6:
-            raise RuntimeError("policy emitted an action outside its domain")
         self._obs = observation
-        self._critic_obs = value_observation
-        rollout = {
-            "actor_obs": actor_obs,
-            "actor_obs_raw": actor_obs_raw,
-            "critic_obs": critic_obs,
-            "critic_obs_raw": critic_obs_raw,
-            "latents": latent_paths,
-            "old_log_probs": old_log_probs,
-            "actions": actions,
-            "mean_actions": mean_actions,
-            "values": values,
-            "next_values": next_values,
+        self._critic_obs = critic_observation
+        return {
+            "storage": self.storage,
+            "reward": reward_raw,
+            "training_reward": reward_train,
             "done": done,
             "failure": failure,
             "timeout": timeout,
             "motion_complete": motion_complete,
             "terminal_phase": terminal_phase,
-            "bootstrap_mask": ~failure & ~motion_complete,
-            "trace_mask": ~done,
-            "reward": reward,
-            "reward_raw_terms": raw_terms,
-            "reward_contributions": contributions,
-            "reward_decomposition_abs_max": reward_identity_abs_max,
-            "intervention_edge": intervention_edge,
             "stream_ids": self.training_streams.stream_ids,
             "collection_start_phases": collection_start_phases,
-            "action_bound_violation_max": action_bound_violation_max,
+            "actions": action_raw,
+            "applied_actions": action_applied,
+            "mean_actions": action_mean,
             "action_delta": action_delta,
             "action_d2": action_d2,
             "action_delta_valid": action_delta_valid,
             "action_d2_valid": action_d2_valid,
-            "reset_action": reset_action,
             "joint_vel_jump": joint_vel_jump,
             "root_lin_vel_jump": root_lin_vel_jump,
             "root_ang_vel_jump": root_ang_vel_jump,
-            "cps_innovation_rms": torch.sqrt(
-                innovation_square_sum / float(time_steps)
-            ),
+            "reward_raw_terms": raw_terms,
+            "reward_contributions": contributions,
+            "reward_decomposition_abs_max": reward_identity_abs_max,
+            "action_clip_count": raw_clip_count,
             "next_observation": observation,
         }
-        self._assign_credit(rollout)
-        return rollout
 
-    @torch.no_grad()
-    def _assign_credit(self, rollout: dict) -> None:
-        rewards = rollout["reward"]
-        valid = torch.ones_like(rewards, dtype=torch.bool)
-        credit = compute_task_gae(
-            rewards,
-            rollout["values"],
-            rollout["next_values"],
-            rollout["bootstrap_mask"],
-            rollout["trace_mask"],
-            valid,
-            gamma=float(self.cfg.discount_gamma),
-            gae_lambda=float(self.cfg.gae_lambda),
-        )
-        weights = torch.zeros_like(rewards)
-        for _, _, objective_weight, env_ids in self._stream_specs(
-            self.training_streams.stream_ids
-        ):
-            sample_count = rewards.shape[0] * env_ids.numel()
-            if sample_count <= 0:
-                raise RuntimeError("training stream has no actor samples")
-            weights[:, env_ids] = float(objective_weight) / float(sample_count)
-        credit = normalize_actor_advantage(credit, valid, weights)
-        for name, tensor in (
-            ("advantage", credit.advantages),
-            ("actor_advantage", credit.actor_advantage),
-            ("value_target", credit.value_targets),
-        ):
-            self._ensure_finite(f"credit/{name}", tensor)
-        rollout["advantages"] = credit.actor_advantage
-        rollout["raw_advantages"] = credit.advantages
-        rollout["value_targets"] = credit.value_targets
-
-    def _stream_specs(
-        self, labels: torch.Tensor
-    ) -> list[tuple[str, int, float, torch.Tensor]]:
-        configured = (
-            ("phase0", PHASE0_STREAM, float(self.cfg.phase0_fraction)),
-            (
-                "curriculum",
-                CURRICULUM_STREAM,
-                1.0 - float(self.cfg.phase0_fraction),
-            ),
-        )
-        active: list[tuple[str, int, float, torch.Tensor]] = []
-        for name, stream_id, weight in configured:
-            indices = (labels == stream_id).nonzero(
-                as_tuple=False
-            ).squeeze(-1)
-            if indices.numel() > 0 and weight > 0.0:
-                active.append((name, stream_id, weight, indices))
-        total_weight = sum(item[2] for item in active)
-        if not active or total_weight <= 0.0:
-            raise RuntimeError("fixed_reward has no active stream")
-        return [
-            (name, stream_id, weight / total_weight, indices)
-            for name, stream_id, weight, indices in active
-        ]
-
-    # ------------------------------------------------------------------
-    # PPO and value optimization
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _snapshot_parameters(module: nn.Module) -> dict[str, torch.Tensor]:
-        return {
-            name: parameter.detach().clone()
-            for name, parameter in module.named_parameters()
-            if parameter.requires_grad
-        }
-
-    @staticmethod
-    def _parameter_delta(
-        module: nn.Module,
-        before: dict[str, torch.Tensor],
-        predicate=lambda _name: True,
-    ) -> float:
-        current = dict(module.named_parameters())
-        selected = [name for name in before if predicate(name)]
-        if not selected:
-            raise RuntimeError("parameter group is empty")
-        squared = torch.zeros((), device=current[selected[0]].device)
-        for name in selected:
-            squared += (
-                current[name].detach() - before[name].to(current[name])
-            ).float().square().sum()
-        return float(torch.sqrt(squared).item())
-
-    @staticmethod
-    def _gradient_l2(module: nn.Module, predicate=lambda _name: True) -> float:
-        squared: torch.Tensor | None = None
-        for name, parameter in module.named_parameters():
-            if parameter.grad is None or not predicate(name):
-                continue
-            term = parameter.grad.detach().float().square().sum()
-            squared = term if squared is None else squared + term
-        return 0.0 if squared is None else float(torch.sqrt(squared).item())
-
-    def _mini_batch_size(self, sample_count: int) -> int:
-        return max(
-            1,
-            math.ceil(sample_count / max(1, int(self.cfg.num_mini_batches))),
-        )
-
-    def _micro_batch_size(self, batch_size: int) -> int:
-        configured = int(self.cfg.micro_batch_size)
-        return batch_size if configured <= 0 else max(
-            1, min(batch_size, configured)
-        )
-
-    def _update_actor_lr(self, observed_kl: float) -> int:
-        if float(self.cfg.desired_kl) <= 0.0:
-            return 0
-        old_lr = self.learning_rate
-        self.learning_rate, _ = adaptive_lr_from_kl(
-            raw_kl=observed_kl,
-            kl_units=1,
-            target_per_step=float(self.cfg.desired_kl),
-            lr=self.learning_rate,
-            min_lr=self.min_lr,
-            max_lr=self.max_lr,
-        )
-        for group in self.actor_optimizer.param_groups:
-            group["lr"] = self.learning_rate
-        return -1 if self.learning_rate < old_lr else int(
-            self.learning_rate > old_lr
-        )
-
-    @torch.no_grad()
-    def _policy_ratio_metrics(
+    def _compute_returns_and_advantages(
         self,
-        actor_obs: torch.Tensor,
-        latent_paths: torch.Tensor,
-        old_log_probs: torch.Tensor,
-    ) -> dict[str, float]:
-        batch_size = self._micro_batch_size(actor_obs.shape[0])
-        log_ratios: list[torch.Tensor] = []
-        factor_deltas: list[torch.Tensor] = []
-        for start in range(0, actor_obs.shape[0], batch_size):
-            stop = start + batch_size
-            new = self._policy.recompute_log_probs(
-                actor_obs[start:stop], latent_paths[start:stop]
+        last_values: torch.Tensor,
+        values: torch.Tensor,
+        dones: torch.Tensor,
+        rewards: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        advantage: torch.Tensor | int = 0
+        returns = torch.zeros_like(values)
+        num_steps = returns.shape[0]
+        for step in reversed(range(num_steps)):
+            next_values = last_values if step == num_steps - 1 else values[step + 1]
+            next_is_not_terminal = 1.0 - dones[step].float()
+            delta = (
+                rewards[step]
+                + next_is_not_terminal * float(self.cfg.gamma) * next_values
+                - values[step]
             )
-            delta = new - old_log_probs[start:stop]
-            factor_deltas.append(delta)
-            log_ratios.append(delta.sum(dim=-1))
-        factors = torch.cat(factor_deltas)
-        log_ratio = torch.cat(log_ratios)
-        ratio = torch.exp(log_ratio)
-        self._ensure_finite("policy/post_log_ratio", log_ratio)
-        self._ensure_finite("policy/post_ratio", ratio)
-        clipped = (
-            (ratio < 1.0 - float(self.cfg.clip_range))
-            | (ratio > 1.0 + float(self.cfg.clip_range))
-        ).float()
-        ratio_q = torch.quantile(
+            advantage = (
+                delta
+                + next_is_not_terminal
+                * float(self.cfg.gamma)
+                * float(self.cfg.lam)
+                * advantage
+            )
+            returns[step] = advantage + values[step]
+        advantages = returns - values
+        advantages = (advantages - advantages.mean()) / (
+            advantages.std() + 1.0e-8
+        )
+        self._ensure_finite("gae/returns", returns)
+        self._ensure_finite("gae/advantages", advantages)
+        return returns, advantages
+
+    # ------------------------------------------------------------------
+    # Exact HOLOSOMA PPO update
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _compute_kl_div(
+        old_mu_batch: torch.Tensor,
+        old_sigma_batch: torch.Tensor,
+        mu_batch: torch.Tensor,
+        sigma_batch: torch.Tensor,
+    ) -> torch.Tensor:
+        with torch.inference_mode():
+            old_dist = Normal(old_mu_batch, old_sigma_batch)
+            new_dist = Normal(mu_batch, sigma_batch)
+            return kl_divergence(old_dist, new_dist).sum(-1).mean()
+
+    def _update_learning_rate(self, kl_mean: torch.Tensor) -> None:
+        if kl_mean > float(self.cfg.desired_kl) * 2.0:
+            self.actor_learning_rate = max(
+                self.min_actor_learning_rate,
+                self.actor_learning_rate / 1.5,
+            )
+            self.critic_learning_rate = max(
+                self.min_critic_learning_rate,
+                self.critic_learning_rate / 1.5,
+            )
+        elif kl_mean < float(self.cfg.desired_kl) / 2.0 and kl_mean > 0.0:
+            self.actor_learning_rate = min(
+                self.max_actor_learning_rate,
+                self.actor_learning_rate * 1.5,
+            )
+            self.critic_learning_rate = min(
+                self.max_critic_learning_rate,
+                self.critic_learning_rate * 1.5,
+            )
+        for param_group in self.actor_optimizer.param_groups:
+            param_group["lr"] = self.actor_learning_rate
+        for param_group in self.critic_optimizer.param_groups:
+            param_group["lr"] = self.critic_learning_rate
+
+    def _compute_ppo_loss(self, minibatch: dict[str, torch.Tensor]):
+        actions_batch = minibatch["actions"]
+        target_values_batch = minibatch["values"]
+        advantages_batch = minibatch["advantages"]
+        returns_batch = minibatch["returns"]
+        old_actions_log_prob_batch = minibatch["actions_log_prob"]
+        old_mu_batch = minibatch["action_mean"]
+        old_sigma_batch = minibatch["action_sigma"]
+        actor_obs = minibatch["actor_obs"]
+        critic_obs = minibatch["critic_obs"]
+
+        self.actor.act(actor_obs)
+        value_batch = self.critic.evaluate(critic_obs)
+        actions_log_prob_batch = self.actor.get_actions_log_prob(actions_batch)
+        mu_batch = self.actor.action_mean
+        sigma_batch = self.actor.action_std
+        entropy_batch = self.actor.entropy
+
+        kl_mean = self._compute_kl_div(
+            old_mu_batch,
+            old_sigma_batch,
+            mu_batch,
+            sigma_batch,
+        )
+        self._update_learning_rate(kl_mean)
+
+        ratio = torch.exp(
+            actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch)
+        )
+        surrogate = -torch.squeeze(advantages_batch) * ratio
+        surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
             ratio,
-            torch.tensor([0.05, 0.50, 0.95], device=ratio.device),
+            1.0 - float(self.cfg.clip_param),
+            1.0 + float(self.cfg.clip_param),
         )
-        abs_log_q = torch.quantile(log_ratio.abs(), 0.95)
+        surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+        value_clipped = target_values_batch + (
+            value_batch - target_values_batch
+        ).clamp(-float(self.cfg.clip_param), float(self.cfg.clip_param))
+        value_losses = (value_batch - returns_batch).pow(2)
+        value_losses_clipped = (value_clipped - returns_batch).pow(2)
+        value_loss = torch.max(value_losses, value_losses_clipped).mean()
+
+        symmetry_actor_loss = torch.tensor(0.0, device=self.env.device)
+        symmetry_critic_loss = torch.tensor(0.0, device=self.env.device)
+        entropy_loss = entropy_batch.mean()
+        actor_loss = surrogate_loss - float(self.cfg.entropy_coef) * entropy_loss
+        critic_loss = float(self.cfg.value_loss_coef) * value_loss
+        clip_fraction = (
+            torch.abs(ratio - 1.0) > float(self.cfg.clip_param)
+        ).float().mean()
         return {
-            "policy/kl": float((0.5 * log_ratio.square()).mean().item()),
-            "policy/flow_factor_kl": float(
-                (0.5 * factors.square()).mean().item()
-            ),
-            "policy/ratio_mean": float(ratio.mean().item()),
-            "policy/ratio_min": float(ratio.min().item()),
-            "policy/ratio_p05": float(ratio_q[0].item()),
-            "policy/ratio_p50": float(ratio_q[1].item()),
-            "policy/ratio_p95": float(ratio_q[2].item()),
-            "policy/ratio_max": float(ratio.max().item()),
-            "policy/clip_fraction": float(clipped.mean().item()),
-            "policy/log_ratio_abs_p95": float(abs_log_q.item()),
-            "policy/log_ratio_abs_max": float(log_ratio.abs().max().item()),
+            "actor_loss": actor_loss,
+            "critic_loss": critic_loss,
+            "symmetry_actor_loss": symmetry_actor_loss,
+            "symmetry_critic_loss": symmetry_critic_loss,
+            "value_loss": value_loss,
+            "surrogate_loss": surrogate_loss,
+            "entropy_loss": entropy_loss,
+            "kl_mean": kl_mean,
+            "ratio_mean": ratio.mean(),
+            "clip_fraction": clip_fraction,
         }
 
-    def _actor_update(self, rollout: dict) -> dict[str, float]:
-        time_steps, num_envs = rollout["reward"].shape
-        sample_count = time_steps * num_envs
-        actor_obs = rollout["actor_obs"].reshape(
-            sample_count, self.actor_obs_dim
+    def _training_step(self) -> dict[str, float]:
+        cfg = self.cfg
+        actor_before = self._snapshot_parameters(self.actor)
+        critic_before = self._snapshot_parameters(self.critic)
+        generator = self.storage.mini_batch_generator(
+            int(cfg.num_mini_batches),
+            int(cfg.num_learning_epochs),
         )
-        latent_paths = rollout["latents"].reshape(
-            sample_count,
-            int(self.cfg.flow_steps) + 1,
-            self.num_act,
-        )
-        old_log_probs = rollout["old_log_probs"].reshape(
-            sample_count, int(self.cfg.flow_steps)
-        )
-        advantages = rollout["advantages"].reshape(sample_count)
-        labels = rollout["stream_ids"].reshape(1, num_envs).expand(
-            time_steps, num_envs
-        ).reshape(-1)
-        for name, tensor in (
-            ("observation", actor_obs),
-            ("latent_path", latent_paths),
-            ("old_log_probability", old_log_probs),
-            ("advantage", advantages),
-        ):
-            self._ensure_finite(f"policy/input/{name}", tensor)
+        loss_dict = {
+            "Value": 0.0,
+            "Surrogate": 0.0,
+            "Entropy": 0.0,
+            "KL": 0.0,
+        }
+        actor_grad_sum = 0.0
+        critic_grad_sum = 0.0
+        first_epoch_fingerprints: list[str] = []
+        repeated_epoch_fingerprints: list[str] = []
+        for update_number, minibatch in enumerate(generator):
+            fingerprint = hashlib.sha256(
+                minibatch["actions_log_prob"][:64]
+                .detach()
+                .cpu()
+                .numpy()
+                .tobytes()
+            ).hexdigest()
+            if update_number < int(cfg.num_mini_batches):
+                first_epoch_fingerprints.append(fingerprint)
+            elif update_number < 2 * int(cfg.num_mini_batches):
+                repeated_epoch_fingerprints.append(fingerprint)
 
-        # The unchanged sampler and recomputation must agree before PPO.
-        preflight_max = 0.0
-        with torch.no_grad():
-            # Recompute with the same per-step environment batch used during
-            # sampling. CUDA GEMM reduction order can differ across batch
-            # shapes by one float32 ULP; changing the batch shape is not a
-            # policy-density discrepancy.
-            sampled_observations = rollout["actor_obs"]
-            sampled_paths = rollout["latents"]
-            sampled_log_probs = rollout["old_log_probs"]
-            for step_index in range(time_steps):
-                recomputed = self._policy.recompute_log_probs(
-                    sampled_observations[step_index],
-                    sampled_paths[step_index],
+            ppo_loss_dict = self._compute_ppo_loss(minibatch)
+            self.actor_optimizer.zero_grad()
+            self.critic_optimizer.zero_grad()
+            ppo_loss = (
+                ppo_loss_dict["actor_loss"]
+                + ppo_loss_dict["critic_loss"]
+            )
+            self._ensure_finite("ppo/loss", ppo_loss)
+            ppo_loss.backward()
+            actor_grad = nn.utils.clip_grad_norm_(
+                self.actor.parameters(), float(cfg.max_grad_norm)
+            )
+            critic_grad = nn.utils.clip_grad_norm_(
+                self.critic.parameters(), float(cfg.max_grad_norm)
+            )
+            self._ensure_finite("ppo/actor_grad", torch.as_tensor(actor_grad))
+            self._ensure_finite("ppo/critic_grad", torch.as_tensor(critic_grad))
+            self.actor_optimizer.step()
+            self.critic_optimizer.step()
+            self._actor_optimizer_steps_total += 1
+            self._critic_optimizer_steps_total += 1
+            actor_grad_sum += float(actor_grad)
+            critic_grad_sum += float(critic_grad)
+
+            loss_dict["Value"] += ppo_loss_dict.pop("value_loss").item()
+            loss_dict["Surrogate"] += ppo_loss_dict.pop("surrogate_loss").item()
+            loss_dict["Entropy"] += ppo_loss_dict.pop("entropy_loss").item()
+            loss_dict["KL"] += ppo_loss_dict.pop("kl_mean").item()
+            for key, loss in ppo_loss_dict.items():
+                if key not in loss_dict:
+                    loss_dict[key] = 0.0
+                loss_dict[key] += (
+                    loss.item() if torch.is_tensor(loss) else float(loss)
                 )
-                preflight_max = max(
-                    preflight_max,
-                    float(
-                        (recomputed - sampled_log_probs[step_index])
-                        .abs()
-                        .max()
-                        .item()
-                    ),
-                )
-        if preflight_max > 3.0e-6:
+
+        num_updates = int(cfg.num_learning_epochs) * int(cfg.num_mini_batches)
+        if first_epoch_fingerprints != repeated_epoch_fingerprints:
             raise RuntimeError(
-                "sampled/recomputed CPS log probability differs by more than "
-                f"3e-6: {preflight_max:.9g}"
+                "HOLOSOMA minibatch permutation was not reused across epochs"
             )
-
-        streams = self._stream_specs(labels)
-        num_mini_batches = max(1, int(self.cfg.num_mini_batches))
-        micro_size = self._micro_batch_size(
-            self._mini_batch_size(sample_count)
+        self._last_minibatch_fingerprint = hashlib.sha256(
+            "".join(first_epoch_fingerprints).encode("ascii")
+        ).hexdigest()
+        for key in loss_dict:
+            loss_dict[key] /= num_updates
+        loss_dict["actor_learning_rate"] = self.actor_learning_rate
+        loss_dict["critic_learning_rate"] = self.critic_learning_rate
+        loss_dict["actor_grad_norm"] = actor_grad_sum / num_updates
+        loss_dict["critic_grad_norm"] = critic_grad_sum / num_updates
+        loss_dict["actor_parameter_delta"] = self._parameter_delta(
+            actor_before, self.actor
         )
-        clip_low = 1.0 - float(self.cfg.clip_range)
-        clip_high = 1.0 + float(self.cfg.clip_range)
-        before = self._snapshot_parameters(self._policy)
-        lr_start = self.learning_rate
-        totals = {
-            "loss": 0.0,
-            "grad": 0.0,
-            "backbone_grad": 0.0,
-            "covariance_grad": 0.0,
-            "eta_grad": 0.0,
-        }
-        stream_loss = {name: 0.0 for name, _, _, _ in streams}
-        stream_steps = {name: 0 for name, _, _, _ in streams}
-        lr_down = lr_up = lr_hold = 0
-        optimizer_steps = 0
-        early_stop_epoch = int(self.cfg.policy_epochs)
-
-        for epoch in range(int(self.cfg.policy_epochs)):
-            epoch_kl = 0.0
-            epoch_steps = 0
-            splits = {}
-            for name, _, weight, indices in streams:
-                shuffled = indices[torch.randperm(indices.numel(), device=indices.device)]
-                splits[name] = (weight, torch.tensor_split(shuffled, num_mini_batches))
-            for mini_index in range(num_mini_batches):
-                parts = [
-                    (name, weight, groups[mini_index])
-                    for name, (weight, groups) in splits.items()
-                    if groups[mini_index].numel() > 0
-                ]
-                if not parts:
-                    continue
-                self.actor_optimizer.zero_grad(set_to_none=True)
-                combined_loss = 0.0
-                combined_kl = 0.0
-                for name, weight, indices in parts:
-                    denominator = float(indices.numel())
-                    loss_sum = 0.0
-                    kl_sum = 0.0
-                    for start in range(0, indices.numel(), micro_size):
-                        sub = indices[start : start + micro_size]
-                        new_log_probs = self._policy.recompute_log_probs(
-                            actor_obs[sub], latent_paths[sub]
-                        )
-                        delta = new_log_probs - old_log_probs[sub]
-                        log_ratio = delta.sum(dim=-1)
-                        ratio = torch.exp(log_ratio)
-                        self._ensure_finite("policy/log_ratio", log_ratio)
-                        self._ensure_finite("policy/ratio", ratio)
-                        unclipped = -advantages[sub] * ratio
-                        clipped = -advantages[sub] * torch.clamp(
-                            ratio, clip_low, clip_high
-                        )
-                        loss = torch.maximum(unclipped, clipped).sum()
-                        (float(weight) * loss / denominator).backward()
-                        loss_sum += float(loss.detach().item())
-                        kl_sum += float(
-                            (0.5 * log_ratio.detach().square()).sum().item()
-                        )
-                    stream_mean = loss_sum / denominator
-                    combined_loss += float(weight) * stream_mean
-                    combined_kl += float(weight) * kl_sum / denominator
-                    stream_loss[name] += stream_mean
-                    stream_steps[name] += 1
-
-                direction = self._update_actor_lr(combined_kl)
-                lr_down += int(direction < 0)
-                lr_up += int(direction > 0)
-                lr_hold += int(direction == 0)
-                grad_norm = nn.utils.clip_grad_norm_(
-                    self._policy.parameters(),
-                    float(self.cfg.max_grad_norm),
-                    error_if_nonfinite=True,
-                )
-                self._ensure_gradients_finite("actor", self._policy, grad_norm)
-                totals["loss"] += combined_loss
-                totals["grad"] += float(grad_norm)
-                totals["backbone_grad"] += self._gradient_l2(
-                    self._policy, lambda name: not name.startswith("cps_")
-                )
-                totals["covariance_grad"] += self._gradient_l2(
-                    self._policy,
-                    lambda name: name in {"cps_diag_raw", "cps_lowrank_raw"},
-                )
-                totals["eta_grad"] += self._gradient_l2(
-                    self._policy, lambda name: name == "cps_eta_raw"
-                )
-                self.actor_optimizer.step()
-                self._ensure_parameters_finite("actor/after", self._policy)
-                self._ensure_optimizer_finite(
-                    "actor_optimizer", self.actor_optimizer
-                )
-                optimizer_steps += 1
-                epoch_kl += combined_kl
-                epoch_steps += 1
-            if (
-                float(self.cfg.desired_kl) > 0.0
-                and epoch_steps > 0
-                and epoch_kl / epoch_steps
-                > float(self.cfg.kl_early_stop_factor)
-                * float(self.cfg.desired_kl)
-            ):
-                early_stop_epoch = epoch + 1
-                break
-
-        if optimizer_steps == 0:
-            raise RuntimeError("actor performed no optimizer step")
-        actor_delta = self._parameter_delta(self._policy, before)
-        if not math.isfinite(actor_delta) or actor_delta <= 0.0:
-            raise RuntimeError("actor parameters did not update")
-        denominator = float(optimizer_steps)
-        metrics = {
-            "policy/loss": totals["loss"] / denominator,
-            "policy/grad_norm": totals["grad"] / denominator,
-            "policy/backbone_grad_norm": totals["backbone_grad"] / denominator,
-            "policy/covariance_grad_norm": totals["covariance_grad"] / denominator,
-            "policy/eta_grad_abs": totals["eta_grad"] / denominator,
-            "policy/parameter_delta_l2": actor_delta,
-            "policy/backbone_parameter_delta_l2": self._parameter_delta(
-                self._policy,
-                before,
-                lambda name: not name.startswith("cps_"),
-            ),
-            "policy/covariance_parameter_delta_l2": self._parameter_delta(
-                self._policy,
-                before,
-                lambda name: name in {"cps_diag_raw", "cps_lowrank_raw"},
-            ),
-            "policy/eta_parameter_delta_abs": self._parameter_delta(
-                self._policy,
-                before,
-                lambda name: name == "cps_eta_raw",
-            ),
-            "policy/lr_start": float(lr_start),
-            "policy/lr": float(self.learning_rate),
-            "policy/lr_decrease_steps": float(lr_down),
-            "policy/lr_increase_steps": float(lr_up),
-            "policy/lr_hold_steps": float(lr_hold),
-            "policy/optimizer_steps": float(optimizer_steps),
-            "policy/early_stop_epoch": float(early_stop_epoch),
-            "policy/log_prob_recompute_abs_max": float(preflight_max),
-        }
-        metrics.update(
-            self._policy_ratio_metrics(
-                actor_obs, latent_paths, old_log_probs
-            )
+        loss_dict["critic_parameter_delta"] = self._parameter_delta(
+            critic_before, self.critic
         )
-        for name, _, weight, _ in streams:
-            metrics[f"stream/{name}/actor_objective_weight"] = float(weight)
-            metrics[f"stream/{name}/actor_loss"] = stream_loss[name] / max(
-                stream_steps[name], 1
-            )
-        return metrics
-
-    def _critic_update(self, rollout: dict) -> dict[str, float]:
-        time_steps, num_envs = rollout["reward"].shape
-        observations = rollout["critic_obs"].reshape(
-            -1, self.critic_obs_dim
-        )
-        targets = rollout["value_targets"].reshape(-1)
-        labels = rollout["stream_ids"].reshape(1, num_envs).expand(
-            time_steps, num_envs
-        ).reshape(-1)
-        self._ensure_finite("critic/input/observation", observations)
-        self._ensure_finite("critic/input/target", targets)
-        streams = self._stream_specs(labels)
-        num_mini_batches = max(1, int(self.cfg.num_mini_batches))
-        micro_size = self._micro_batch_size(
-            self._mini_batch_size(observations.shape[0])
-        )
-        before = self._snapshot_parameters(self.critic)
-        total_loss = total_grad = 0.0
-        optimizer_steps = 0
-        stream_loss = {name: 0.0 for name, _, _, _ in streams}
-        stream_steps = {name: 0 for name, _, _, _ in streams}
-
-        for _ in range(int(self.cfg.policy_epochs)):
-            splits = {}
-            for name, _, weight, indices in streams:
-                shuffled = indices[torch.randperm(indices.numel(), device=indices.device)]
-                splits[name] = (weight, torch.tensor_split(shuffled, num_mini_batches))
-            for mini_index in range(num_mini_batches):
-                parts = [
-                    (name, weight, groups[mini_index])
-                    for name, (weight, groups) in splits.items()
-                    if groups[mini_index].numel() > 0
-                ]
-                if not parts:
-                    continue
-                self.critic_optimizer.zero_grad(set_to_none=True)
-                combined_loss = 0.0
-                for name, weight, indices in parts:
-                    denominator = float(indices.numel())
-                    loss_sum = 0.0
-                    for start in range(0, indices.numel(), micro_size):
-                        sub = indices[start : start + micro_size]
-                        prediction = self.critic(observations[sub])
-                        loss = (prediction - targets[sub]).square().sum()
-                        self._ensure_finite("critic/loss", loss)
-                        (float(weight) * loss / denominator).backward()
-                        loss_sum += float(loss.detach().item())
-                    mean_loss = loss_sum / denominator
-                    combined_loss += float(weight) * mean_loss
-                    stream_loss[name] += mean_loss
-                    stream_steps[name] += 1
-                grad_norm = nn.utils.clip_grad_norm_(
-                    self.critic.parameters(),
-                    float(self.cfg.max_grad_norm),
-                    error_if_nonfinite=True,
-                )
-                self._ensure_gradients_finite("critic", self.critic, grad_norm)
-                self.critic_optimizer.step()
-                self._ensure_parameters_finite("critic/after", self.critic)
-                self._ensure_optimizer_finite(
-                    "critic_optimizer", self.critic_optimizer
-                )
-                total_loss += combined_loss
-                total_grad += float(grad_norm)
-                optimizer_steps += 1
-
-        if optimizer_steps == 0:
-            raise RuntimeError("critic performed no optimizer step")
-        parameter_delta = self._parameter_delta(self.critic, before)
-        if not math.isfinite(parameter_delta) or parameter_delta <= 0.0:
-            raise RuntimeError("critic parameters did not update")
-        with torch.no_grad():
-            prediction = self._evaluate_values(
-                observations.reshape(time_steps, num_envs, -1)
-            ).reshape(-1)
-            error = prediction - targets
-            target_variance = targets.var(unbiased=False)
-            explained_variance = 1.0 - error.var(unbiased=False) / (
-                target_variance + 1.0e-8
-            )
-        metrics = {
-            "critic/value_loss": total_loss / float(optimizer_steps),
-            "critic/grad_norm": total_grad / float(optimizer_steps),
-            "critic/parameter_delta_l2": parameter_delta,
-            "critic/lr": float(self.critic_learning_rate),
-            "critic/optimizer_steps": float(optimizer_steps),
-            "critic/sample_count": float(targets.numel()),
-            "critic/mae": float(error.abs().mean().item()),
-            "critic/rmse": float(torch.sqrt(error.square().mean()).item()),
-            "critic/explained_variance": float(explained_variance.item()),
-        }
-        for name, _, weight, _ in streams:
-            metrics[f"stream/{name}/critic_objective_weight"] = float(weight)
-            metrics[f"stream/{name}/critic_value_loss"] = stream_loss[name] / max(
-                stream_steps[name], 1
-            )
-        return metrics
+        loss_dict["optimizer_steps"] = float(num_updates)
+        self._ensure_train_state_finite()
+        return loss_dict
 
     # ------------------------------------------------------------------
-    # Metrics
+    # Metrics and console
     # ------------------------------------------------------------------
-    @torch.no_grad()
     def _stream_metrics(self, rollout: dict) -> dict[str, float]:
-        stream_ids = rollout["stream_ids"]
-        time_steps = rollout["reward"].shape[0]
         metrics: dict[str, float] = {}
-        configured_weights = {
-            "phase0": float(self.cfg.phase0_fraction),
-            "curriculum": 1.0 - float(self.cfg.phase0_fraction),
-        }
+        stream_ids = rollout["stream_ids"]
         for name, stream_id in (
             ("phase0", PHASE0_STREAM),
             ("curriculum", CURRICULUM_STREAM),
         ):
             env_mask = stream_ids == stream_id
-            transition_mask = env_mask.unsqueeze(0).expand(
-                time_steps, -1
+            transition_mask = env_mask.unsqueeze(0).expand_as(rollout["done"])
+            sample_count = int(transition_mask.sum().item())
+            done_count = int((rollout["done"] & transition_mask).sum().item())
+            failure_count = int(
+                (rollout["failure"] & transition_mask).sum().item()
             )
-            stream_done = rollout["done"] & transition_mask
-            stream_failure = rollout["failure"] & transition_mask
-            stream_timeout = rollout["timeout"] & transition_mask
-            stream_complete = rollout["motion_complete"] & transition_mask
-            env_count = int(env_mask.sum().item())
-            transition_count = int(transition_mask.sum().item())
-            terminal_count = int(stream_done.sum().item())
-            failure_count = int(stream_failure.sum().item())
-            timeout_count = int(stream_timeout.sum().item())
-            complete_count = int(stream_complete.sum().item())
+            completion_count = int(
+                (rollout["motion_complete"] & transition_mask).sum().item()
+            )
+            timeout_count = int(
+                (rollout["timeout"] & transition_mask).sum().item()
+            )
+            rewards = rollout["reward"][transition_mask]
             returns = self._stream_return_buffers[stream_id]
             lengths = self._stream_length_buffers[stream_id]
             prefix = f"stream/{name}"
             metrics.update(
                 {
-                    f"{prefix}/env_count": float(env_count),
-                    f"{prefix}/env_fraction": float(
-                        env_count / max(stream_ids.numel(), 1)
+                    f"{prefix}/env_count": float(env_mask.sum().item()),
+                    f"{prefix}/sample_count": float(sample_count),
+                    f"{prefix}/reward_mean": float(rewards.mean().item()),
+                    f"{prefix}/done_count": float(done_count),
+                    f"{prefix}/failure_rate": float(
+                        failure_count / max(done_count, 1)
                     ),
-                    f"{prefix}/configured_objective_weight": configured_weights[name],
-                    f"{prefix}/transition_count": float(transition_count),
-                    f"{prefix}/episode_count": float(len(returns)),
+                    f"{prefix}/completion_rate": float(
+                        completion_count / max(done_count, 1)
+                    ),
+                    f"{prefix}/timeout_rate": float(
+                        timeout_count / max(done_count, 1)
+                    ),
                     f"{prefix}/episode_return_mean": float(
                         sum(returns) / len(returns) if returns else 0.0
                     ),
                     f"{prefix}/episode_length_mean": float(
                         sum(lengths) / len(lengths) if lengths else 0.0
                     ),
-                    f"{prefix}/terminal_count": float(terminal_count),
-                    f"{prefix}/failure_count": float(failure_count),
-                    f"{prefix}/timeout_count": float(timeout_count),
-                    f"{prefix}/motion_complete_count": float(complete_count),
-                    f"{prefix}/failure_rate": float(
-                        failure_count / max(terminal_count, 1)
-                    ),
-                    f"{prefix}/completion_rate": float(
-                        complete_count / max(terminal_count, 1)
-                    ),
-                    f"{prefix}/sampler_failure_eligible": float(
-                        stream_id == CURRICULUM_STREAM
-                    ),
-                }
-            )
-            start_phases = rollout["collection_start_phases"][env_mask]
-            metrics.update(
-                {
-                    f"{prefix}/collection_start_mean": float(
-                        start_phases.float().mean().item()
-                    ),
-                    f"{prefix}/collection_start_min": float(
-                        start_phases.min().item()
-                    ),
-                    f"{prefix}/collection_start_max": float(
-                        start_phases.max().item()
-                    ),
-                }
-            )
-            failure_phases = rollout["terminal_phase"][stream_failure]
-            if failure_phases.numel() > 0:
-                q = torch.quantile(
-                    failure_phases.float(),
-                    torch.tensor([0.50, 0.95], device=failure_phases.device),
-                )
-                metrics[f"{prefix}/failure_phase_mean"] = float(
-                    failure_phases.float().mean().item()
-                )
-                metrics[f"{prefix}/failure_phase_p50"] = float(q[0].item())
-                metrics[f"{prefix}/failure_phase_p95"] = float(q[1].item())
-            else:
-                metrics[f"{prefix}/failure_phase_mean"] = -1.0
-                metrics[f"{prefix}/failure_phase_p50"] = -1.0
-                metrics[f"{prefix}/failure_phase_p95"] = -1.0
-        return metrics
-
-    @torch.no_grad()
-    def _cps_metrics(self) -> dict[str, float]:
-        eta = self._policy.eta()
-        self._ensure_finite("cps/eta", eta)
-        eta_value = float(eta.item())
-        if not 0.0 < eta_value < 1.0:
-            raise RuntimeError("CPS eta left (0, 1)")
-        metrics = {
-            "cps/eta": eta_value,
-            "cps/eta_raw": float(self._policy.cps_eta_raw.item()),
-            "health/covariance_psd": 1.0,
-        }
-        for step_index in range(int(self.cfg.flow_steps)):
-            (
-                _,
-                _,
-                covariance,
-                cholesky,
-                _,
-                mean_variance,
-            ) = self._policy.covariance_factors(step_index)
-            preserved, noise = self._policy.cps_step_coefficients(
-                step_index, covariance
-            )
-            eigenvalues = torch.linalg.eigvalsh(covariance)
-            for name, tensor in (
-                ("covariance", covariance),
-                ("cholesky", cholesky),
-                ("eigenvalues", eigenvalues),
-                ("mean_variance", mean_variance),
-            ):
-                self._ensure_finite(f"cps/flow_{step_index}/{name}", tensor)
-            if float(eigenvalues.min().item()) <= 0.0:
-                raise RuntimeError("CPS covariance is not positive definite")
-            if abs(float(mean_variance.item()) - 1.0) > 1.0e-5:
-                raise RuntimeError("CPS covariance shape lost normalization")
-            probabilities = eigenvalues / eigenvalues.sum()
-            effective_rank = torch.exp(
-                -(probabilities * torch.log(probabilities.clamp_min(1.0e-12))).sum()
-            )
-            prefix = f"cps/flow_{step_index}"
-            metrics.update(
-                {
-                    f"{prefix}/preserved_coefficient": float(preserved.item()),
-                    f"{prefix}/noise_coefficient": float(noise.item()),
-                    f"{prefix}/covariance_trace": float(
-                        torch.trace(covariance).item()
-                    ),
-                    f"{prefix}/shape_mean_variance": float(
-                        mean_variance.item()
-                    ),
-                    f"{prefix}/eigenvalue_min": float(eigenvalues.min().item()),
-                    f"{prefix}/eigenvalue_max": float(eigenvalues.max().item()),
-                    f"{prefix}/condition_number": float(
-                        (eigenvalues.max() / eigenvalues.min()).item()
-                    ),
-                    f"{prefix}/effective_rank": float(effective_rank.item()),
-                    f"{prefix}/cholesky_diag_min": float(
-                        torch.diagonal(cholesky).min().item()
-                    ),
-                    f"{prefix}/cholesky_diag_max": float(
-                        torch.diagonal(cholesky).max().item()
-                    ),
                 }
             )
         return metrics
-
-    def _soft_health_metrics(self, metrics: dict[str, float]) -> dict[str, float]:
-        kl = float(metrics["policy/kl"])
-        reward_mean = float(metrics["reward/total/mean"])
-        self._high_kl_streak = self._high_kl_streak + 1 if kl > 0.04 else 0
-        self._nonpositive_reward_streak = (
-            self._nonpositive_reward_streak + 1
-            if reward_mean <= 0.0
-            else 0
-        )
-        ratio = float(metrics["policy/ratio_mean"])
-        clip_fraction = float(metrics["policy/clip_fraction"])
-        return {
-            "health/high_kl_streak": float(self._high_kl_streak),
-            "health/high_kl_warning": float(self._high_kl_streak >= 3),
-            "health/high_clip_warning": float(clip_fraction > 0.5),
-            "health/ratio_warning": float(ratio < 0.8 or ratio > 1.2),
-            "health/nonpositive_reward_streak": float(
-                self._nonpositive_reward_streak
-            ),
-            "health/nonpositive_reward_warning": float(
-                self._nonpositive_reward_streak >= 5
-            ),
-        }
 
     def update(self, rollout: dict, collect_time: float) -> dict[str, float]:
-        update_start = time.perf_counter()
-        removed = self._removed_state_keys(rollout)
-        if removed:
-            raise RuntimeError(
-                "rollout contains removed state: " + ", ".join(sorted(removed))
-            )
-        for name in (
-            "reward",
-            "values",
-            "next_values",
-            "advantages",
-            "raw_advantages",
-            "value_targets",
-        ):
-            self._ensure_finite(f"rollout/{name}", rollout[name])
-        if float(rollout["reward_decomposition_abs_max"]) > 1.0e-6:
-            raise RuntimeError("reward decomposition identity failed")
-        if float(rollout["action_bound_violation_max"]) > 1.0e-6:
-            raise RuntimeError("action-bound contract failed")
-        if float(rollout["reward"].max().item()) > 0.100001:
-            raise RuntimeError("reward maximum contract failed")
+        train_start = time.perf_counter()
+        loss = self._training_step()
+        learning_time = time.perf_counter() - train_start
+        storage = rollout["storage"]
+        values = storage["values"].detach()
+        returns = storage["returns"].detach()
+        advantages = storage["advantages"].detach()
+        value_error = returns - values
+        return_variance = returns.var(unbiased=False)
+        explained_variance = 1.0 - value_error.var(unbiased=False) / (
+            return_variance + 1.0e-8
+        )
 
-        actor_start = time.perf_counter()
-        actor_metrics = self._actor_update(rollout)
-        actor_time = time.perf_counter() - actor_start
-        critic_start = time.perf_counter()
-        critic_metrics = self._critic_update(rollout)
-        critic_time = time.perf_counter() - critic_start
-
-        with torch.no_grad():
-            self._update_normalizer(
-                self.actor_obs_normalizer, rollout["actor_obs_raw"]
-            )
-            self._update_normalizer(
-                self.critic_obs_normalizer, rollout["critic_obs_raw"]
-            )
-
-        metrics: dict[str, float] = {}
-        metrics.update(actor_metrics)
-        metrics.update(critic_metrics)
-        metrics.update(self._stream_metrics(rollout))
-        metrics.update(self.phase0_attempts.metrics())
+        metrics: dict[str, float] = {
+            "Loss/Value": float(loss["Value"]),
+            "Loss/Surrogate": float(loss["Surrogate"]),
+            "Loss/Entropy": float(loss["Entropy"]),
+            "Loss/KL": float(loss["KL"]),
+            "Loss/actor_loss": float(loss["actor_loss"]),
+            "Loss/critic_loss": float(loss["critic_loss"]),
+            "Loss/symmetry_actor_loss": float(loss["symmetry_actor_loss"]),
+            "Loss/symmetry_critic_loss": float(loss["symmetry_critic_loss"]),
+            "Loss/actor_learning_rate": float(loss["actor_learning_rate"]),
+            "Loss/critic_learning_rate": float(loss["critic_learning_rate"]),
+            "Policy/mean_noise_std": float(self.actor.std.mean().item()),
+            "Policy/ratio_mean": float(loss["ratio_mean"]),
+            "Policy/clip_fraction": float(loss["clip_fraction"]),
+            "Policy/actor_grad_norm": float(loss["actor_grad_norm"]),
+            "Policy/critic_grad_norm": float(loss["critic_grad_norm"]),
+            "Policy/actor_parameter_delta": float(
+                loss["actor_parameter_delta"]
+            ),
+            "Policy/critic_parameter_delta": float(
+                loss["critic_parameter_delta"]
+            ),
+            "Policy/optimizer_steps": float(loss["optimizer_steps"]),
+            "Policy/action_clip_fraction": float(
+                rollout["action_clip_count"] / rollout["actions"].numel()
+            ),
+            "Policy/static_parity": 1.0,
+            "Policy/minibatch_reuse_verified": 1.0,
+            "Normalizer/actor_count": float(
+                self.actor_obs_normalizer.count.item()
+            ),
+            "Normalizer/critic_count": float(
+                self.critic_obs_normalizer.count.item()
+            ),
+            "Train/num_samples_update": float(
+                self.env.num_envs * int(self.cfg.num_steps_per_env)
+            ),
+            "Train/advantage_mean": float(advantages.mean().item()),
+            "Train/advantage_std": float(advantages.std().item()),
+            "Critic/value_mean": float(values.mean().item()),
+            "Critic/return_mean": float(returns.mean().item()),
+            "Critic/rmse": float(
+                torch.sqrt(value_error.square().mean()).item()
+            ),
+            "Critic/explained_variance": float(explained_variance.item()),
+            "reward/decomposition_identity_abs_max": float(
+                rollout["reward_decomposition_abs_max"]
+            ),
+            "timing/collect_s": float(collect_time),
+            "timing/learning_s": float(learning_time),
+            "system/parameters_finite": 1.0,
+        }
         metrics.update(_distribution_metrics("reward/total", rollout["reward"]))
         metrics.update(
-            _distribution_metrics(
-                "credit/raw_advantage", rollout["raw_advantages"]
-            )
+            _distribution_metrics("action/raw", rollout["actions"])
         )
         metrics.update(
-            _distribution_metrics(
-                "credit/actor_advantage", rollout["advantages"]
-            )
+            _distribution_metrics("action/applied", rollout["applied_actions"])
         )
-        metrics.update(_distribution_metrics("critic/value", rollout["values"]))
         metrics.update(
-            _distribution_metrics(
-                "critic/return_target", rollout["value_targets"]
-            )
+            _distribution_metrics("action/mean", rollout["mean_actions"])
         )
-        for name in (*RAW_POSE_TERMS, *RAW_PENALTY_TERMS):
+        valid_delta = rollout["action_delta"][rollout["action_delta_valid"]]
+        valid_d2 = rollout["action_d2"][rollout["action_d2_valid"]]
+        if valid_delta.numel() > 0:
+            metrics.update(_distribution_metrics("action/delta", valid_delta))
+        if valid_d2.numel() > 0:
+            metrics.update(_distribution_metrics("action/d2", valid_d2))
+        metrics.update(
+            _distribution_metrics("physics/joint_vel_jump", rollout["joint_vel_jump"])
+        )
+        metrics.update(
+            _distribution_metrics("physics/root_lin_vel_jump", rollout["root_lin_vel_jump"])
+        )
+        metrics.update(
+            _distribution_metrics("physics/root_ang_vel_jump", rollout["root_ang_vel_jump"])
+        )
+        for term_name, values_tensor in rollout["reward_raw_terms"].items():
+            metric_name = REWARD_METRIC_NAMES[term_name]
             metrics.update(
                 _distribution_metrics(
-                    f"reward/raw/{REWARD_METRIC_NAMES[name]}",
-                    rollout["reward_raw_terms"][name],
+                    f"reward/raw/{metric_name}", values_tensor
                 )
             )
-        for name in REWARD_TERM_WEIGHTS:
+        for term_name, values_tensor in rollout["reward_contributions"].items():
+            metric_name = REWARD_METRIC_NAMES[term_name]
             metrics.update(
                 _distribution_metrics(
-                    f"reward/contribution/{REWARD_METRIC_NAMES[name]}",
-                    rollout["reward_contributions"][name],
+                    f"reward/contribution/{metric_name}", values_tensor
                 )
             )
-
-        action_abs = rollout["actions"].abs()
-        mean_action_abs = rollout["mean_actions"].abs()
-        exploration_displacement = (
-            rollout["actions"] - rollout["mean_actions"]
-        )
-        metrics.update(_distribution_metrics("action/absolute", action_abs))
-        metrics.update(
-            _distribution_metrics("action/deterministic_absolute", mean_action_abs)
-        )
-        metrics.update(
-            _distribution_metrics(
-                "action/exploration_displacement", exploration_displacement
-            )
-        )
-        metrics.update(
-            _distribution_metrics(
-                "action/delta",
-                rollout["action_delta"].abs().mean(dim=-1),
-                rollout["action_delta_valid"],
-            )
-        )
-        metrics.update(
-            _distribution_metrics(
-                "action/d2",
-                rollout["action_d2"].abs().mean(dim=-1),
-                rollout["action_d2_valid"],
-            )
-        )
-        metrics.update(
-            _distribution_metrics(
-                "action/reset_first_delta",
-                rollout["action_delta"].abs().mean(dim=-1),
-                rollout["reset_action"],
-            )
-        )
-        for name in (
-            "joint_vel_jump",
-            "root_lin_vel_jump",
-            "root_ang_vel_jump",
-        ):
-            metrics.update(
-                _distribution_metrics(
-                    f"dynamics/{name}", rollout[name]
-                )
-            )
-
-        innovation_rms = rollout["cps_innovation_rms"]
-        self._ensure_finite("cps/innovation_rms", innovation_rms)
-        for step_index, value in enumerate(innovation_rms):
-            metrics[f"cps/flow_{step_index}/innovation_rms"] = float(
-                value.item()
-            )
-        metrics.update(self._cps_metrics())
-        metrics.update(
-            {
-                "reward/decomposition_identity_abs_max": float(
-                    rollout["reward_decomposition_abs_max"]
-                ),
-                "rollout/transition_count": float(rollout["reward"].numel()),
-                "rollout/done_fraction": float(rollout["done"].float().mean().item()),
-                "rollout/failure_fraction": float(
-                    rollout["failure"].float().mean().item()
-                ),
-                "rollout/timeout_fraction": float(
-                    rollout["timeout"].float().mean().item()
-                ),
-                "rollout/motion_complete_fraction": float(
-                    rollout["motion_complete"].float().mean().item()
-                ),
-                "rollout/bootstrap_fraction": float(
-                    rollout["bootstrap_mask"].float().mean().item()
-                ),
-                "rollout/trace_fraction": float(
-                    rollout["trace_mask"].float().mean().item()
-                ),
-                "phase/start_mean": float(
-                    rollout["collection_start_phases"].float().mean().item()
-                ),
-                "phase/start_min": float(
-                    rollout["collection_start_phases"].min().item()
-                ),
-                "phase/start_max": float(
-                    rollout["collection_start_phases"].max().item()
-                ),
-                "action/saturation_fraction": float(
-                    (
-                        action_abs
-                        >= 0.95 * float(self.cfg.action_limit)
-                    )
-                    .float()
-                    .mean()
-                    .item()
-                ),
-                "action/policy_bound_violation_max": float(
-                    rollout["action_bound_violation_max"]
-                ),
-                "intervention/edge_count": float(
-                    rollout["intervention_edge"].sum().item()
-                ),
-                "timing/collect_s": float(collect_time),
-                "timing/actor_update_s": float(actor_time),
-                "timing/critic_update_s": float(critic_time),
-                "timing/update_s": float(time.perf_counter() - update_start),
-                "system/cuda_peak_allocated_gib": float(
-                    torch.cuda.max_memory_allocated(self.env.device) / (1024**3)
-                    if torch.cuda.is_available()
-                    else 0.0
-                ),
-            }
-        )
-        for name, value in self.env.adaptive_sampling_stats().items():
-            scalar = float(value)
-            if not math.isfinite(scalar):
-                raise FloatingPointError(
-                    f"adaptive sampler statistic {name!r} is non-finite"
-                )
-            metrics[f"sampler/{name}"] = scalar
-        self._ensure_parameters_finite("actor/final", self._policy)
-        self._ensure_parameters_finite("critic/final", self.critic)
-        metrics["system/parameters_finite"] = 1.0
-        metrics.update(self._soft_health_metrics(metrics))
+        metrics.update(self._stream_metrics(rollout))
+        metrics.update(self.phase0_attempts.metrics())
+        self.storage.clear()
         return metrics
 
-    # ------------------------------------------------------------------
-    # Console
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _parity_line() -> str:
+        return (
+            "[HOLOSOMA_PARITY] "
+            "actor_hidden_dims=[512,256,128] critic_hidden_dims=[512,256,128] "
+            "activation=ELU init_noise_std=1.0 num_steps_per_env=24 "
+            "num_learning_epochs=5 num_mini_batches=4 clip_param=0.2 "
+            "gamma=0.99 lam=0.95 value_loss_coef=1.0 entropy_coef=0.005 "
+            "actor_learning_rate=0.001 critic_learning_rate=0.001 "
+            "actor_weight_decay=0.0 critic_weight_decay=0.0 "
+            "max_grad_norm=1.0 schedule=adaptive desired_kl=0.01 "
+            "empirical_normalization=true use_symmetry=false"
+        )
+
     def log(self, update_idx: int, max_updates: int, metrics: dict) -> None:
+        iteration = int(update_idx) - 1
+        if iteration < 3:
+            print(self._parity_line(), flush=True)
+            print(
+                f"[HOLOSOMA_PARITY] static_sha256={HOLOSOMA_STATIC_PARITY_SHA256} "
+                f"upstream_commit={HOLOSOMA_UPSTREAM_COMMIT} verified=true",
+                flush=True,
+            )
+        collection_time = float(metrics.get("timing/collect_s", 0.0))
+        learning_time = float(metrics.get("timing/learning_s", 0.0))
+        total_time = collection_time + learning_time
+        transitions = int(metrics.get("samples/env_transitions_total", 0.0))
+        fps = transitions if total_time <= 0.0 else int(
+            metrics.get("samples/env_transitions_update", 0.0) / total_time
+        )
         print(
-            f"[POLICY] update={update_idx}/{max_updates} "
-            f"loss={metrics.get('policy/loss', 0.0):.5f} "
-            f"kl={metrics.get('policy/kl', 0.0):.6f} "
-            f"ratio={metrics.get('policy/ratio_mean', 0.0):.4f} "
-            f"ratio_p95={metrics.get('policy/ratio_p95', 0.0):.4f} "
-            f"clip={metrics.get('policy/clip_fraction', 0.0):.4f} "
-            f"grad={metrics.get('policy/grad_norm', 0.0):.4f} "
-            f"delta={metrics.get('policy/parameter_delta_l2', 0.0):.3e} "
-            f"lr={metrics.get('policy/lr', 0.0):.3e}",
+            f" Learning iteration {iteration}/{max_updates} ",
             flush=True,
         )
         print(
-            f"[CPS] eta={metrics.get('cps/eta', 0.0):.6f} "
-            f"innovation0={metrics.get('cps/flow_0/innovation_rms', 0.0):.5f} "
-            f"cov_grad={metrics.get('policy/covariance_grad_norm', 0.0):.3e} "
-            f"cov_delta={metrics.get('policy/covariance_parameter_delta_l2', 0.0):.3e} "
-            f"eta_grad={metrics.get('policy/eta_grad_abs', 0.0):.3e} "
-            f"eta_delta={metrics.get('policy/eta_parameter_delta_abs', 0.0):.3e} "
-            f"logprob_err={metrics.get('policy/log_prob_recompute_abs_max', 0.0):.3e}",
+            f"Computation: {fps:.0f} steps/s "
+            f"(Collection: {collection_time:.3f}s, Learning {learning_time:.3f}s)",
+            flush=True,
+        )
+        for key in (
+            "Value",
+            "Surrogate",
+            "Entropy",
+            "KL",
+            "actor_loss",
+            "critic_loss",
+            "symmetry_actor_loss",
+            "symmetry_critic_loss",
+            "actor_learning_rate",
+            "critic_learning_rate",
+        ):
+            print(f"{key}: {metrics[f'Loss/{key}']:.4f}", flush=True)
+        print(
+            f"Policy/mean_noise_std: {metrics['Policy/mean_noise_std']:.4f}",
+            flush=True,
+        )
+        print(f"Total timesteps: {transitions}", flush=True)
+        print(
+            "[PPO_HEALTH] "
+            f"adv_mean={metrics['Train/advantage_mean']:.3e} "
+            f"adv_std={metrics['Train/advantage_std']:.6f} "
+            f"ratio={metrics['Policy/ratio_mean']:.6f} "
+            f"clip={metrics['Policy/clip_fraction']:.6f} "
+            f"actor_delta={metrics['Policy/actor_parameter_delta']:.3e} "
+            f"critic_delta={metrics['Policy/critic_parameter_delta']:.3e} "
+            f"action_clip={metrics['Policy/action_clip_fraction']:.3e} "
+            f"reward_identity={metrics['reward/decomposition_identity_abs_max']:.3e}",
             flush=True,
         )
         print(
-            f"[ACTION] abs_rms={metrics.get('action/absolute/rms', 0.0):.5f} "
-            f"mean_rms={metrics.get('action/deterministic_absolute/rms', 0.0):.5f} "
-            f"explore_rms={metrics.get('action/exploration_displacement/rms', 0.0):.5f} "
-            f"delta={metrics.get('action/delta/mean', 0.0):.5f} "
-            f"d2={metrics.get('action/d2/mean', 0.0):.5f} "
-            f"sat={metrics.get('action/saturation_fraction', 0.0):.5f}",
-            flush=True,
-        )
-        print(
-            f"[CRITIC] loss={metrics.get('critic/value_loss', 0.0):.5f} "
-            f"value={metrics.get('critic/value/mean', 0.0):.5f} "
-            f"return={metrics.get('critic/return_target/mean', 0.0):.5f} "
-            f"rmse={metrics.get('critic/rmse', 0.0):.5f} "
-            f"ev={metrics.get('critic/explained_variance', 0.0):.4f} "
-            f"grad={metrics.get('critic/grad_norm', 0.0):.4f} "
-            f"delta={metrics.get('critic/parameter_delta_l2', 0.0):.3e}",
-            flush=True,
-        )
-        print(
-            f"[REWARD] total={metrics.get('reward/total/mean', 0.0):.5f} "
-            f"anchor_pos={metrics.get('reward/raw/anchor_pos/mean', 0.0):.4f} "
-            f"anchor_ori={metrics.get('reward/raw/anchor_ori/mean', 0.0):.4f} "
-            f"body_pos={metrics.get('reward/raw/body_pos/mean', 0.0):.4f} "
-            f"body_ori={metrics.get('reward/raw/body_ori/mean', 0.0):.4f} "
-            f"identity={metrics.get('reward/decomposition_identity_abs_max', 0.0):.3e}",
-            flush=True,
-        )
-        print(
-            f"[PENALTY] action_rate={metrics.get('reward/raw/action_rate/mean', 0.0):.5f} "
-            f"joint_limit={metrics.get('reward/raw/joint_limit/mean', 0.0):.5f} "
-            f"contacts={metrics.get('reward/raw/undesired_contacts/mean', 0.0):.5f} "
-            f"action_rate_c={metrics.get('reward/contribution/action_rate/mean', 0.0):.5f} "
-            f"joint_limit_c={metrics.get('reward/contribution/joint_limit/mean', 0.0):.5f} "
-            f"contacts_c={metrics.get('reward/contribution/undesired_contacts/mean', 0.0):.5f}",
-            flush=True,
-        )
-        print(
-            f"[HEALTH] finite={metrics.get('system/parameters_finite', 0.0):.0f} "
-            f"action_violation={metrics.get('action/policy_bound_violation_max', 0.0):.3e} "
-            f"phase0_return={metrics.get('stream/phase0/episode_return_mean', 0.0):.4f} "
-            f"phase0_length={metrics.get('stream/phase0/episode_length_mean', 0.0):.1f} "
-            f"phase0_fail={metrics.get('stream/phase0/failure_rate', 0.0):.4f} "
-            f"curr_return={metrics.get('stream/curriculum/episode_return_mean', 0.0):.4f} "
-            f"curr_length={metrics.get('stream/curriculum/episode_length_mean', 0.0):.1f} "
-            f"curr_fail={metrics.get('stream/curriculum/failure_rate', 0.0):.4f}",
+            "[REWARD] "
+            f"total={metrics['reward/total/mean']:.5f} "
+            f"anchor_pos={metrics['reward/raw/anchor_pos/mean']:.4f} "
+            f"anchor_ori={metrics['reward/raw/anchor_ori/mean']:.4f} "
+            f"body_pos={metrics['reward/raw/body_pos/mean']:.4f} "
+            f"body_ori={metrics['reward/raw/body_ori/mean']:.4f}",
             flush=True,
         )
 
     def log_banner(self) -> None:
         print(
-            "[POLICY] method=fixed_reward control=closed_loop_50hz "
-            "actor=flow_mlp action=absolute_tanh ppo=primitive_path",
+            "[PPO] implementation=HOLOSOMA_G1_WBT actor=MLP_diagonal_Normal "
+            "critic=asymmetric_MLP action=unsquashed_env_clip_100",
+            flush=True,
+        )
+        print(self._parity_line(), flush=True)
+        print(
+            f"[HOLOSOMA_PARITY] static_sha256={HOLOSOMA_STATIC_PARITY_SHA256} "
+            f"upstream_commit={HOLOSOMA_UPSTREAM_COMMIT} verified=true",
             flush=True,
         )
         print(
-            "[CPS] covariance=joint_diagonal_plus_low_rank "
-            "shape=unit_mean_variance scale=learned_eta",
+            "[HOLOSOMA_SOURCE] "
+            + " ".join(
+                f"{name}={digest}"
+                for name, digest in HOLOSOMA_SOURCE_SHA256.items()
+            ),
             flush=True,
         )
         print(
-            f"[CRITIC] type=state_only_scalar_mlp input={self.critic_obs_dim}",
+            "[GAE] timeout=reward_bootstrap terminal=no_bootstrap "
+            "advantage=global_unbiased_std minibatches=single_permutation_reused",
             flush=True,
         )
         print(
@@ -1795,8 +1304,7 @@ class FixedRewardFlowCPS:
             flush=True,
         )
         print(
-            "[HEALTH] guards=state,observation,action,reward,value,return,"
-            "advantage,loss,gradient,parameter,covariance "
-            f"fixed_reward_schema={FIXED_REWARD_CHECKPOINT_CONTRACT['fixed_reward_schema_version']}",
+            f"[CHECKPOINT] fixed_reward_schema="
+            f"{FIXED_REWARD_CHECKPOINT_CONTRACT['fixed_reward_schema_version']}",
             flush=True,
         )

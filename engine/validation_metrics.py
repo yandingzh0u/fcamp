@@ -4,14 +4,7 @@ import torch
 
 
 class StepDiagnostics:
-    """Accumulate true one-step control and tracking diagnostics.
-
-    Dynamics are measured only between consecutive actions from the same
-    episode.  The first action after a reset is reported separately because
-    state jumps and second differences do not have a comparable predecessor.
-    Tracking errors are recorded on every active transition, including the
-    first one.
-    """
+    """Accumulate true one-step control and tracking diagnostics."""
 
     _DYNAMICS = (
         "action_delta",
@@ -80,8 +73,6 @@ class StepDiagnostics:
         initial_root_lin_vel: torch.Tensor,
         initial_root_ang_vel: torch.Tensor,
     ) -> None:
-        """Reset predecessor state for selected environments."""
-
         selected = self._validate_mask(mask)
         for name, value, expected in (
             ("initial_action", initial_action, self._previous_action.shape),
@@ -126,8 +117,6 @@ class StepDiagnostics:
         reference_root_lin_vel: torch.Tensor,
         reference_root_ang_vel: torch.Tensor,
     ) -> None:
-        """Record one post-action transition for every active environment."""
-
         active = self._validate_mask(active_mask)
         expected_action = self._previous_action.shape
         expected_joint = self._previous_joint_vel.shape
@@ -164,7 +153,6 @@ class StepDiagnostics:
             self._initial_action_delta.append(
                 action_delta_vector.abs().mean(dim=-1)[first].detach().clone()
             )
-
         dynamics = {
             "action_delta": action_delta_vector.abs().mean(dim=-1),
             "action_d2": (
@@ -185,7 +173,6 @@ class StepDiagnostics:
                 self._dynamics[name].append(
                     value[consecutive].detach().clone()
                 )
-
         tracking = {
             "joint_pos_mae": (
                 joint_pos - reference_joint_pos
@@ -265,8 +252,12 @@ def terminal_phase_metrics(
         {
             f"{prefix}/phase_min": float(selected.min().item()),
             f"{prefix}/phase_mean": float(selected.mean().item()),
-            f"{prefix}/phase_p50": float(torch.quantile(selected, 0.50).item()),
-            f"{prefix}/phase_p95": float(torch.quantile(selected, 0.95).item()),
+            f"{prefix}/phase_p50": float(
+                torch.quantile(selected, 0.50).item()
+            ),
+            f"{prefix}/phase_p95": float(
+                torch.quantile(selected, 0.95).item()
+            ),
             f"{prefix}/phase_max": float(selected.max().item()),
             f"{prefix}/phase_progress_mean": float(
                 (selected / max(float(motion_end_phase), 1.0)).mean().item()

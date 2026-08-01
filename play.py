@@ -41,7 +41,7 @@ import torch
 from engine.checkpoint import audit_fixed_reward_checkpoint_payload
 from engine.config import config_from_checkpoint_dict
 from envs.g1_mimic import G1MimicEnv
-from method.fixed_reward import FixedRewardFlowCPS
+from method.fixed_reward import FixedRewardPPO
 
 
 def main() -> None:
@@ -82,7 +82,7 @@ def main() -> None:
         render=not args_cli.headless,
         render_every=args_cli.render_every,
     )
-    algo = FixedRewardFlowCPS(cfg.parameters, env)
+    algo = FixedRewardPPO(cfg.parameters, env)
     algo.build()
     algo.validate_checkpoint_payload(payload)
     algo.policy.load_state_dict(payload["policy"])

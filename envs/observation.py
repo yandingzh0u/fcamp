@@ -16,6 +16,50 @@ from .contracts import require_finite_tensors
 
 
 class MimicObservationMixin:
+    def get_foot_contact_mask(self) -> torch.Tensor:
+        """Return the two measured foot-contact flags in left/right order."""
+
+        foot_body_ids = self.foot_contact_body_ids
+        if not torch.is_tensor(foot_body_ids) or int(foot_body_ids.numel()) != 2:
+            raise RuntimeError(
+                "Contact-mode diagnostics require exactly two ordered foot body ids"
+            )
+        net_contact_forces = self.contact_sensor.data.net_forces_w_history
+        require_finite_tensors(
+            {"net_forces_w_history": net_contact_forces},
+            context="Contact sensor",
+        )
+        if net_contact_forces.ndim != 4 or net_contact_forces.shape[0] != self.num_envs:
+            raise RuntimeError(
+                "Contact force history must have shape [num_envs, history, bodies, 3], "
+                f"got {tuple(net_contact_forces.shape)}"
+            )
+        if net_contact_forces.shape[-1] != 3:
+            raise RuntimeError(
+                "Contact force vectors must have three components, "
+                f"got {net_contact_forces.shape[-1]}"
+            )
+        return (
+            torch.linalg.vector_norm(
+                net_contact_forces[:, :, foot_body_ids],
+                dim=-1,
+            ).amax(dim=1)
+            > 1.0
+        )
+
+    def get_contact_mode_masks(self) -> dict[str, torch.Tensor]:
+        """Classify measured support for diagnostics without policy gating."""
+
+        foot_contact = self.get_foot_contact_mask()
+        left = foot_contact[:, 0]
+        right = foot_contact[:, 1]
+        return {
+            "flight": ~left & ~right,
+            "left_only": left & ~right,
+            "right_only": ~left & right,
+            "double_support": left & right,
+        }
+
     def get_reference_state(self) -> dict[str, torch.Tensor]:
         reference = dict(self.motion.get_frame(self.phase_steps))
         env_origins = self.scene.env_origins
@@ -124,14 +168,9 @@ class MimicObservationMixin:
             - context["robot_body_pos_w"][:, self.termination_body_indices, 2]
         )
         net_contact_forces = self.contact_sensor.data.net_forces_w_history
-        require_finite_tensors(
-            {"net_forces_w_history": net_contact_forces},
-            context="Contact sensor",
+        foot_contact = self.get_foot_contact_mask().to(
+            dtype=motion_anchor_ori_b.dtype
         )
-        foot_contact = (
-            torch.max(torch.norm(net_contact_forces[:, :, self.foot_contact_body_ids], dim=-1), dim=1)[0]
-            > 1.0
-        ).to(dtype=motion_anchor_ori_b.dtype)
 
 
         termination_contact = (

@@ -7,7 +7,11 @@ from isaaclab.utils.math import quat_error_magnitude
 
 from envs.spec import EE_Z_TERMINATION_THRESHOLD
 from .env_state import restore_env_state, snapshot_env_state
-from .validation_metrics import StepDiagnostics, terminal_phase_metrics
+from .restore_tolerance import float_restore_error
+from .validation_metrics import (
+    StepDiagnostics,
+    terminal_phase_metrics,
+)
 
 
 def classify_mimickit_done_terms(
@@ -98,9 +102,13 @@ def _reset_alignment_metrics(env, prefix: str) -> dict[str, float]:
     }
 
 
-@torch.inference_mode()
+@torch.no_grad()
 def run_validation_rollout(
-    trainer, fixed_seed: int | None = None, start_phase_override: int | None = None
+    trainer,
+    fixed_seed: int | None = None,
+    start_phase_override: int | None = None,
+    *,
+    restore_training_state: bool = True,
 ) -> dict[str, float]:
     algo = trainer.algo
     env = trainer.env
@@ -112,12 +120,15 @@ def run_validation_rollout(
     policy.eval()
     training_snapshot = snapshot_env_state(env)
     algorithm_snapshot = algo.snapshot_runtime_state()
-    training_observation = trainer.current_observation
+    training_observation = trainer.current_observation.detach().clone()
+    training_restore_observation_error = float("inf")
+    training_restore_state_error = float("inf")
     env_device = torch.device(env.device)
     cpu_rng_state = torch.random.get_rng_state()
     cuda_rng_state = None
     original_obs_noise = env.observation_noise
     env.observation_noise = False
+    training_clean_observation = env.get_observation().detach().clone()
     original_reset_noise = env.reset_noise
     original_interval_pushes = env.interval_pushes
     env.reset_noise = False
@@ -142,6 +153,10 @@ def run_validation_rollout(
     )
     reset_t0 = time.perf_counter()
     print("[VALIDATION_RESET_START]", flush=True)
+    # Validation must not inherit solver warm-start or contact-history state
+    # from the preceding training rollout.  A full physics reset makes the
+    # fixed phase/seed contract identical in-process and after checkpoint load.
+    env.sim.reset()
     current_obs = algo.evaluation_reset(validation_phase)
     print(f"[VALIDATION_RESET_DONE] time={time.perf_counter() - reset_t0:.3f}s", flush=True)
     reset_metrics = _reset_alignment_metrics(env, "validation")
@@ -153,7 +168,6 @@ def run_validation_rollout(
         initial_root_lin_vel=initial_root_velocity[:, :3],
         initial_root_ang_vel=initial_root_velocity[:, 3:],
     )
-
     done = torch.zeros(num_envs, dtype=torch.bool, device=env.device)
     survived_steps = torch.zeros(num_envs, dtype=torch.long, device=env.device)
     latest_phase_steps = validation_phase.float().clone()
@@ -214,10 +228,10 @@ def run_validation_rollout(
             for step_idx in range(max_steps):
                 if not trainer.simulation_app.is_running():
                     break
+                active_mask = ~done
                 action = algo.deterministic_action(current_obs)
                 if bool(done.any()):
                     action = torch.where(done.unsqueeze(-1), torch.zeros_like(action), action)
-                active_mask = ~done
                 action_target = env.default_action_joint_pos + env.action_scale * torch.clamp(action, -100.0, 100.0)
 
                 current_obs, reward, step_done, info = algo.evaluation_step(action)
@@ -327,12 +341,92 @@ def run_validation_rollout(
                     break
         final_phase_record = torch.where(done, death_phase_record, latest_phase_steps)
     finally:
+        if restore_training_state:
+            env.sim.reset()
+            restore_env_state(env, training_snapshot)
+            state_pairs = {
+                "root_pose_w": (
+                    env.robot.data.root_link_pose_w,
+                    training_snapshot["root_pose_w"],
+                ),
+                "root_velocity_w": (
+                    env.get_mimic_root_velocity_w(),
+                    training_snapshot["root_velocity_w"],
+                ),
+                "joint_pos": (
+                    env.robot.data.joint_pos,
+                    training_snapshot["joint_pos"],
+                ),
+                "joint_vel": (
+                    env.robot.data.joint_vel,
+                    training_snapshot["joint_vel"],
+                ),
+                "last_action": (
+                    env.last_action,
+                    training_snapshot["last_action"],
+                ),
+            }
+            restore_measurements = {
+                name: float_restore_error(restored, expected)
+                for name, (restored, expected) in state_pairs.items()
+            }
+            training_restore_state_error = max(
+                measurement[0]
+                for measurement in restore_measurements.values()
+            )
+            training_restore_state_ulp_ratio = max(
+                measurement[1]
+                for measurement in restore_measurements.values()
+            )
+            training_restore_state_tolerance = max(
+                measurement[2]
+                for measurement in restore_measurements.values()
+            )
+            failed_restore = {
+                name: measurement
+                for name, measurement in restore_measurements.items()
+                if measurement[1] > 1.0
+            }
+            if failed_restore:
+                raise RuntimeError(
+                    "validation failed to restore raw training state within "
+                    f"two ULPs: {failed_restore}"
+                )
+            restored_training_observation = env.get_observation()
+            (
+                training_restore_observation_error,
+                training_restore_observation_bound_ratio,
+                training_restore_observation_tolerance,
+            ) = float_restore_error(
+                restored_training_observation,
+                training_clean_observation,
+                # The observation contains FK quantities derived from the
+                # restored world pose.  Its absolute representable floor must
+                # therefore be no tighter than the accepted source-state
+                # round-trip bound.
+                absolute_floor=max(
+                    1.0e-5, training_restore_state_tolerance
+                ),
+            )
+            if training_restore_observation_bound_ratio > 1.0:
+                raise RuntimeError(
+                    "validation failed to restore the training observation "
+                    "within its source-state float bound: "
+                    f"error={training_restore_observation_error:.9g}, "
+                    f"tolerance={training_restore_observation_tolerance:.9g}"
+                )
+        else:
+            training_restore_state_error = 0.0
+            training_restore_state_ulp_ratio = 0.0
+            training_restore_state_tolerance = 0.0
+            training_restore_observation_error = 0.0
+            training_restore_observation_bound_ratio = 0.0
+            training_restore_observation_tolerance = 0.0
         env.observation_noise = original_obs_noise
         env.reset_noise = original_reset_noise
         env.interval_pushes = original_interval_pushes
         env.record_motion_failures = original_record_failures
         env.max_episode_steps = original_max_episode_steps
-        restore_env_state(env, training_snapshot)
         algo.restore_runtime_state(algorithm_snapshot)
         trainer.current_observation = training_observation
         torch.random.set_rng_state(cpu_rng_state)
@@ -366,6 +460,24 @@ def run_validation_rollout(
         "validation/reference_progress_p50": float(torch.quantile(reference_progress, 0.50).item()),
         "validation/reference_progress_p95": float(torch.quantile(reference_progress, 0.95).item()),
         "validation/full_motion_control_steps": float(env.full_motion_control_steps()),
+        "validation/training_restore_clean_observation_error_max": (
+            training_restore_observation_error
+        ),
+        "validation/training_restore_clean_observation_bound_ratio_max": (
+            training_restore_observation_bound_ratio
+        ),
+        "validation/training_restore_clean_observation_tolerance_max": (
+            training_restore_observation_tolerance
+        ),
+        "validation/training_restore_raw_state_error_max": (
+            training_restore_state_error
+        ),
+        "validation/training_restore_raw_state_bound_ratio_max": (
+            training_restore_state_ulp_ratio
+        ),
+        "validation/training_restore_raw_state_tolerance_max": (
+            training_restore_state_tolerance
+        ),
     }
     metrics.update(step_diagnostics.metrics())
     metrics.update(reset_metrics)

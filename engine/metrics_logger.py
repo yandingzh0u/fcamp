@@ -126,6 +126,8 @@ class MetricsLogger:
             "validation/dynamics/root_ang_vel_jump/p95",
             "validation/initial/action_delta/mean",
             "validation/initial/action_delta/p95",
+            "validation/training_restore_clean_observation_error_max",
+            "validation/training_restore_raw_state_error_max",
             "validation/pd_target_vs_reference_joint_mae_now",
             "validation/pd_target_vs_reference_joint_mae_next",
             "samples/env_transitions_total",

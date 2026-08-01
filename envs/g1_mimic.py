@@ -358,15 +358,23 @@ class G1MimicEnv(
         joint_pos[:] = torch.clamp(joint_pos, soft_limits[:, self.action_joint_ids, 0], soft_limits[:, self.action_joint_ids, 1])
 
     def _apply_action_targets(self, actions: torch.Tensor) -> torch.Tensor:
-
-
         if actions.shape != (self.num_envs, self.action_dim):
             raise ValueError(f"Expected action shape {(self.num_envs, self.action_dim)}, got {tuple(actions.shape)}")
-
-        self.validate_policy_actions(actions)
-        action_targets = self.default_action_joint_pos + self.action_scale * actions
+        if self._policy_action_low is None or self._policy_action_high is None:
+            raise RuntimeError("No policy action contract is installed")
+        # HOLOSOMA stores and scores the raw Gaussian action, while its action
+        # manager clips only the command sent to the PD controller.
+        applied_actions = torch.maximum(
+            torch.minimum(actions, self._policy_action_high),
+            self._policy_action_low,
+        )
+        self.validate_policy_actions(applied_actions)
+        action_targets = (
+            self.default_action_joint_pos
+            + self.action_scale * applied_actions
+        )
         self.robot.set_joint_position_target(action_targets, joint_ids=self.action_joint_ids)
-        return actions
+        return applied_actions
 
     def _init_adaptive_motion_sampling(self) -> None:
         self.reset_phase_sampling = str(self.config.reset_phase_sampling)

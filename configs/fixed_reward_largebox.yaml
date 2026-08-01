@@ -3,7 +3,7 @@ environment:
   platform_profile: g1_largebox_50hz
   task: largebox_plane
   device: cuda:0
-  num_envs: 8192
+  num_envs: 4096
   sim_dt: 0.02
   decimation: 4
   fix_root_link: false
@@ -26,34 +26,34 @@ environment:
 parameters:
   actor_hidden_dims: [512, 256, 128]
   critic_hidden_dims: [512, 256, 128]
-  activation: elu
-  action_limit: 5.0
-  flow_steps: 4
-  # Initial value of the learned global CPS exploration scale.
-  cps_noise_init: 0.36
-  cps_cov_rank: 8
-  rollout_env_steps: 24
-  discount_gamma: 0.99
-  gae_lambda: 0.95
-  clip_range: 0.2
-  desired_kl: 0.01
-  policy_epochs: 5
+  activation: ELU
+  action_clip_value: 100.0
+  num_steps_per_env: 24
+  num_learning_epochs: 5
   num_mini_batches: 4
-  micro_batch_size: 4096
-  policy_lr: 0.00005
-  value_lr: 0.0003
-  weight_decay: 0.0
+  clip_param: 0.2
+  gamma: 0.99
+  lam: 0.95
+  value_loss_coef: 1.0
+  entropy_coef: 0.005
+  actor_learning_rate: 0.001
+  critic_learning_rate: 0.001
+  actor_weight_decay: 0.0
   critic_weight_decay: 0.0
-  init_at_random_ep_len: true
   max_grad_norm: 1.0
-  kl_early_stop_factor: 4.0
+  schedule: adaptive
+  desired_kl: 0.01
+  init_noise_std: 1.0
+  init_at_random_ep_len: true
+  empirical_normalization: true
+  use_symmetry: false
   phase0_fraction: 0.10
 
 training:
-  seed: 0
+  seed: 42
   max_updates: 500
-  log_every: 10
-  save_every: 50
+  log_every: 1
+  save_every: 4000
   resume: ""
   reset_optimizer_on_resume: false
   reset_sampler_on_resume: false
