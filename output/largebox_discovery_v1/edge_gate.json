@@ -1,0 +1,37 @@
+{
+  "decision_variable_E": "UNKNOWN",
+  "diagnostic_id": "58",
+  "errors": [],
+  "evidence": {
+    "baseline_outperformance": {
+      "all_three_outperformed": false,
+      "reason": "one or more required real experiments are missing"
+    },
+    "chain_metrics": null,
+    "component_statuses": {
+      "52": "SKIPPED_DEPENDENCY",
+      "53": "SKIPPED_DEPENDENCY",
+      "54": "SKIPPED_DEPENDENCY",
+      "55": "SKIPPED_DEPENDENCY",
+      "56": "SKIPPED_DEPENDENCY",
+      "57": "SKIPPED_DEPENDENCY"
+    },
+    "decision_variable_E": "UNKNOWN",
+    "edge_transfer_row_count": 0,
+    "edge_transfer_table": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/tables/edge_transfer.csv",
+    "edge_transfer_table_sha256": "2369b26b7b3945b9fae75c37b445e16eb4e43cb7eccc4afe3cd15034647e0e14",
+    "failure_cause": "unresolved_missing_real_experiments",
+    "missing_components": [
+      "52",
+      "53",
+      "54",
+      "55",
+      "56",
+      "57"
+    ],
+    "missing_evidence_is_negative_result": false
+  },
+  "status": "SKIPPED_DEPENDENCY",
+  "summary": "local edge evidence is incomplete; causal learnability remains UNKNOWN",
+  "warnings": []
+}

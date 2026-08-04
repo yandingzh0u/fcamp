@@ -1,0 +1,29 @@
+{
+  "diagnostic_id": "20",
+  "errors": [],
+  "evidence": {
+    "actor_dim": 171,
+    "actor_proprio_terms": [
+      "root_lin_vel_b",
+      "foot_contact",
+      "termination_contact",
+      "base_ang_vel",
+      "joint_pos_rel",
+      "joint_vel_rel",
+      "last_action"
+    ],
+    "actor_reference_terms": [
+      "reference_joint_state",
+      "motion_anchor_pos_b",
+      "motion_anchor_ori_b",
+      "anchor_z_err",
+      "termination_z_err"
+    ],
+    "critic_dim": 286,
+    "observation_spec": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/observation_spec.json",
+    "source_sha256": "71166cf55b885917be1092945b3764664caf98e0926d267cb382be551358b25c"
+  },
+  "status": "PASS",
+  "summary": "actor and critic named slices were derived from production source",
+  "warnings": []
+}

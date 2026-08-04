@@ -1,0 +1,70 @@
+{
+  "action_dim": 29,
+  "action_schema_sha256": "f45715da72ae31d80dbcf2d51ea642a2b2714c1be7cf2e8aaa126438857ab0cf",
+  "checkpoint_lineage_id": "3def32d7905635d55a53d68fc7cd76369c26530db454a0bfdbe0652f53acab71",
+  "checkpoint_path": "/home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_holosoma_geometry_ckpts_u200_s42_20260802_020905/checkpoints/update_0200.pt",
+  "checkpoint_schema_version": 17,
+  "checkpoint_sha256": "7f18478baa4e676129b73c90660df3c64dc7f643e466f045250016ece1c59fb3",
+  "checkpoint_update": 200,
+  "collector_mode": "stage0_identity_audit",
+  "collector_seed": 42,
+  "diagnostic_id": "00",
+  "errors": [],
+  "git_commit": "123f49e55c5139c327b70bf8e0dbcdd9b9d04ad4",
+  "git_diff_sha256": "aa2b4df837189b49c4a5553429f24032353437ddb13d4f9ed7fbda496205404f",
+  "git_dirty": true,
+  "git_status_entries": [
+    " D runs/fixed_reward_holosoma_ppo_u500_s42_20260801_205200/logs/train.log",
+    "?? components/imitation/",
+    "?? diagnose_timeshift_gate0.py",
+    "?? diagnostics/",
+    "?? envs/imitation_data.py",
+    "?? output/",
+    "?? runs/discovery_resume_probe_a_u201_s42_20260804/",
+    "?? runs/discovery_resume_probe_b_u201_s42_20260804/",
+    "?? runs/fixed_reward_holosoma_geometry_ckpts_u200_s42_20260802_020905/",
+    "?? runs/largebox_discovery_dense_u200_u300_s42_20260804/",
+    "?? runs/largebox_discovery_dense_u274_u276_s42_20260804/",
+    "?? runs/largebox_discovery_dense_u300_u500_s42_20260804/",
+    "?? runs/verify_fixed_reward_u200_s0_20260804/",
+    "?? tests/diagnostics/",
+    "?? tests/test_advantage_geometry_diagnostic.py",
+    "?? tools/"
+  ],
+  "git_status_sha256": "1a9827345c06179d2bd74ca06878950a21466eeb845350a55423d5349afe050e",
+  "legacy_domain_inputs": {
+    "domains": {
+      "A_amp": {
+        "checkpoint_path": "/home/y/my_mimic_mixgrpo/fcamp/runs/discovery_legacy_inputs/A_amp_official_u350/checkpoints/update_0350.pt",
+        "checkpoint_sha256": "33d1392b23b1d1fedc90af9642a40c9e180436df52d1765bffbaa0e4d8f13b25",
+        "checkpoint_update": 350,
+        "git_commit": "6901e302499711e2207687e1342348a4078330f8",
+        "git_dirty": true,
+        "source_snapshot_path": "/home/y/my_mimic_mixgrpo/fcamp/runs/discovery_legacy_inputs/A_amp_official_u350/source_snapshot.tar.gz",
+        "source_snapshot_sha256": "68b8a46556f876a003430056f4ccbd4dfc7ffb50e3ba249fdc5a5210e0a1445b"
+      }
+    },
+    "manifest_path": "/home/y/my_mimic_mixgrpo/fcamp/runs/discovery_legacy_inputs/manifest.json",
+    "manifest_sha256": "618660031b2b5c441e0a799e9cf85396cedfee571961a38de2e8e8db645edf8b"
+  },
+  "method": "fixed_reward",
+  "motion_path": "/home/y/my_mimic_mixgrpo/holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj.npz",
+  "motion_sha256": "296303f225a70013e719be9e594d1f528366df405753422a59bbea12deb392bf",
+  "resolved_config_path": "/home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_holosoma_geometry_ckpts_u200_s42_20260802_020905/resolved_config.json",
+  "resolved_config_sha256": "b6fa07b63ef61b941cef9ffdf9d8cf53a11b83612168760777f6a9053a85e7bf",
+  "robot_asset_path": "/home/y/my_mimic_mixgrpo/fcamp/assets/robots/holosoma_g1/g1_29dof.urdf",
+  "robot_asset_sha256": "7fad8847061eac142dca45825a65e2f61bf08b996b6dadf7a89eb0f69d585b21",
+  "source_members_sha256": "dda9699438e7a233898aaa9a6b2fd55a479719748fc0c86928dd7ee43c269261",
+  "source_snapshot": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/source_snapshot.tar.gz",
+  "source_snapshot_file_count": 185,
+  "source_snapshot_sha256": "cce6b4a588b02aa68c8d6ba926dfe6ec7c60cbc57ae7133a04080b9d418631bc",
+  "status": "PASS",
+  "suite_id": "largebox_discovery_v1",
+  "suite_version": "1.0.0",
+  "task_name": "largebox_plane",
+  "training_git_commit": "123f49e55c5139c327b70bf8e0dbcdd9b9d04ad4",
+  "training_source_snapshot_sha256": "a0102b8f6b62e656df199fd39ce071c6bd0349e7745fe7309749ac8a295dd42f",
+  "warnings": [
+    "working tree is dirty; the complete executable source snapshot is authoritative"
+  ]
+}

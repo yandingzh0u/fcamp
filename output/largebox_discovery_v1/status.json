@@ -1,0 +1,2035 @@
+{
+  "artifacts": {
+    "canonical_rollout_index": "canonical_rollout_index.parquet",
+    "checkpoint_inventory": "checkpoint_inventory.csv",
+    "diagnostic_results": "diagnostic_results.txt",
+    "discovery_report": "discovery_report.md",
+    "domain_triangle_gate": "domain_triangle_gate.json",
+    "edge_gate": "edge_gate.json",
+    "family_decision_matrix": "family_decision_matrix.json",
+    "manifest": "manifest.json",
+    "policy_class_gate": "policy_class_gate.json",
+    "reward_validity_gate": "reward_validity_gate.json",
+    "source_and_logs": "source_and_logs.tar.gz",
+    "status": "status.json"
+  },
+  "decision": {
+    "matched_rule_id": null,
+    "reason": "no preregistered row matched; unresolved variables: ['R', 'T', 'E', 'L', 'F']",
+    "selected_family": null,
+    "status": "NO_ELIGIBLE_FAMILY"
+  },
+  "decision_variables": {
+    "E": {
+      "evidence_diagnostics": [
+        "58"
+      ],
+      "reason": "diag_58 status is SKIPPED_DEPENDENCY",
+      "value": "UNKNOWN"
+    },
+    "F": {
+      "evidence_diagnostics": [
+        "61"
+      ],
+      "reason": "diag_61 status is SKIPPED_DEPENDENCY",
+      "value": "UNKNOWN"
+    },
+    "L": {
+      "evidence_diagnostics": [
+        "60"
+      ],
+      "reason": "diag_60 status is SKIPPED_DEPENDENCY",
+      "value": "UNKNOWN"
+    },
+    "R": {
+      "evidence_diagnostics": [
+        "27"
+      ],
+      "reason": "diag_27 status is SKIPPED_DEPENDENCY",
+      "value": "UNKNOWN"
+    },
+    "T": {
+      "evidence_diagnostics": [
+        "47"
+      ],
+      "reason": "diag_47 status is SKIPPED_DEPENDENCY",
+      "value": "UNKNOWN"
+    },
+    "X": {
+      "evidence_diagnostics": [
+        "62"
+      ],
+      "reason": "real PhysX candidate grid has no preregistered non-trivial success/failure boundary",
+      "value": "-"
+    }
+  },
+  "diagnostics": [
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_00_freeze_manifest.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [],
+      "diagnostic_id": "00",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "manifest.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "freeze_manifest",
+      "observed_outputs": [
+        "manifest.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "0_identity_lineage",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "manifest.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_01_task_identity.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "00"
+      ],
+      "diagnostic_id": "01",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "task_identity.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "task_identity",
+      "observed_outputs": [
+        "task_identity.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "0_identity_lineage",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "task_identity.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_02_checkpoint_inventory.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "00",
+        "01"
+      ],
+      "diagnostic_id": "02",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "checkpoint_inventory.csv",
+        "checkpoint_inventory.status.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "checkpoint_inventory",
+      "observed_outputs": [
+        "checkpoint_inventory.csv",
+        "checkpoint_inventory.status.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "0_identity_lineage",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "checkpoint_inventory.status.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_03_resume_reproducibility.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "02"
+      ],
+      "diagnostic_id": "03",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "resume_diff.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "resume_reproducibility",
+      "observed_outputs": [
+        "resume_diff.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "0_identity_lineage",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "resume_diff.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_05_teacher_learning_curve.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "02"
+      ],
+      "diagnostic_id": "05",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "teacher_transition.json",
+        "tables/teacher_learning_curve.csv"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "teacher_learning_curve",
+      "observed_outputs": [
+        "teacher_transition.json",
+        "tables/teacher_learning_curve.csv"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "0_identity_lineage",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "teacher_transition.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_10_dense_teacher_checkpoints.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "03",
+        "05"
+      ],
+      "diagnostic_id": "10",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "checkpoints/dense_checkpoint_inventory.csv"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "dense_teacher_checkpoints",
+      "observed_outputs": [
+        "checkpoints/dense_checkpoint_inventory.csv"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "1_canonical_banks",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "checkpoints/dense_checkpoint_inventory.status.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_11_build_snapshot_bank.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "00",
+        "01"
+      ],
+      "diagnostic_id": "11",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "snapshot_bank.pt"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "build_snapshot_bank",
+      "observed_outputs": [
+        "snapshot_bank.pt"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "1_canonical_banks",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "snapshot_bank.status.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_12_collect_canonical_rollouts.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "10",
+        "11"
+      ],
+      "diagnostic_id": "12",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "canonical_rollout_index.parquet"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "collect_canonical_rollouts",
+      "observed_outputs": [
+        "canonical_rollout_index.parquet"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "1_canonical_banks",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "canonical_rollout_index.status.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_04_validation_protocol_gap.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "12"
+      ],
+      "diagnostic_id": "04",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "protocol_gap.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "validation_protocol_gap",
+      "observed_outputs": [
+        "protocol_gap.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "0_identity_lineage",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "protocol_gap.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_13_collection_fingerprint_suite.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "12"
+      ],
+      "diagnostic_id": "13",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "fingerprints.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "collection_fingerprint_suite",
+      "observed_outputs": [
+        "fingerprints.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "1_canonical_banks",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "fingerprints.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_14_trajectory_split_audit.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "12"
+      ],
+      "diagnostic_id": "14",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "split_audit.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "trajectory_split_audit",
+      "observed_outputs": [
+        "split_audit.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "1_canonical_banks",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "split_audit.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_15_action_path_equivalence.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "12"
+      ],
+      "diagnostic_id": "15",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "action_equivalence.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "action_path_equivalence",
+      "observed_outputs": [
+        "action_equivalence.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "1_canonical_banks",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "action_equivalence.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_20_observation_partition.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "01"
+      ],
+      "diagnostic_id": "20",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "observation_spec.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "observation_partition",
+      "observed_outputs": [
+        "observation_spec.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "2_policy_class",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "observation_spec.status.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_21_counterfactual_reference_dependence.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "12",
+        "20"
+      ],
+      "diagnostic_id": "21",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "reference_sensitivity.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "counterfactual_reference_dependence",
+      "observed_outputs": [
+        "reference_sensitivity.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "2_policy_class",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "reference_sensitivity.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_22_state_aliasing.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "12",
+        "20"
+      ],
+      "diagnostic_id": "22",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "aliasing.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "state_aliasing",
+      "observed_outputs": [
+        "aliasing.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "2_policy_class",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "aliasing.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_23_action_and_phase_predictability.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "14",
+        "20"
+      ],
+      "diagnostic_id": "23",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "predictability.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "action_and_phase_predictability",
+      "observed_outputs": [
+        "predictability.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "2_policy_class",
+      "started_at": null,
+      "status": "FAIL",
+      "status_artifact": "predictability.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_24_reference_free_bc_probe.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "23"
+      ],
+      "diagnostic_id": "24",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "bc_probe.json",
+        "tables/reference_free_bc.csv",
+        "models/diag24/gru_h32_seed_20260803.pt",
+        "canonical_B_rollout_index.parquet"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "23"
+        ]
+      },
+      "name": "reference_free_bc_probe",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:23",
+      "required": true,
+      "stage": "2_policy_class",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "bc_probe.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_25_open_loop_teacher_replay.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "12"
+      ],
+      "diagnostic_id": "25",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "open_loop.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "open_loop_teacher_replay",
+      "observed_outputs": [
+        "open_loop.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "2_policy_class",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "open_loop.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_26_reference_ablation_rollouts.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "12",
+        "20"
+      ],
+      "diagnostic_id": "26",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "reference_ablation.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "reference_ablation_rollouts",
+      "observed_outputs": [
+        "reference_ablation.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "2_policy_class",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "reference_ablation.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_27_policy_class_summary.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26"
+      ],
+      "diagnostic_id": "27",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "policy_class_gate.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "policy_class_summary",
+      "observed_outputs": [
+        "policy_class_gate.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "2_policy_class",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "policy_class_gate.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_30_build_domain_triangle.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "12",
+        "14",
+        "20",
+        "24"
+      ],
+      "diagnostic_id": "30",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "domain_triangle_index.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "24"
+        ]
+      },
+      "name": "build_domain_triangle",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:24",
+      "required": true,
+      "stage": "3_domain_triangle",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "domain_triangle_index.status.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_31_pairwise_source_matrix.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "30"
+      ],
+      "diagnostic_id": "31",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "tables/source_auc_matrix.csv"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "30"
+        ]
+      },
+      "name": "pairwise_source_matrix",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:30",
+      "required": true,
+      "stage": "3_domain_triangle",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "pairwise_source_matrix.status.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_32_reference_readback_execution_gap.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "12"
+      ],
+      "diagnostic_id": "32",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "gap_decomposition.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "reference_readback_execution_gap",
+      "observed_outputs": [
+        "gap_decomposition.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "3_domain_triangle",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "gap_decomposition.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_33_causal_feature_decomposition.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "30"
+      ],
+      "diagnostic_id": "33",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "causal_sources.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "30"
+        ]
+      },
+      "name": "causal_feature_decomposition",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:30",
+      "required": true,
+      "stage": "3_domain_triangle",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "causal_sources.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_34_effective_overlap_matrix.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "30",
+        "31"
+      ],
+      "diagnostic_id": "34",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "tables/effective_overlap_forward.csv",
+        "tables/effective_overlap_reverse.csv"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "30",
+          "31"
+        ]
+      },
+      "name": "effective_overlap_matrix",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:30,31",
+      "required": true,
+      "stage": "3_domain_triangle",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "effective_overlap_matrix.status.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_35_ratio_and_reward_reliability.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "34"
+      ],
+      "diagnostic_id": "35",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "ratio_reliability.json",
+        "tables/reward_icc_matrix.csv",
+        "models/diag35/index.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "34"
+        ]
+      },
+      "name": "ratio_and_reward_reliability",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:34",
+      "required": true,
+      "stage": "3_domain_triangle",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "ratio_reliability.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_36_teacher_positive_substitution.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "35"
+      ],
+      "diagnostic_id": "36",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "positive_substitution.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "35"
+        ]
+      },
+      "name": "teacher_positive_substitution",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:35",
+      "required": true,
+      "stage": "3_domain_triangle",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "positive_substitution.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_37_overlap_by_phase_contact.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "34"
+      ],
+      "diagnostic_id": "37",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "conditional_overlap_matrices.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "34"
+        ]
+      },
+      "name": "overlap_by_phase_contact",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:34",
+      "required": true,
+      "stage": "3_domain_triangle",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "conditional_overlap_matrices.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_38_domain_triangle_summary.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37"
+      ],
+      "diagnostic_id": "38",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "domain_triangle_gate.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "domain_triangle_summary",
+      "observed_outputs": [
+        "domain_triangle_gate.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "3_domain_triangle",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "domain_triangle_gate.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_40_independent_quality_panel.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "12"
+      ],
+      "diagnostic_id": "40",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "quality_panel.parquet"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "independent_quality_panel",
+      "observed_outputs": [
+        "quality_panel.parquet"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "4_reward_validity",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "quality_panel.status.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_41_reward_vs_outcomes.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "35",
+        "36",
+        "40"
+      ],
+      "diagnostic_id": "41",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "score_outcome.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "35",
+          "36"
+        ]
+      },
+      "name": "reward_vs_outcomes",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:35,36",
+      "required": true,
+      "stage": "4_reward_validity",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "score_outcome.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_42_same_state_short_horizon_branching.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "11",
+        "12",
+        "40"
+      ],
+      "diagnostic_id": "42",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "branching.json",
+        "tables/branch_pairwise.csv"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "same_state_short_horizon_branching",
+      "observed_outputs": [
+        "branching.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "4_reward_validity",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "branching.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_43_local_action_ranking.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "42"
+      ],
+      "diagnostic_id": "43",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "local_rank.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "42"
+        ]
+      },
+      "name": "local_action_ranking",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:42",
+      "required": true,
+      "stage": "4_reward_validity",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "local_rank.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_44_reward_exploitability.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "42"
+      ],
+      "diagnostic_id": "44",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "exploitability.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "42"
+        ]
+      },
+      "name": "reward_exploitability",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:42",
+      "required": true,
+      "stage": "4_reward_validity",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "exploitability.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_45_intervention_sensitivity.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "42"
+      ],
+      "diagnostic_id": "45",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "intervention.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "42"
+        ]
+      },
+      "name": "intervention_sensitivity",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:42",
+      "required": true,
+      "stage": "4_reward_validity",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "intervention.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_46_blind_video_bank.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "42"
+      ],
+      "diagnostic_id": "46",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "videos/blind_pair_manifest.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "42"
+        ]
+      },
+      "name": "blind_video_bank",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:42",
+      "required": true,
+      "stage": "4_reward_validity",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "videos/blind_pair_manifest.status.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_47_metric_agreement.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "41",
+        "42",
+        "43",
+        "44",
+        "45",
+        "46"
+      ],
+      "diagnostic_id": "47",
+      "duration_seconds": 1.7480479079531506,
+      "exit_code": 0,
+      "expected_outputs": [
+        "agreement.json",
+        "reward_validity_gate.json"
+      ],
+      "finished_at": "2026-08-04T13:48:37.998586Z",
+      "metadata": {},
+      "name": "metric_agreement",
+      "observed_outputs": [
+        "agreement.json",
+        "reward_validity_gate.json"
+      ],
+      "reason": null,
+      "required": true,
+      "stage": "4_reward_validity",
+      "started_at": "2026-08-04T13:48:36.250551Z",
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "reward_validity_gate.json",
+      "stderr_log": "logs/suite_runner/diag_47.stderr.log",
+      "stdout_log": "logs/suite_runner/diag_47.stdout.log"
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_50_select_causal_edges.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "05",
+        "34",
+        "38",
+        "47"
+      ],
+      "diagnostic_id": "50",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "edge_manifest.yaml"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "34",
+          "38",
+          "47"
+        ]
+      },
+      "name": "select_causal_edges",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:34,38,47",
+      "required": true,
+      "stage": "5_local_edge_causality",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "edge_manifest.status.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_51_local_reward_landscape.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "50"
+      ],
+      "diagnostic_id": "51",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "landscape.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "50"
+        ]
+      },
+      "name": "local_reward_landscape",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:50",
+      "required": true,
+      "stage": "5_local_edge_causality",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "landscape.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_52_single_edge_same_policy_class.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "50",
+        "51"
+      ],
+      "diagnostic_id": "52",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "edge_runs/same_policy_class/summary.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "50",
+          "51"
+        ]
+      },
+      "name": "single_edge_same_policy_class",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:50,51",
+      "required": true,
+      "stage": "5_local_edge_causality",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "edge_runs/same_policy_class/summary.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_53_single_edge_reference_free.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "24",
+        "50",
+        "51"
+      ],
+      "diagnostic_id": "53",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "edge_runs/reference_free/summary.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "24",
+          "50",
+          "51"
+        ]
+      },
+      "name": "single_edge_reference_free",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:24,50,51",
+      "required": true,
+      "stage": "5_local_edge_causality",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "edge_runs/reference_free/summary.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_54_edge_variants.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "52",
+        "53"
+      ],
+      "diagnostic_id": "54",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "edge_runs/variants/summary.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "52",
+          "53"
+        ]
+      },
+      "name": "edge_variants",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:52,53",
+      "required": true,
+      "stage": "5_local_edge_causality",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "edge_runs/variants/summary.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_55_three_consecutive_edges.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "54"
+      ],
+      "diagnostic_id": "55",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "edge_runs/three_edge_chain/summary.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "54"
+        ]
+      },
+      "name": "three_consecutive_edges",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:54",
+      "required": true,
+      "stage": "5_local_edge_causality",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "edge_runs/three_edge_chain/summary.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_56_direct_final_and_fixed_schedule.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "50"
+      ],
+      "diagnostic_id": "56",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "edge_runs/controls/direct_and_schedule.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "50"
+        ]
+      },
+      "name": "direct_final_and_fixed_schedule",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:50",
+      "required": true,
+      "stage": "5_local_edge_causality",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "edge_runs/controls/direct_and_schedule.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_57_bc_action_distillation_control.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "24",
+        "50"
+      ],
+      "diagnostic_id": "57",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "edge_runs/controls/bc_distillation.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "blocked_by": [
+          "24",
+          "50"
+        ]
+      },
+      "name": "bc_action_distillation_control",
+      "observed_outputs": [],
+      "reason": "dependency_not_accepted:24,50",
+      "required": true,
+      "stage": "5_local_edge_causality",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "edge_runs/controls/bc_distillation.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_58_edge_causal_summary.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "52",
+        "53",
+        "54",
+        "55",
+        "56",
+        "57"
+      ],
+      "diagnostic_id": "58",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "edge_gate.json",
+        "tables/edge_transfer.csv"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "edge_causal_summary",
+      "observed_outputs": [
+        "edge_gate.json",
+        "tables/edge_transfer.csv"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "5_local_edge_causality",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "edge_gate.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_59_abort_guard.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "58"
+      ],
+      "diagnostic_id": "59",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "abort_guard.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "abort_guard",
+      "observed_outputs": [
+        "abort_guard.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "5_local_edge_causality",
+      "started_at": null,
+      "status": "PASS",
+      "status_artifact": "abort_guard.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_60_paired_common_latent_probe.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "38",
+        "47"
+      ],
+      "diagnostic_id": "60",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "paired_common_latent_probe.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "paired_common_latent_probe",
+      "observed_outputs": [
+        "paired_common_latent_probe.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "6_family_screeners",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "paired_common_latent_probe.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_61_teacher_energy_prior_probe.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "38",
+        "47"
+      ],
+      "diagnostic_id": "61",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "teacher_energy_prior_probe.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "teacher_energy_prior_probe",
+      "observed_outputs": [
+        "teacher_energy_prior_probe.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "6_family_screeners",
+      "started_at": null,
+      "status": "SKIPPED_DEPENDENCY",
+      "status_artifact": "teacher_energy_prior_probe.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": false,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_62_closed_loop_executability_map.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "27",
+        "47"
+      ],
+      "diagnostic_id": "62",
+      "duration_seconds": null,
+      "exit_code": null,
+      "expected_outputs": [
+        "closed_loop_executability_map.json"
+      ],
+      "finished_at": null,
+      "metadata": {
+        "resumed": true
+      },
+      "name": "closed_loop_executability_map",
+      "observed_outputs": [
+        "closed_loop_executability_map.json"
+      ],
+      "reason": "reused existing valid status artifact",
+      "required": true,
+      "stage": "6_family_screeners",
+      "started_at": null,
+      "status": "FAIL",
+      "status_artifact": "closed_loop_executability_map.json",
+      "stderr_log": null,
+      "stdout_log": null
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_63_family_decision_matrix.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "27",
+        "38",
+        "47",
+        "58",
+        "60",
+        "61",
+        "62"
+      ],
+      "diagnostic_id": "63",
+      "duration_seconds": 0.08220532396808267,
+      "exit_code": 0,
+      "expected_outputs": [
+        "family_decision_matrix.json"
+      ],
+      "finished_at": "2026-08-04T13:48:38.113250Z",
+      "metadata": {},
+      "name": "family_decision_matrix",
+      "observed_outputs": [
+        "family_decision_matrix.json"
+      ],
+      "reason": null,
+      "required": true,
+      "stage": "6_family_screeners",
+      "started_at": "2026-08-04T13:48:38.031053Z",
+      "status": "PASS",
+      "status_artifact": "family_decision_matrix.json",
+      "stderr_log": "logs/suite_runner/diag_63.stderr.log",
+      "stdout_log": "logs/suite_runner/diag_63.stdout.log"
+    },
+    {
+      "blocking": true,
+      "command": [
+        "/home/y/miniconda3/envs/env_isaaclab/bin/python",
+        "/home/y/my_mimic_mixgrpo/fcamp/tools/diag_64_render_discovery_report.py",
+        "--spec",
+        "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+        "--output-dir",
+        "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1"
+      ],
+      "dependencies": [
+        "63"
+      ],
+      "diagnostic_id": "64",
+      "duration_seconds": 9.250133585068397,
+      "exit_code": 0,
+      "expected_outputs": [
+        "diagnostic_results.txt",
+        "discovery_report.md",
+        "source_and_logs.tar.gz"
+      ],
+      "finished_at": "2026-08-04T13:48:47.366478Z",
+      "metadata": {},
+      "name": "render_discovery_report",
+      "observed_outputs": [
+        "diagnostic_results.txt",
+        "discovery_report.md",
+        "source_and_logs.tar.gz"
+      ],
+      "reason": null,
+      "required": true,
+      "stage": "6_family_screeners",
+      "started_at": "2026-08-04T13:48:38.116351Z",
+      "status": "PASS",
+      "status_artifact": "discovery_report.status.json",
+      "stderr_log": "logs/suite_runner/diag_64.stderr.log",
+      "stdout_log": "logs/suite_runner/diag_64.stdout.log"
+    }
+  ],
+  "execution": {
+    "dry_run": false,
+    "fail_closed": true,
+    "finished_at": "2026-08-04T13:48:47.369376Z",
+    "mode": "execute",
+    "output_dir": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1",
+    "spec_path": "/home/y/my_mimic_mixgrpo/fcamp/diagnostics/specs/largebox_discovery_v1.yaml",
+    "started_at": "2026-08-04T13:48:36.191774Z"
+  },
+  "generated_at": "2026-08-04T13:48:47.370173Z",
+  "overall_status": "FAIL",
+  "schema_version": "1.0.0",
+  "spec_sha256": "d66cc2348d2e7efc90b9f588192202c42c48ded587a1f65fd577d9343bd43201",
+  "status_counts": {
+    "FAIL": 2,
+    "INVALID_PROTOCOL": 0,
+    "PASS": 20,
+    "SKIPPED_DEPENDENCY": 30
+  },
+  "suite_id": "largebox_discovery_v1",
+  "suite_version": "1.0.0"
+}

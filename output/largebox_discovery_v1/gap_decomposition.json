@@ -1,0 +1,10 @@
+{
+  "diagnostic_id": "32",
+  "errors": [
+    "four-layer reference/readback bundle is missing: /home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/reference_readback_execution_layers.npz"
+  ],
+  "evidence": {},
+  "status": "SKIPPED_DEPENDENCY",
+  "summary": "four-layer PhysX readback experiment has not been collected",
+  "warnings": []
+}

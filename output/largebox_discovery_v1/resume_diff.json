@@ -1,0 +1,176 @@
+{
+  "diagnostic_id": "03",
+  "errors": [],
+  "evidence": {
+    "base_checkpoint": "/home/y/my_mimic_mixgrpo/fcamp/runs/fixed_reward_holosoma_geometry_ckpts_u200_s42_20260802_020905/checkpoints/update_0200.pt",
+    "base_checkpoint_sha256": "7f18478baa4e676129b73c90660df3c64dc7f643e466f045250016ece1c59fb3",
+    "comparison": {
+      "all_state_exact": true,
+      "counters": {
+        "env_transitions_total": {
+          "exact": true,
+          "first": 19759104,
+          "second": 19759104
+        },
+        "update_idx": {
+          "exact": true,
+          "first": 201,
+          "second": 201
+        }
+      },
+      "deterministic_metrics": {
+        "all_close": true,
+        "atol": 0.0,
+        "differences": [],
+        "max_absolute_difference": 0.0,
+        "max_relative_difference": 0.0,
+        "missing_from_first": [],
+        "missing_from_second": [],
+        "rtol": 0.0,
+        "shared_key_count": 351
+      },
+      "exact_sections": {
+        "adaptive_sampler_state": true,
+        "algo_state": true,
+        "cuda_rng_state": true,
+        "optimizer": true,
+        "policy": true,
+        "torch_rng_state": true
+      },
+      "nondeterministic_telemetry": {
+        "all_close": false,
+        "atol": 0.0,
+        "differences": [
+          {
+            "absolute_difference": 1803.7569482097133,
+            "first": 20187.96878420849,
+            "key": "perf/env_transitions_per_s",
+            "relative_difference": 0.08201980009012111,
+            "second": 21991.725732418203
+          },
+          {
+            "absolute_difference": 0.3993900780333206,
+            "first": 4.869434911990538,
+            "key": "perf/iteration_s",
+            "relative_difference": 0.08201980009012115,
+            "second": 4.470044833957218
+          },
+          {
+            "absolute_difference": 0.3993900780333206,
+            "first": 684.3101835073903,
+            "key": "perf/train_wall_s_total",
+            "relative_difference": 0.0005836389515442705,
+            "second": 683.910793429357
+          },
+          {
+            "absolute_difference": 0.3783302480587736,
+            "first": 4.585780099965632,
+            "key": "timing/collect_s",
+            "relative_difference": 0.08250073920064527,
+            "second": 4.207449851906858
+          },
+          {
+            "absolute_difference": 0.019196932902559638,
+            "first": 0.2520407089032233,
+            "key": "timing/learning_s",
+            "relative_difference": 0.07616600106425957,
+            "second": 0.23284377600066364
+          }
+        ],
+        "max_absolute_difference": 1803.7569482097133,
+        "max_relative_difference": 0.08250073920064527,
+        "missing_from_first": [],
+        "missing_from_second": [],
+        "rtol": 0.0,
+        "shared_key_count": 5
+      },
+      "reproducible": true,
+      "section_digests": {
+        "adaptive_sampler_state": {
+          "first": "0c982a2f31b153e5fda206bec2120a9759a0a59db8ca3fb90075e22f8231e765",
+          "second": "0c982a2f31b153e5fda206bec2120a9759a0a59db8ca3fb90075e22f8231e765"
+        },
+        "algo_state": {
+          "first": "5e6079fdb532ed605edc80563320a77564a8ca9708883f0aa6253bd5d2f86267",
+          "second": "5e6079fdb532ed605edc80563320a77564a8ca9708883f0aa6253bd5d2f86267"
+        },
+        "cuda_rng_state": {
+          "first": "b85f61551db01a78add177ed757708f9af86bb44329c422784ea5e919f570f10",
+          "second": "b85f61551db01a78add177ed757708f9af86bb44329c422784ea5e919f570f10"
+        },
+        "optimizer": {
+          "first": "78bdf294f9aa9c9ca3d3bee3795562c08ed40f7ae4098330283f5e060c8181cb",
+          "second": "78bdf294f9aa9c9ca3d3bee3795562c08ed40f7ae4098330283f5e060c8181cb"
+        },
+        "policy": {
+          "first": "afa6bd2a2309935f7446bf8a648513304c3a73f8c9c21dab573d1d10464b18b0",
+          "second": "afa6bd2a2309935f7446bf8a648513304c3a73f8c9c21dab573d1d10464b18b0"
+        },
+        "torch_rng_state": {
+          "first": "b70fce841e51b0167cf189e279eabb7904ab37e3244e9a1ce83ff498133f5549",
+          "second": "b70fce841e51b0167cf189e279eabb7904ab37e3244e9a1ce83ff498133f5549"
+        }
+      },
+      "telemetry_exclusion_rule": "perf/*, timing/*, and train_wall* are measured wall-clock telemetry and cannot affect PASS/FAIL",
+      "train_wall_seconds_total": {
+        "excluded_from_reproducibility": true,
+        "first": 684.3101835073903,
+        "second": 683.910793429357
+      }
+    },
+    "protocol_checks": {
+      "different_result_paths": true,
+      "result_a_is_next_update": true,
+      "result_b_is_next_update": true,
+      "same_platform_identity": true,
+      "same_saved_config": true
+    },
+    "restart_vs_uninterrupted_audit": {
+      "audit_id": "dense_u275_entity_reconstruction",
+      "branch_u275": {
+        "path": "runs/largebox_discovery_dense_u274_u276_s42_20260804/checkpoints/update_0275.pt",
+        "sha256": "2ce93b1bf25458d3dfe221801a334af1769746950c0b3a8356953e608681a2c3"
+      },
+      "interpretation": "A deterministic restart from update 274 is not the uninterrupted mainline update 275/276 because the checkpoint does not contain the complete vectorized simulator state. The branch is audit-only and must not enter the canonical checkpoint path.",
+      "parent_u274": {
+        "path": "runs/largebox_discovery_dense_u200_u300_s42_20260804/checkpoints/update_0274.pt",
+        "sha256": "bbb5169b41599374061cbc339c2c152a0face6e2ba732c03711ab99f2f1514d7"
+      },
+      "protocol_action": {
+        "formal_rollout_collection_had_started": false,
+        "new_canonical_update": 276,
+        "new_checkpoint_source": "uninterrupted mainline",
+        "old_canonical_update": 275
+      },
+      "status": "FAIL",
+      "u276_comparison": {
+        "policy_digest_restart_branch": "fdd43662bd3701ab23413181ed62b95918ad6966a808efb9c3f88bab5bed5614",
+        "policy_digest_uninterrupted": "ef5dd8a9ca85c4d2c763feebdcea1ca0983dbf24da6080fde9d19087f8ca13fd",
+        "restart_branch_path": "runs/largebox_discovery_dense_u274_u276_s42_20260804/checkpoints/update_0276.pt",
+        "restart_branch_sha256": "0ac51d030b50116ba070f661cd520b0d2f9bf8883e95bf9fef6a25d7b58daea0",
+        "state_digest_equal": {
+          "adaptive_sampler_state": false,
+          "algo_state": false,
+          "cuda_rng_state": false,
+          "env_transitions_total": true,
+          "optimizer": false,
+          "platform_identity": true,
+          "policy": false,
+          "torch_rng_state": true,
+          "update_idx": true
+        },
+        "uninterrupted_path": "runs/largebox_discovery_dense_u200_u300_s42_20260804/checkpoints/update_0276.pt",
+        "uninterrupted_sha256": "b2dffff56c9e80b91962058187fec53605ce58a05a3f27e9a7d6f289af62498c"
+      }
+    },
+    "result_a": "/home/y/my_mimic_mixgrpo/fcamp/runs/discovery_resume_probe_a_u201_s42_20260804/checkpoints/update_0201.pt",
+    "result_b": "/home/y/my_mimic_mixgrpo/fcamp/runs/discovery_resume_probe_b_u201_s42_20260804/checkpoints/update_0201.pt",
+    "scope_guard": "twin_restart_reproducibility_only"
+  },
+  "status": "PASS",
+  "summary": "one-update resume is reproducible",
+  "warnings": [
+    "this PASS/FAIL tests twin restarts from one checkpoint; it does not imply equality to an uninterrupted training process",
+    "the separately recorded restart-vs-uninterrupted audit failed; restart branches must not be substituted into the uninterrupted canonical path"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "diagnostic_id": "64",
+  "errors": [],
+  "evidence": {
+    "diagnostic_count": 52,
+    "diagnostic_results": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/diagnostic_results.txt",
+    "diagnostic_results_sha256": "e41cdbfd782174a35dae7f136037fe7b19d883be12fa0460f4a5253784154ed8",
+    "discovery_report": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/discovery_report.md",
+    "discovery_report_sha256": "2ce12409ca79570bfeff571306bbecd7e4b40729928e95373289ee2733e23181",
+    "embedded_text_result_count": 38,
+    "indexed_binary_evidence_count": 107,
+    "source_and_logs": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/source_and_logs.tar.gz",
+    "source_and_logs_sha256": "5a8d31f83c85a9f3d64bc6de834307f2101a78ff38d7804eb33aed3430a5965d"
+  },
+  "status": "PASS",
+  "summary": "all diagnostic results were consolidated into one TXT",
+  "warnings": []
+}

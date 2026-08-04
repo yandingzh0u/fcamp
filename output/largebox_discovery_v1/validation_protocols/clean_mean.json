@@ -1,0 +1,12 @@
+{
+  "checkpoint_sha256": "b17d33a6460d453453f960a61840db3397b5756a20f475b5497a222934fb3b85",
+  "checkpoint_update": 500,
+  "metrics": {
+    "failure_frac": 0.0,
+    "motion_complete_frac": 1.0,
+    "reference_progress_mean": 1.0,
+    "return_mean": 14.027445793151855,
+    "steps_mean": 162.5
+  },
+  "protocol": "clean_mean"
+}

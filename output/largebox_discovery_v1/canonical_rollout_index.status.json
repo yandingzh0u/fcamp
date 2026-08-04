@@ -1,0 +1,63 @@
+{
+  "diagnostic_id": "12",
+  "errors": [],
+  "evidence": {
+    "canonical_rollout_index": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/canonical_rollout_index.parquet",
+    "canonical_rollout_index_sha256": "73d237dfb0cc0d5a3cedd9b4d5bd204e5aaf6e734d1d2f5bdfbdf151aac82d2a",
+    "checkpoint_count": 15,
+    "collector_mode_counts": {
+      "clean_mean": 960,
+      "common_action_noise": 2880,
+      "controlled_environment": 960,
+      "native_stochastic": 960
+    },
+    "frozen_semantics": {
+      "protocol_details": {
+        "after_done": "do_not_reset_and_crop_each_trajectory_at_first_done",
+        "clean_initial_state": "noise_free_reference_reset_snapshot",
+        "controlled_environment_randomness": "shared_observation_and_push_streams_from_NoiseBank",
+        "duplicate_phases_allowed_with_unique_snapshot_ids": true,
+        "native_stochastic_coupling": "shared_standard_epsilon_per_snapshot_with_checkpoint_learned_std",
+        "nonclean_initial_state": "shared_controlled_noisy_snapshot_from_NoiseBank",
+        "phase_grid": "round(linspace(configured_motion_start_phase, motion_num_frames_minus_2)) independent of rollout horizon",
+        "phase_grid_reason": "horizon is a maximum rollout length and must not collapse a 325-frame motion to phase zero; trajectories crop at first done",
+        "tensor_timing": {
+          "observation_state_reference_action": "pre_step",
+          "reward_done_outcome": "post_step"
+        }
+      },
+      "validation_protocols": {
+        "clean_mean": "clean snapshot, policy mean, observation noise off, pushes off",
+        "controlled_noise": "common_action_noise at frozen sigma 0.25 from shared controlled noisy snapshot and shared environment streams",
+        "controlled_noise_sigma": 0.25,
+        "summary_checkpoint_update": 500,
+        "training_like": "shared controlled noisy snapshot, production observation noise and interval pushes driven by shared NoiseBank streams, checkpoint learned std with shared standard epsilon"
+      }
+    },
+    "generated_shards": 90,
+    "legacy_domains": {
+      "A_amp_official": {
+        "index": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/canonical_A_amp_rollout_index.parquet",
+        "status": "PASS",
+        "trajectory_count": 384
+      },
+      "A_mix_tracking": {
+        "checkpoint_loaded": false,
+        "index": null,
+        "legacy_quarantined": true,
+        "status": "SKIPPED_DEPENDENCY",
+        "trajectory_count": 0
+      }
+    },
+    "native_stochastic_primary_overlap_rows": 0,
+    "reused_verified_shards": 0,
+    "shard_count": 90,
+    "snapshot_count": 64,
+    "startup_randomization_sha256": "cec741bea21ff40122b317c6fbf95a3c9f7118838cd6088ad028a00312e50054",
+    "trajectory_count": 5760,
+    "validation_summary_checkpoint_update": 500
+  },
+  "status": "PASS",
+  "summary": "condition-matched canonical teacher rollouts were collected in one environment",
+  "warnings": []
+}

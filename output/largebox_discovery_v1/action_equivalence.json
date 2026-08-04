@@ -1,0 +1,107 @@
+{
+  "diagnostic_id": "15",
+  "errors": [],
+  "evidence": {
+    "atol": 0.0,
+    "checkpoint_results": {
+      "50": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "100": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "150": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "200": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "210": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "220": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "230": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "240": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "250": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "276": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "300": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "350": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "400": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "450": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      },
+      "500": {
+        "act_inference_path_internal_max_abs_error": 0.0,
+        "normalizer_unchanged": true,
+        "sample_count": 20800,
+        "stored_mean_vs_deterministic_max_abs_error": 0.0
+      }
+    },
+    "checkpoint_switch": "policy_state_only",
+    "internal_path_global_max_abs_error": 0.0,
+    "single_persistent_environment": true,
+    "startup_randomization_sha256": "cec741bea21ff40122b317c6fbf95a3c9f7118838cd6088ad028a00312e50054",
+    "stored_mean_global_max_abs_error": 0.0
+  },
+  "status": "PASS",
+  "summary": "stored canonical means are bit-exact with production deterministic_action/act_inference",
+  "warnings": []
+}

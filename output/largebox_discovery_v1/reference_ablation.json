@@ -1,0 +1,415 @@
+{
+  "diagnostic_id": "26",
+  "errors": [],
+  "evidence": {
+    "checkpoint_sha256": "b17d33a6460d453453f960a61840db3397b5756a20f475b5497a222934fb3b85",
+    "collector_mode": "clean_mean",
+    "delays_control_steps": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "primary_teacher_quality": {
+      "checkpoint_path": "/home/y/my_mimic_mixgrpo/fcamp/runs/largebox_discovery_dense_u300_u500_s42_20260804/checkpoints/update_0500.pt",
+      "checkpoint_update": 500,
+      "motion_completion": 1.0,
+      "protocol": "clean_mean",
+      "required_motion_completion": 0.9,
+      "role": "capability gate only; never stochastic occupancy evidence",
+      "run_id": "largebox_discovery_dense_u300_u500_s42_20260804",
+      "source_paths": "/home/y/my_mimic_mixgrpo/fcamp/runs/largebox_discovery_dense_u300_u500_s42_20260804/logs/metrics.jsonl;/home/y/my_mimic_mixgrpo/fcamp/runs/largebox_discovery_dense_u300_u500_s42_20260804/logs/train.log"
+    },
+    "real_physx_result": {
+      "checkpoint_sha256": "b17d33a6460d453453f960a61840db3397b5756a20f475b5497a222934fb3b85",
+      "metrics": {
+        "baseline": {
+          "by_horizon": {
+            "1": {
+              "failure_rate": 0.0,
+              "motion_completion": 0.015625,
+              "return_mean": 0.07450667768716812,
+              "still_active_fraction": 0.984375
+            },
+            "10": {
+              "failure_rate": 0.0,
+              "motion_completion": 0.03125,
+              "return_mean": 0.8498760461807251,
+              "still_active_fraction": 0.96875
+            },
+            "25": {
+              "failure_rate": 0.0,
+              "motion_completion": 0.078125,
+              "return_mean": 2.071438789367676,
+              "still_active_fraction": 0.921875
+            },
+            "325": {
+              "failure_rate": 0.0,
+              "motion_completion": 1.0,
+              "return_mean": 13.980657577514648,
+              "still_active_fraction": 0.0
+            },
+            "5": {
+              "failure_rate": 0.0,
+              "motion_completion": 0.015625,
+              "return_mean": 0.4221869707107544,
+              "still_active_fraction": 0.984375
+            },
+            "50": {
+              "failure_rate": 0.0,
+              "motion_completion": 0.15625,
+              "return_mean": 3.9723546504974365,
+              "still_active_fraction": 0.84375
+            }
+          },
+          "failure_rate": 0.0,
+          "horizon": 325,
+          "motion_completion": 1.0,
+          "nonreference_max_abs_change": 0.0,
+          "return_mean": 13.980657577514648,
+          "steps_mean": 162.5,
+          "still_active_fraction": 0.0
+        },
+        "delay": {
+          "1": {
+            "by_horizon": {
+              "1": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.015625,
+                "return_mean": 0.07457312941551208,
+                "still_active_fraction": 0.984375
+              },
+              "10": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.03125,
+                "return_mean": 0.8497816324234009,
+                "still_active_fraction": 0.96875
+              },
+              "25": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.078125,
+                "return_mean": 2.067251205444336,
+                "still_active_fraction": 0.921875
+              },
+              "325": {
+                "failure_rate": 0.0,
+                "motion_completion": 1.0,
+                "return_mean": 13.974853515625,
+                "still_active_fraction": 0.0
+              },
+              "5": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.015625,
+                "return_mean": 0.4225008487701416,
+                "still_active_fraction": 0.984375
+              },
+              "50": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.15625,
+                "return_mean": 3.970407724380493,
+                "still_active_fraction": 0.84375
+              }
+            },
+            "failure_rate": 0.0,
+            "horizon": 325,
+            "motion_completion": 1.0,
+            "nonreference_max_abs_change": 0.0,
+            "return_mean": 13.974853515625,
+            "steps_mean": 162.5,
+            "still_active_fraction": 0.0
+          },
+          "16": {
+            "by_horizon": {
+              "1": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.015625,
+                "return_mean": 0.07448702305555344,
+                "still_active_fraction": 0.984375
+              },
+              "10": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.03125,
+                "return_mean": 0.8421510457992554,
+                "still_active_fraction": 0.96875
+              },
+              "25": {
+                "failure_rate": 0.09375,
+                "motion_completion": 0.078125,
+                "return_mean": 1.8281972408294678,
+                "still_active_fraction": 0.828125
+              },
+              "325": {
+                "failure_rate": 0.859375,
+                "motion_completion": 0.140625,
+                "return_mean": 3.435642719268799,
+                "still_active_fraction": 0.0
+              },
+              "5": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.015625,
+                "return_mean": 0.42272770404815674,
+                "still_active_fraction": 0.984375
+              },
+              "50": {
+                "failure_rate": 0.296875,
+                "motion_completion": 0.140625,
+                "return_mean": 2.8533248901367188,
+                "still_active_fraction": 0.5625
+              }
+            },
+            "failure_rate": 0.859375,
+            "horizon": 325,
+            "motion_completion": 0.140625,
+            "nonreference_max_abs_change": 0.0,
+            "return_mean": 3.435642719268799,
+            "steps_mean": 61.453125,
+            "still_active_fraction": 0.0
+          },
+          "2": {
+            "by_horizon": {
+              "1": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.015625,
+                "return_mean": 0.0744110494852066,
+                "still_active_fraction": 0.984375
+              },
+              "10": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.03125,
+                "return_mean": 0.8470156192779541,
+                "still_active_fraction": 0.96875
+              },
+              "25": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.078125,
+                "return_mean": 2.0591204166412354,
+                "still_active_fraction": 0.921875
+              },
+              "325": {
+                "failure_rate": 0.0,
+                "motion_completion": 1.0,
+                "return_mean": 13.83430004119873,
+                "still_active_fraction": 0.0
+              },
+              "5": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.015625,
+                "return_mean": 0.42166072130203247,
+                "still_active_fraction": 0.984375
+              },
+              "50": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.15625,
+                "return_mean": 3.93982195854187,
+                "still_active_fraction": 0.84375
+              }
+            },
+            "failure_rate": 0.0,
+            "horizon": 325,
+            "motion_completion": 1.0,
+            "nonreference_max_abs_change": 0.0,
+            "return_mean": 13.83430004119873,
+            "steps_mean": 162.5,
+            "still_active_fraction": 0.0
+          },
+          "4": {
+            "by_horizon": {
+              "1": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.015625,
+                "return_mean": 0.07451801002025604,
+                "still_active_fraction": 0.984375
+              },
+              "10": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.03125,
+                "return_mean": 0.8449869155883789,
+                "still_active_fraction": 0.96875
+              },
+              "25": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.078125,
+                "return_mean": 2.0321850776672363,
+                "still_active_fraction": 0.921875
+              },
+              "325": {
+                "failure_rate": 0.0,
+                "motion_completion": 1.0,
+                "return_mean": 13.424264907836914,
+                "still_active_fraction": 0.0
+              },
+              "5": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.015625,
+                "return_mean": 0.4226072430610657,
+                "still_active_fraction": 0.984375
+              },
+              "50": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.15625,
+                "return_mean": 3.8573458194732666,
+                "still_active_fraction": 0.84375
+              }
+            },
+            "failure_rate": 0.0,
+            "horizon": 325,
+            "motion_completion": 1.0,
+            "nonreference_max_abs_change": 0.0,
+            "return_mean": 13.424264907836914,
+            "steps_mean": 162.5,
+            "still_active_fraction": 0.0
+          },
+          "8": {
+            "by_horizon": {
+              "1": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.015625,
+                "return_mean": 0.07453824579715729,
+                "still_active_fraction": 0.984375
+              },
+              "10": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.03125,
+                "return_mean": 0.841772198677063,
+                "still_active_fraction": 0.96875
+              },
+              "25": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.078125,
+                "return_mean": 1.9554954767227173,
+                "still_active_fraction": 0.921875
+              },
+              "325": {
+                "failure_rate": 0.5,
+                "motion_completion": 0.5,
+                "return_mean": 6.656644821166992,
+                "still_active_fraction": 0.0
+              },
+              "5": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.015625,
+                "return_mean": 0.4226221442222595,
+                "still_active_fraction": 0.984375
+              },
+              "50": {
+                "failure_rate": 0.0,
+                "motion_completion": 0.15625,
+                "return_mean": 3.566683292388916,
+                "still_active_fraction": 0.84375
+              }
+            },
+            "failure_rate": 0.5,
+            "horizon": 325,
+            "motion_completion": 0.5,
+            "nonreference_max_abs_change": 0.0,
+            "return_mean": 6.656644821166992,
+            "steps_mean": 103.4375,
+            "still_active_fraction": 0.0
+          }
+        },
+        "freeze": {
+          "by_horizon": {
+            "1": {
+              "failure_rate": 0.0,
+              "motion_completion": 0.015625,
+              "return_mean": 0.07438761740922928,
+              "still_active_fraction": 0.984375
+            },
+            "10": {
+              "failure_rate": 0.0,
+              "motion_completion": 0.03125,
+              "return_mean": 0.8422558307647705,
+              "still_active_fraction": 0.96875
+            },
+            "25": {
+              "failure_rate": 0.078125,
+              "motion_completion": 0.078125,
+              "return_mean": 1.8239424228668213,
+              "still_active_fraction": 0.84375
+            },
+            "325": {
+              "failure_rate": 0.859375,
+              "motion_completion": 0.140625,
+              "return_mean": 2.8222899436950684,
+              "still_active_fraction": 0.0
+            },
+            "5": {
+              "failure_rate": 0.0,
+              "motion_completion": 0.015625,
+              "return_mean": 0.42262953519821167,
+              "still_active_fraction": 0.984375
+            },
+            "50": {
+              "failure_rate": 0.421875,
+              "motion_completion": 0.125,
+              "return_mean": 2.5436649322509766,
+              "still_active_fraction": 0.453125
+            }
+          },
+          "failure_rate": 0.859375,
+          "horizon": 325,
+          "motion_completion": 0.140625,
+          "nonreference_max_abs_change": 0.0,
+          "return_mean": 2.8222899436950684,
+          "steps_mean": 49.421875,
+          "still_active_fraction": 0.0
+        },
+        "shuffle": {
+          "by_horizon": {
+            "1": {
+              "failure_rate": 0.0,
+              "motion_completion": 0.015625,
+              "return_mean": 0.046657294034957886,
+              "still_active_fraction": 0.984375
+            },
+            "10": {
+              "failure_rate": 0.0625,
+              "motion_completion": 0.03125,
+              "return_mean": 0.5956435203552246,
+              "still_active_fraction": 0.90625
+            },
+            "25": {
+              "failure_rate": 0.625,
+              "motion_completion": 0.078125,
+              "return_mean": 0.874591588973999,
+              "still_active_fraction": 0.296875
+            },
+            "325": {
+              "failure_rate": 0.921875,
+              "motion_completion": 0.078125,
+              "return_mean": 0.8842985033988953,
+              "still_active_fraction": 0.0
+            },
+            "5": {
+              "failure_rate": 0.0,
+              "motion_completion": 0.015625,
+              "return_mean": 0.33278512954711914,
+              "still_active_fraction": 0.984375
+            },
+            "50": {
+              "failure_rate": 0.921875,
+              "motion_completion": 0.078125,
+              "return_mean": 0.8842985033988953,
+              "still_active_fraction": 0.0
+            }
+          },
+          "failure_rate": 0.921875,
+          "horizon": 325,
+          "motion_completion": 0.078125,
+          "nonreference_max_abs_change": 0.0,
+          "return_mean": 0.8842985033988953,
+          "steps_mean": 20.9375,
+          "still_active_fraction": 0.0
+        }
+      },
+      "only_reference_terms_intervened": true,
+      "operation": "reference_ablation",
+      "same_snapshot_replay_verified": true
+    },
+    "role_guard": "causal reference-dependence diagnosis only; never a candidate policy method"
+  },
+  "status": "PASS",
+  "summary": "reference interventions completed in real PhysX from matched snapshots",
+  "warnings": []
+}

@@ -1,0 +1,101 @@
+{
+  "diagnostic_id": "13",
+  "errors": [],
+  "evidence": {
+    "action_path_max_abs_error": {
+      "clean_mean": 0.0,
+      "clean_mean/applied": 0.0,
+      "common_action_noise": 0.0,
+      "common_action_noise/applied": 0.0,
+      "controlled_environment": 0.0,
+      "controlled_environment/applied": 0.0,
+      "native_stochastic": 0.0,
+      "native_stochastic/applied": 0.0
+    },
+    "common_epsilon_cross_checkpoint_max_abs_error": {
+      "clean_mean@0": 0.0,
+      "common_action_noise@0.1": 0.0,
+      "common_action_noise@0.25": 0.0,
+      "common_action_noise@0.5": 0.0,
+      "controlled_environment@0": 0.0,
+      "native_stochastic@0": 0.0
+    },
+    "initial_observation_bit_exact": false,
+    "native_noise_scale_is_checkpoint_fingerprint": true,
+    "native_std_mean_by_update": {
+      "50": 0.7879601120948792,
+      "100": 0.661178708076477,
+      "150": 0.5699442028999329,
+      "200": 0.5227739810943604,
+      "210": 0.5159942507743835,
+      "220": 0.5087667107582092,
+      "230": 0.5011533498764038,
+      "240": 0.4936479330062866,
+      "250": 0.48531609773635864,
+      "276": 0.46499061584472656,
+      "300": 0.44433093070983887,
+      "350": 0.40850570797920227,
+      "400": 0.3828471899032593,
+      "450": 0.36127883195877075,
+      "500": 0.34375157952308655
+    },
+    "native_std_state_sha256_by_update": {
+      "50": "ece97957fdbacfdc7e70e166b6971e7d96cec3058b25df1d1c652128221d39d0",
+      "100": "dcb5ff212dc45453b20e8fdc07e720bce8699910cf67508b87921c31d2be3be8",
+      "150": "d62e34f7882eedd9d18da47d3f75a5bf423c84b6f1b55e367c53a1a4490fe6d4",
+      "200": "9a9d2ba58b03e3e0dfb260b7d50fd00ce2a6ed9458b390fbafb51055a02ecb77",
+      "210": "03b34feda0bbbee9b4bf4ee13649a94433d4e2ac325ea9a2318433472bdaa84f",
+      "220": "787e994eb475b1a08469ea6918a147ed5391d1244ff9fe7a715536496879373b",
+      "230": "9b7ec447b14279cfb7b6e7df6c6961ab7bff85872b9506b69b85b11efd11d1c6",
+      "240": "61e187496543cede591bca0714ef58f2fabe099d03c529e4bb33301a2d0e2563",
+      "250": "36c364b5cf52e5bf521c4f5b9bce182c0c21fd7e2adf2ceb5d8265cef109696e",
+      "276": "cdeaf67cd9b11dbb52a904d5f9c2869452373fe10f7a9815dfcaed093b75fd9a",
+      "300": "de2edf2540f5d72d7148f8d69e7117b7de93036275ec1713df75d0b8b029169a",
+      "350": "46641d5abf20d8c9913d3fb543b26cf8d6c56f00474ef4955b4cfbcb7e9b567b",
+      "400": "e624ce92c9a1eb147acec8479834c9bc012cdc1756b42b19943e590a69a796a1",
+      "450": "e728beb8936117026d6722e21227fdfdcf10ce64f878df14d43b1c367c89037d",
+      "500": "3cf985f31c1e7b589d9da34fc79d9f2c88d8f9a1469564691a8a72e92019e1c4"
+    },
+    "native_std_unique_count": 15,
+    "native_stochastic_primary_overlap_rows": 0,
+    "normalizer_is_checkpoint_fingerprint": true,
+    "normalizer_sha256_by_update": {
+      "50": "b89bc90e53740c7819aad643367c0cc361b653f997eb0f5649aa18cee0db9fe2",
+      "100": "c62212680f93d00a610a75ef784ef029fd632e4eefc70985b6a9454db0828443",
+      "150": "abc7de3eeedf524a841cb3a551b687a258ed7afe2a2b489009844a73fa1f578a",
+      "200": "5785c9de1b049393ddab954a55333d354aef84a90bee03c4fdec62d8a4e16ba8",
+      "210": "d8c48b5edfb805cfe07fa90c3a8b5621774c7e18e9097cd1652285216309fbaf",
+      "220": "3a5f8757ab8ccb9b715c271100b207def5e278e67a9a97abbd3576cb669ab7ae",
+      "230": "09bcd74e4c6699ba69ec21eeaa6e7d3bd1b7fea8f055c7b95fde0d55390daa33",
+      "240": "ca052005b7e46897151eeda9b55e8d19d0a95cd41ef54813bba01a706ec0e6c5",
+      "250": "72abfb3a74414f1e8e09aad3e6cb1ff7c5e06dd56d44cac26a09162b5127c734",
+      "276": "ab67a9f8a09e76acbbddc821116d1fa62173d90f7b95d76ee1ecc153a963e2ac",
+      "300": "4403c3b738ff5e745e22f6375e403ab0af65cf103732558670f0ee59425bb6c4",
+      "350": "3eaf58746b04232c98d89081dcaf4e152041e59ec76ff508646eab8f973c9bb3",
+      "400": "80180e20016319530d2f87094202d21dda088c01eba4af3d4bf1e4d8ad64eeb6",
+      "450": "0fdb73771dc680dce99f5b16d15eaf0e8213967564db04245b270cdb8e983c67",
+      "500": "2966d9bfb1472fa107d0acefbf921c9e31ae58c8ff76cf5052444806efd59649"
+    },
+    "normalizer_unique_count": 15,
+    "primary_overlap_modes": [
+      "clean_mean",
+      "common_action_noise",
+      "controlled_environment"
+    ],
+    "probe_snapshot_id": "snapshot-0000-phase-00000",
+    "reset_phase_or_collector_path_is_checkpoint_fingerprint": true,
+    "same_snapshot_initial_observation_max_abs_error": {
+      "clean_mean@0": 4.256144165992737e-07,
+      "common_action_noise@0.1": 0.0,
+      "common_action_noise@0.25": 0.0,
+      "common_action_noise@0.5": 0.0,
+      "controlled_environment@0": 0.0,
+      "native_stochastic@0": 0.0
+    }
+  },
+  "status": "PASS",
+  "summary": "action/NoiseBank algebra is bit-exact; a measured initial-state, normalizer, or learned-std fingerprint is reported rather than hidden",
+  "warnings": [
+    "a finite initial-observation collector-order fingerprint was measured; use the condition-matched controlled branches for cross-checkpoint comparisons"
+  ]
+}

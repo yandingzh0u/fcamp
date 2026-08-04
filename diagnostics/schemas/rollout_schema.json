@@ -1,0 +1,288 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fcamp.local/schemas/largebox-discovery-rollout-v1.json",
+  "title": "AMP Research Discovery Suite rollout record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "metadata",
+    "trajectory",
+    "observation",
+    "state",
+    "action",
+    "reference",
+    "outcome",
+    "imitation"
+  ],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "suite_version",
+        "git_commit",
+        "git_dirty",
+        "source_snapshot_sha256",
+        "resolved_config_sha256",
+        "checkpoint_sha256",
+        "checkpoint_update",
+        "checkpoint_lineage_id",
+        "policy_domain",
+        "robot_asset_sha256",
+        "motion_sha256",
+        "action_schema_sha256",
+        "task_name",
+        "collector_mode",
+        "collector_seed",
+        "policy_method",
+        "policy_source_commit",
+        "policy_source_snapshot_sha256",
+        "policy_resolved_config_sha256",
+        "imitation_source_commit",
+        "imitation_frame_schema",
+        "imitation_frame_schema_sha256",
+        "imitation_frame_dim",
+        "imitation_key_body_names",
+        "imitation_root_xy_canonicalization",
+        "imitation_agent_negative_field",
+        "imitation_reference_positive_field",
+        "imitation_fk_aligned_role",
+        "imitation_phase_field"
+      ],
+      "properties": {
+        "suite_version": {"type": "string", "minLength": 1},
+        "git_commit": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
+        "git_dirty": {"type": "boolean"},
+        "source_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "resolved_config_sha256": {"$ref": "#/$defs/sha256"},
+        "checkpoint_sha256": {"$ref": "#/$defs/sha256"},
+        "checkpoint_update": {"type": "integer", "minimum": 0},
+        "checkpoint_lineage_id": {"type": "string", "minLength": 1},
+        "policy_domain": {"type": "string", "minLength": 1},
+        "robot_asset_sha256": {"$ref": "#/$defs/sha256"},
+        "motion_sha256": {"$ref": "#/$defs/sha256"},
+        "action_schema_sha256": {"$ref": "#/$defs/sha256"},
+        "task_name": {"const": "largebox_plane"},
+        "collector_mode": {
+          "enum": [
+            "clean_mean",
+            "controlled_environment",
+            "common_action_noise",
+            "native_stochastic"
+          ]
+        },
+        "collector_seed": {"type": "integer"},
+        "policy_method": {"type": "string", "minLength": 1},
+        "policy_source_commit": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
+        "policy_source_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "policy_resolved_config_sha256": {"$ref": "#/$defs/sha256"},
+        "imitation_source_commit": {"const": "6901e302499711e2207687e1342348a4078330f8"},
+        "imitation_frame_schema": {"const": "g1_amp_imitation_frame_v1"},
+        "imitation_frame_schema_sha256": {"$ref": "#/$defs/sha256"},
+        "imitation_frame_dim": {"const": 239},
+        "imitation_key_body_names": {
+          "const": [
+            "left_ankle_roll_link",
+            "right_ankle_roll_link",
+            "head_link",
+            "left_wrist_yaw_link",
+            "right_wrist_yaw_link"
+          ]
+        },
+        "imitation_root_xy_canonicalization": {"const": "raw_until_window_newest_anchor"},
+        "imitation_agent_negative_field": {"const": "agent_physx_raw_frame"},
+        "imitation_reference_positive_field": {"const": "reference_expert_raw_frame"},
+        "imitation_fk_aligned_role": {"const": "same_state_domain_gap_audit_only"},
+        "imitation_phase_field": {"const": "phase_normalized_pre_step"}
+      }
+    },
+    "trajectory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trajectory_id",
+        "snapshot_id",
+        "env_id",
+        "episode_id",
+        "step",
+        "phase",
+        "phase_continuous",
+        "reset_stream",
+        "contact_mode",
+        "done",
+        "failure",
+        "timeout",
+        "motion_complete"
+      ],
+      "properties": {
+        "trajectory_id": {"type": "string", "minLength": 1},
+        "snapshot_id": {"type": "string", "minLength": 1},
+        "env_id": {"type": "integer", "minimum": 0},
+        "episode_id": {"type": "integer", "minimum": 0},
+        "step": {"type": "integer", "minimum": 0},
+        "phase": {"type": "number"},
+        "phase_continuous": {"type": "number"},
+        "reset_stream": {"type": ["string", "integer"]},
+        "contact_mode": {"type": ["string", "integer"]},
+        "done": {"type": "boolean"},
+        "failure": {"type": "boolean"},
+        "timeout": {"type": "boolean"},
+        "motion_complete": {"type": "boolean"}
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actor_full",
+        "actor_reference_terms",
+        "actor_proprio_terms",
+        "actor_no_reference",
+        "critic_full"
+      ],
+      "properties": {
+        "actor_full": {"$ref": "#/$defs/vector"},
+        "actor_reference_terms": {"$ref": "#/$defs/vector"},
+        "actor_proprio_terms": {"$ref": "#/$defs/vector"},
+        "actor_no_reference": {"$ref": "#/$defs/vector"},
+        "critic_full": {"$ref": "#/$defs/vector"}
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "joint_pos",
+        "joint_vel",
+        "root_pos",
+        "root_quat",
+        "root_lin_vel",
+        "root_ang_vel",
+        "body_pos",
+        "body_quat",
+        "foot_contacts",
+        "undesired_contacts",
+        "applied_torque",
+        "joint_limits"
+      ],
+      "properties": {
+        "joint_pos": {"$ref": "#/$defs/vector"},
+        "joint_vel": {"$ref": "#/$defs/vector"},
+        "root_pos": {"$ref": "#/$defs/vector"},
+        "root_quat": {"$ref": "#/$defs/vector"},
+        "root_lin_vel": {"$ref": "#/$defs/vector"},
+        "root_ang_vel": {"$ref": "#/$defs/vector"},
+        "body_pos": {"$ref": "#/$defs/tensor"},
+        "body_quat": {"$ref": "#/$defs/tensor"},
+        "foot_contacts": {"$ref": "#/$defs/vector"},
+        "undesired_contacts": {"$ref": "#/$defs/vector"},
+        "applied_torque": {"oneOf": [{"$ref": "#/$defs/vector"}, {"type": "null"}]},
+        "joint_limits": {"$ref": "#/$defs/tensor"}
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mean", "std", "common_epsilon", "sampled", "applied"],
+      "properties": {
+        "mean": {"$ref": "#/$defs/vector"},
+        "std": {"$ref": "#/$defs/vector"},
+        "common_epsilon": {"oneOf": [{"$ref": "#/$defs/vector"}, {"type": "null"}]},
+        "sampled": {"$ref": "#/$defs/vector"},
+        "applied": {"$ref": "#/$defs/vector"}
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "joint_pos",
+        "joint_vel",
+        "root_pos",
+        "root_quat",
+        "body_pos",
+        "body_quat"
+      ],
+      "properties": {
+        "joint_pos": {"$ref": "#/$defs/vector"},
+        "joint_vel": {"$ref": "#/$defs/vector"},
+        "root_pos": {"$ref": "#/$defs/vector"},
+        "root_quat": {"$ref": "#/$defs/vector"},
+        "body_pos": {"$ref": "#/$defs/tensor"},
+        "body_quat": {"$ref": "#/$defs/tensor"}
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reward_terms",
+        "done_terms",
+        "reference_progress",
+        "anchor_error",
+        "body_error",
+        "joint_error",
+        "action_rate",
+        "joint_limit_cost",
+        "undesired_contact_cost"
+      ],
+      "properties": {
+        "reward_terms": {"$ref": "#/$defs/numericMap"},
+        "done_terms": {"$ref": "#/$defs/booleanMap"},
+        "reference_progress": {"type": "number"},
+        "anchor_error": {"type": "number", "minimum": 0},
+        "body_error": {"type": "number", "minimum": 0},
+        "joint_error": {"type": "number", "minimum": 0},
+        "action_rate": {"type": "number", "minimum": 0},
+        "joint_limit_cost": {"type": "number", "minimum": 0},
+        "undesired_contact_cost": {"type": "number", "minimum": 0}
+      }
+    },
+    "imitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_physx_raw_frame",
+        "agent_fk_aligned_raw_frame",
+        "reference_expert_raw_frame",
+        "phase_normalized_pre_step"
+      ],
+      "properties": {
+        "agent_physx_raw_frame": {"$ref": "#/$defs/frame239"},
+        "agent_fk_aligned_raw_frame": {"$ref": "#/$defs/frame239"},
+        "reference_expert_raw_frame": {"$ref": "#/$defs/frame239"},
+        "phase_normalized_pre_step": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "vector": {
+      "type": "array",
+      "items": {"type": "number"}
+    },
+    "frame239": {
+      "type": "array",
+      "minItems": 239,
+      "maxItems": 239,
+      "items": {"type": "number"}
+    },
+    "tensor": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {"type": "number"},
+          {"type": "array", "items": {"type": "number"}}
+        ]
+      }
+    },
+    "numericMap": {
+      "type": "object",
+      "additionalProperties": {"type": "number"}
+    },
+    "booleanMap": {
+      "type": "object",
+      "additionalProperties": {"type": "boolean"}
+    }
+  }
+}

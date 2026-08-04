@@ -1,0 +1,15 @@
+{
+  "diagnostic_id": "61",
+  "errors": [
+    "diag_61 requires the real same-state PhysX branch bank"
+  ],
+  "evidence": {
+    "A_mix": "legacy_quarantined",
+    "PPO_used": false,
+    "decision_variable_F": "UNKNOWN",
+    "raw_human_reference_positive": false
+  },
+  "status": "SKIPPED_DEPENDENCY",
+  "summary": "frozen robot-domain prior lacks one of its own required real evidence banks",
+  "warnings": []
+}

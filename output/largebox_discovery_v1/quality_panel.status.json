@@ -1,0 +1,54 @@
+{
+  "diagnostic_id": "40",
+  "errors": [],
+  "evidence": {
+    "collector_mode": "controlled_environment",
+    "common_sigma": 0.0,
+    "metric_combination": "none; strict tolerant Pareto partial order only",
+    "optional_unavailable_fields": [
+      "contact_mode_agreement (reference contact label absent)",
+      "torque_saturation (actuator effort bound absent)"
+    ],
+    "pareto_pairs": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/tables/quality_pareto_pairs.parquet",
+    "primary_outcomes": [
+      {
+        "higher_is_better": true,
+        "name": "motion_complete",
+        "tolerance": 0.0
+      },
+      {
+        "higher_is_better": false,
+        "name": "failure",
+        "tolerance": 0.0
+      },
+      {
+        "higher_is_better": true,
+        "name": "reference_progress",
+        "tolerance": 0.01
+      },
+      {
+        "higher_is_better": true,
+        "name": "survival",
+        "tolerance": 1.0
+      },
+      {
+        "higher_is_better": false,
+        "name": "joint_limit_incidence",
+        "tolerance": 0.01
+      },
+      {
+        "higher_is_better": false,
+        "name": "undesired_contacts",
+        "tolerance": 0.01
+      }
+    ],
+    "quality_panel": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/quality_panel.parquet",
+    "quality_panel_sha256": "7263916dbf0c5fae3bb6c61f675737fbe08582b4000cccbb9369b860c4568d87",
+    "row_count": 960,
+    "source_classifier_used_as_reward": false,
+    "strict_same_snapshot_pareto_pair_count": 3632
+  },
+  "status": "PASS",
+  "summary": "canonical PhysX trajectories were reduced to an independent outcome panel",
+  "warnings": []
+}

@@ -1,0 +1,44 @@
+{
+  "diagnostic_id": "11",
+  "errors": [],
+  "evidence": {
+    "duplicate_phases": 0,
+    "exact_restore_digest": "f83c706cfed17a59bda34ddc8067e93d083535ff26c930d4dd2945dd260d227a",
+    "frozen_semantics": {
+      "protocol_details": {
+        "after_done": "do_not_reset_and_crop_each_trajectory_at_first_done",
+        "clean_initial_state": "noise_free_reference_reset_snapshot",
+        "controlled_environment_randomness": "shared_observation_and_push_streams_from_NoiseBank",
+        "duplicate_phases_allowed_with_unique_snapshot_ids": true,
+        "native_stochastic_coupling": "shared_standard_epsilon_per_snapshot_with_checkpoint_learned_std",
+        "nonclean_initial_state": "shared_controlled_noisy_snapshot_from_NoiseBank",
+        "phase_grid": "round(linspace(configured_motion_start_phase, motion_num_frames_minus_2)) independent of rollout horizon",
+        "phase_grid_reason": "horizon is a maximum rollout length and must not collapse a 325-frame motion to phase zero; trajectories crop at first done",
+        "tensor_timing": {
+          "observation_state_reference_action": "pre_step",
+          "reward_done_outcome": "post_step"
+        }
+      },
+      "validation_protocols": {
+        "clean_mean": "clean snapshot, policy mean, observation noise off, pushes off",
+        "controlled_noise": "common_action_noise at frozen sigma 0.25 from shared controlled noisy snapshot and shared environment streams",
+        "controlled_noise_sigma": 0.25,
+        "summary_checkpoint_update": 500,
+        "training_like": "shared controlled noisy snapshot, production observation noise and interval pushes driven by shared NoiseBank streams, checkpoint learned std with shared standard epsilon"
+      }
+    },
+    "phase_max": 323.0,
+    "phase_min": 0.0,
+    "reset_joint_delta_abs_max": 0.09996902942657471,
+    "snapshot_bank": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/snapshot_bank.pt",
+    "snapshot_bank_sha256": "1691bb23435f255ce525898d9d9a4907346e3cade1607a7ec6c0ca6d19a27ed6",
+    "snapshot_count": 64,
+    "snapshot_seed": 20260803,
+    "snapshot_startup_fingerprint": "cec741bea21ff40122b317c6fbf95a3c9f7118838cd6088ad028a00312e50054",
+    "startup_randomization_sha256": "cec741bea21ff40122b317c6fbf95a3c9f7118838cd6088ad028a00312e50054",
+    "unique_phase_count": 64
+  },
+  "status": "PASS",
+  "summary": "canonical clean and NoiseBank-controlled snapshot states were captured",
+  "warnings": []
+}

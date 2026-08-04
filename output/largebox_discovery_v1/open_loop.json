@@ -1,0 +1,12 @@
+{
+  "diagnostic_id": "25",
+  "errors": [
+    "Isaac/PhysX open-loop replay could not run: DependencyUnavailable: canonical action.mean lacks 50 valid steps for snapshot-0054-phase-00277"
+  ],
+  "evidence": {},
+  "status": "SKIPPED_DEPENDENCY",
+  "summary": "open-loop replay awaits canonical assets and the real Isaac adapter",
+  "warnings": [
+    "missing simulator assets are not scientific failure evidence"
+  ]
+}

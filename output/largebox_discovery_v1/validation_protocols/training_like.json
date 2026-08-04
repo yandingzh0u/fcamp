@@ -1,0 +1,14 @@
+{
+  "checkpoint_sha256": "b17d33a6460d453453f960a61840db3397b5756a20f475b5497a222934fb3b85",
+  "checkpoint_update": 500,
+  "metrics": {
+    "failure_frac": 0.078125,
+    "motion_complete_frac": 0.921875,
+    "reference_progress_mean": 0.9756461977958679,
+    "return_mean": 10.327446937561035,
+    "steps_mean": 154.609375
+  },
+  "protocol": "training_like",
+  "source_collector_mode": "native_stochastic",
+  "stochastic_coupling": "shared_epsilon_times_checkpoint_learned_std"
+}

@@ -1,0 +1,10 @@
+{
+  "diagnostic_id": "38",
+  "errors": [
+    "diag_31 artifact is missing: /home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/pairwise_source_matrix.status.json"
+  ],
+  "evidence": {},
+  "status": "SKIPPED_DEPENDENCY",
+  "summary": "domain-triangle summary awaits every valid Stage-3 artifact",
+  "warnings": []
+}

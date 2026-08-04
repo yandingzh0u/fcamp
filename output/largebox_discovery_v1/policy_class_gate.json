@@ -1,0 +1,23 @@
+{
+  "diagnostic_id": "27",
+  "errors": [],
+  "evidence": {
+    "decision_variable_R": "UNKNOWN",
+    "gate": "UNKNOWN",
+    "missing_diagnostics": [
+      "24"
+    ],
+    "observed_statuses": {
+      "21": "PASS",
+      "22": "PASS",
+      "23": "FAIL",
+      "25": "SKIPPED_DEPENDENCY",
+      "26": "PASS"
+    }
+  },
+  "status": "SKIPPED_DEPENDENCY",
+  "summary": "policy-class gate remains UNKNOWN because prerequisite artifacts are missing",
+  "warnings": [
+    "missing assets are not classified as a Red policy-class result"
+  ]
+}

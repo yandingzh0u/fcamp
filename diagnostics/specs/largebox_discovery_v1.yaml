@@ -1,0 +1,756 @@
+{
+  "schema_version": "1.0.0",
+  "suite_id": "largebox_discovery_v1",
+  "suite_version": "1.0.0",
+  "description": "Frozen AMP Research Discovery Suite for the largebox task only.",
+  "repo_root": ".",
+  "output_dir": "output/largebox_discovery_v1",
+  "inputs": {
+    "config": "configs/fixed_reward_largebox.yaml",
+    "primary_checkpoint": "runs/fixed_reward_holosoma_geometry_ckpts_u200_s42_20260802_020905/checkpoints/update_0200.pt",
+    "checkpoint_globs": [
+      "runs/fixed_reward_holosoma_geometry_ckpts_u200_s42_20260802_020905/checkpoints/update_*.pt",
+      "runs/largebox_discovery_dense_*/checkpoints/update_*.pt"
+    ],
+    "resume_probe_a": "runs/discovery_resume_probe_a_u201_s42_20260804/checkpoints/update_0201.pt",
+    "resume_probe_b": "runs/discovery_resume_probe_b_u201_s42_20260804/checkpoints/update_0201.pt",
+    "restart_vs_uninterrupted_audit": "runs/largebox_discovery_dense_u274_u276_s42_20260804/resume_vs_uninterrupted_u276.json",
+    "legacy_domain_manifest": "runs/discovery_legacy_inputs/manifest.json",
+    "domain_checkpoints": {
+      "A_amp": "runs/discovery_legacy_inputs/A_amp_official_u350/checkpoints/update_0350.pt"
+    },
+    "domain_source_snapshots": {
+      "A_amp": "runs/discovery_legacy_inputs/A_amp_official_u350/source_snapshot.tar.gz"
+    }
+  },
+  "collection": {
+    "num_envs": 64,
+    "num_snapshots": 64,
+    "horizon_control_steps": 325,
+    "phase_strategy": "evenly_spaced",
+    "dense_training_auto_execute": false,
+    "snapshot_seed": 20260803,
+    "collector_seed": 20260803,
+    "common_action_noise_scales": [0.10, 0.25, 0.50],
+    "canonical_checkpoint_updates": [50, 100, 150, 200, 210, 220, 230, 240, 250, 276, 300, 350, 400, 450, 500],
+    "canonical_run_preferences": [
+      "fixed_reward_holosoma_geometry_ckpts_u200_s42_20260802_020905",
+      "largebox_discovery_dense_u200_u300_s42_20260804",
+      "largebox_discovery_dense_u300_u500_s42_20260804"
+    ],
+    "audit_only_run_patterns": ["largebox_discovery_dense_u274_u276_s42_20260804"],
+    "trajectory_split_fractions": [0.70, 0.15, 0.15],
+    "trajectory_split_seed": 20260803,
+    "protocol_details": {
+      "phase_grid": "round(linspace(configured_motion_start_phase, motion_num_frames_minus_2)) independent of rollout horizon",
+      "phase_grid_reason": "horizon is a maximum rollout length and must not collapse a 325-frame motion to phase zero; trajectories crop at first done",
+      "duplicate_phases_allowed_with_unique_snapshot_ids": true,
+      "after_done": "do_not_reset_and_crop_each_trajectory_at_first_done",
+      "clean_initial_state": "noise_free_reference_reset_snapshot",
+      "nonclean_initial_state": "shared_controlled_noisy_snapshot_from_NoiseBank",
+      "controlled_environment_randomness": "shared_observation_and_push_streams_from_NoiseBank",
+      "native_stochastic_coupling": "shared_standard_epsilon_per_snapshot_with_checkpoint_learned_std",
+      "tensor_timing": {
+        "observation_state_reference_action": "pre_step",
+        "reward_done_outcome": "post_step"
+      }
+    },
+    "validation_protocols": {
+      "summary_checkpoint_update": 500,
+      "clean_mean": "clean snapshot, policy mean, observation noise off, pushes off",
+      "training_like": "shared controlled noisy snapshot, production observation noise and interval pushes driven by shared NoiseBank streams, checkpoint learned std with shared standard epsilon",
+      "controlled_noise": "common_action_noise at frozen sigma 0.25 from shared controlled noisy snapshot and shared environment streams",
+      "controlled_noise_sigma": 0.25
+    },
+    "imitation_contract": {
+      "source_commit": "6901e302499711e2207687e1342348a4078330f8",
+      "frame_dim": 239,
+      "window_steps": 10,
+      "key_body_names": [
+        "left_ankle_roll_link", "right_ankle_roll_link", "head_link",
+        "left_wrist_yaw_link", "right_wrist_yaw_link"
+      ],
+      "joint_rotations": 30,
+      "actuated_dof_velocities": 29,
+      "agent_negative_frame": "PhysX key-body readback via get_imitation_policy_frame",
+      "reference_positive_frame": "URDF FK plus left-frame velocity via get_amp_expert_frame_at_times",
+      "fk_aligned_agent_frame_role": "gap decomposition only; forbidden as a replacement for the standard AMP negative",
+      "window_canonicalization": "root xy relative to newest frame; root z remains absolute"
+    }
+  },
+  "protocol_amendments": [
+    {
+      "id": "A01_replace_unsaved_u275_with_mainline_u276",
+      "time": "2026-08-04T11:00:00Z",
+      "before_formal_canonical_collection": true,
+      "old_update": 275,
+      "new_update": 276,
+      "reason": "save_every=2 produced no mainline u275 entity; a u274 resume branch was empirically reproducible as a restart but diverged from uninterrupted u276 because simulator state is not checkpointed",
+      "audit_only_branch": "runs/largebox_discovery_dense_u274_u276_s42_20260804",
+      "selection_guard": "use the physically existing uninterrupted-mainline u276; never substitute the audit-only branch"
+    },
+    {
+      "id": "A02_quarantine_deprecated_A_mix",
+      "time": "2026-08-04T19:30:00+08:00",
+      "before_formal_canonical_collection": true,
+      "excluded_domain": "A_mix",
+      "replacement_domain": "T_u200",
+      "reason": "the repository owner explicitly identified the old causal-GRU/Flow-CPS A_mix implementation as deprecated and prohibited restoring or loading it",
+      "selection_guard": "A_mix artifacts may be hashed as historical audit evidence only; no checkpoint loading, rollout collection, classifier training, reward training, or scientific gate may consume them",
+      "five_domain_contract": ["K", "T_u200", "T_u500", "A_amp", "B"]
+    },
+    {
+      "id": "A03_record_unknown_without_failing_open",
+      "time": "2026-08-04T20:00:00+08:00",
+      "before_formal_canonical_collection": true,
+      "reason": "summary, family-screener, and final-report nodes must still record UNKNOWN when a real dependency is unavailable; otherwise one absent branch asset suppresses the requested complete diagnostic TXT",
+      "dependency_policy": "recorded_valid accepts PASS, FAIL, and SKIPPED_DEPENDENCY but never INVALID_PROTOCOL",
+      "scientific_guard": "SKIPPED_DEPENDENCY is mapped only to UNKNOWN and can never become PASS, FAIL, or a selected family"
+    }
+  ],
+  "analysis_protocols": {
+    "policy_class": {
+      "primary_teacher_checkpoint_update": 500,
+      "auxiliary_teacher_checkpoint_updates": [200, 230],
+      "required_primary_teacher_motion_completion_min": 0.90,
+      "seeds": [20260803, 20260804, 20260805],
+      "reference_phase_offsets": [-16, -8, -4, -2, -1, 0, 1, 2, 4, 8, 16],
+      "history_steps_for_aliasing": [1, 2, 4, 8, 16, 32],
+      "history_steps_for_bc": [1, 4, 8, 16, 32],
+      "knn_k": 10,
+      "maximum_probe_samples": 100000,
+      "maximum_knn_samples": 20000,
+      "action_difference_thresholds": "training_split_adjacent_action_distance_quantiles_0.50_0.90_0.95_with_0.95_primary",
+      "probe_models": {
+        "mlp_hidden_dims": [256, 256],
+        "gru_hidden_dim": 256,
+        "gru_layers": 1,
+        "epochs_max": 50,
+        "batch_size": 1024,
+        "optimizer": "AdamW",
+        "learning_rate": 0.0003,
+        "early_stopping_patience": 8,
+        "checkpoint_selection": "best_validation_loss_test_untouched"
+      },
+      "contiguous_phase_holdout": [0.40, 0.55],
+      "full_observation_sanity_action_nrmse_max": 0.10,
+      "phase_recoverability_relative_to_constant_circular_baseline_min": 0.10,
+      "reference_ablation_delays": [1, 2, 4, 8, 16],
+      "reference_free_B_domain": {
+        "model": "GRU",
+        "history_steps": 32,
+        "seed": 20260803,
+        "selection": "preregistered_maximum_context_not_posthoc_best",
+        "collector_modes": ["clean_mean", "controlled_environment", "common_action_noise"],
+        "common_action_noise_scales": [0.10, 0.25, 0.50],
+        "required_output": "canonical_B_rollout_index.parquet"
+      },
+      "open_loop_replay": {
+        "horizon_control_steps": 50,
+        "exact_snapshot_replay_role": "deterministic numerical identity sanity only",
+        "exact_identity_action_atol": 0.000001,
+        "initial_joint_position_perturbation_fraction_of_joint_range": [0.001, 0.005, 0.01],
+        "perturbation_direction": "shared_Rademacher_from_NoiseBank",
+        "comparison": "recorded_nominal_action_open_loop_vs_teacher_feedback_from_same_perturbed_snapshot"
+      }
+    },
+    "source_classifier": {
+      "seeds": [20260803, 20260804, 20260805, 20260806, 20260807],
+      "model": "standardized_balanced_logistic_regression",
+      "calibration": "sigmoid_3fold_train_only",
+      "max_iterations": 1000
+    },
+    "effective_overlap": {
+      "knn_neighbors": 5,
+      "within_domain_radius_quantile": 0.95,
+      "posterior_overlap_taus": [0.05, 0.10, 0.20],
+      "density_ratio_probability_epsilon": 0.000001,
+      "ratio_sensitivity_clips": [10, 20, 100],
+      "bootstrap_replicates": 500,
+      "bootstrap_confidence": 0.95,
+      "gate_ess_variant": "unclipped"
+    },
+    "temporal_windows": {
+      "steps": 10,
+      "stride": 1,
+      "require_complete_alive_window": true,
+      "allow_reset_crossing": false,
+      "allow_wrap_crossing": false,
+      "endpoint_metadata": true
+    },
+    "domain_triangle_domains": {
+      "protocol_version": "largebox_domain_triangle_v1",
+      "primary_collector_mode": "controlled_environment",
+      "failure_label": "trajectory_eventual",
+      "selection_guard": "the five primary domains are frozen before formal collection; clean_mean and common_action_noise are supplementary domains only and may not replace or mix with the primary controlled_environment bundle",
+      "catalog": [
+        {
+          "name": "K",
+          "family": "K",
+          "rollout_index": "canonical_rollout_index.parquet",
+          "frame_role": "reference_expert",
+          "failure_label": "trajectory_eventual",
+          "filters": {
+            "policy_domain": "teacher_fixed_reward",
+            "checkpoint_update": 500,
+            "collector_mode": "controlled_environment",
+            "common_sigma": 0.0,
+            "eligible_for_primary_overlap": true
+          }
+        },
+        {
+          "name": "T_u200",
+          "family": "T_early",
+          "rollout_index": "canonical_rollout_index.parquet",
+          "frame_role": "agent_physx",
+          "failure_label": "trajectory_eventual",
+          "filters": {
+            "policy_domain": "teacher_fixed_reward",
+            "checkpoint_update": 200,
+            "collector_mode": "controlled_environment",
+            "common_sigma": 0.0,
+            "eligible_for_primary_overlap": true
+          }
+        },
+        {
+          "name": "T_u500",
+          "family": "T",
+          "rollout_index": "canonical_rollout_index.parquet",
+          "frame_role": "agent_physx",
+          "failure_label": "trajectory_eventual",
+          "filters": {
+            "policy_domain": "teacher_fixed_reward",
+            "checkpoint_update": 500,
+            "collector_mode": "controlled_environment",
+            "common_sigma": 0.0,
+            "eligible_for_primary_overlap": true
+          }
+        },
+        {
+          "name": "A_amp",
+          "family": "A_amp",
+          "rollout_index": "canonical_A_amp_rollout_index.parquet",
+          "frame_role": "agent_physx",
+          "failure_label": "trajectory_eventual",
+          "filters": {
+            "policy_domain": "A_amp_official",
+            "checkpoint_update": 350,
+            "collector_mode": "controlled_environment",
+            "common_sigma": 0.0,
+            "eligible_for_primary_overlap": true
+          }
+        },
+        {
+          "name": "B",
+          "family": "B",
+          "rollout_index": "canonical_B_rollout_index.parquet",
+          "frame_role": "agent_physx",
+          "failure_label": "trajectory_eventual",
+          "filters": {
+            "policy_domain": "reference_free_B",
+            "checkpoint_id": "GRU-H32-seed20260803",
+            "checkpoint_lineage_id": "diag24-bc-v1",
+            "collector_mode": "controlled_environment",
+            "common_sigma": 0.0,
+            "eligible_for_primary_overlap": true
+          }
+        }
+      ]
+    },
+    "conditional_overlap": {
+      "phase_bins": 16,
+      "phase_range": [0.0, 1.0],
+      "contact_strata": "observed_foot_contact_bitmask",
+      "failure_strata": [false, true],
+      "minimum_train_samples_per_domain": 256,
+      "minimum_validation_samples_per_domain": 64,
+      "minimum_test_samples_per_domain": 128,
+      "sparse_stratum_status": "SKIPPED_DEPENDENCY"
+    },
+    "offline_amp_critic": {
+      "source_commit": "6901e302499711e2207687e1342348a4078330f8",
+      "positive_domains": ["K", "T_u500"],
+      "negative_domain": "A_amp",
+      "seeds": [20260803, 20260804, 20260805, 20260806, 20260807],
+      "hidden_dims": [1024, 512],
+      "learning_rate": 0.00025,
+      "optimizer": "sgd_momentum",
+      "momentum": 0.9,
+      "weight_decay": 0.0001,
+      "gradient_penalty": 10.0,
+      "logit_regularization": 0.01,
+      "reward_scale": 2.0,
+      "reward_epsilon": 0.0001,
+      "normalizer_clip": 10.0,
+      "balanced_train_windows_per_domain_max": 32768,
+      "batch_size_per_class": 1024,
+      "epochs": 20,
+      "checkpoint_selection": "final_epoch_no_validation_selection"
+    },
+    "reward_reliability": {
+      "critic_family": "standard_commit_6901_amp_discriminator",
+      "domain_edges": "all_ordered_pairs_without_self_among_K_T_u200_T_u500_A_amp_B",
+      "edge_semantics": "source_domain_is_negative_and_destination_domain_is_positive",
+      "critic_protocol_ref": "analysis_protocols.offline_amp_critic",
+      "seeds": [20260803, 20260804, 20260805, 20260806, 20260807],
+      "normalizer_fit": "balanced_source_and_destination_train_split_only_then_frozen",
+      "training_split": "train",
+      "held_out_state_bank": "one_fixed_balanced_test_split_union_per_ordered_edge_shared_by_all_five_seeds",
+      "reward_formula": "2*(-log(max(1-sigmoid(logit),1e-4)))",
+      "required_seed_metrics": [
+        "pairwise_spearman", "icc_consistency", "sign_disagreement",
+        "top_decile_overlap", "bottom_decile_overlap"
+      ],
+      "source_classifier_scores_for_reward_icc": "forbidden",
+      "reverse_edge_reuse": "forbidden_train_each_direction_explicitly"
+    },
+    "reward_validity": {
+      "primary_pareto_outcomes": [
+        {"name": "motion_complete", "higher_is_better": true, "tolerance": 0.0},
+        {"name": "failure", "higher_is_better": false, "tolerance": 0.0},
+        {"name": "reference_progress", "higher_is_better": true, "tolerance": 0.01},
+        {"name": "survival", "higher_is_better": true, "tolerance": 1.0},
+        {"name": "joint_limit_incidence", "higher_is_better": false, "tolerance": 0.01},
+        {"name": "undesired_contacts", "higher_is_better": false, "tolerance": 0.01}
+      ],
+      "secondary_unweighted_panel": [
+        "anchor_error", "body_error", "joint_error", "contact_mode_agreement",
+        "action_jerk", "torque_saturation_if_available", "mechanical_power_if_available"
+      ],
+      "branch_horizons": [1, 5, 10, 25, 50],
+      "checkpoint_branch_updates": [200, 210, 220, 230, 240, 250, 276, 300, 400, 500],
+      "action_mean_interpolation_alphas": [0.25, 0.50, 0.75],
+      "action_perturbation_scales": [0.05, 0.10, 0.25],
+      "action_perturbation_scale_basis": "per_dimension_train_split_clean_teacher_action_IQR",
+      "minimum_distinct_branch_sources": 3,
+      "cem": {
+        "horizon": 10,
+        "population": 256,
+        "elite_count": 32,
+        "iterations": 5,
+        "initial_std_in_action_scale_units": 0.25,
+        "std_decay": 0.5,
+        "seeds": [20260803, 20260804, 20260805],
+        "paired_bootstrap_replicates": 1000,
+        "significance_alpha": 0.05,
+        "reward_hacking_definition": "significant_reward_gain_with_strict_Pareto_regression_or_clear_failure"
+      },
+      "interventions": {
+        "standardized_static_offset_magnitudes": [0.25, 0.50, 1.0],
+        "static_offset_directions": "shared_Rademacher_per_named_physical_view",
+        "phase_offsets": [-16, -8, -4, -2, -1, 1, 2, 4, 8, 16],
+        "contact_swaps": ["left_right", "temporal_neighbor"],
+        "unsupported_feature_status": "SKIPPED_DEPENDENCY"
+      },
+      "blind_video": {
+        "pair_count": 32,
+        "ordering_seed": 20260803,
+        "anonymous_labels": true,
+        "external_preferences_optional": true
+      }
+    },
+    "local_edge_causality": {
+      "ppo_seeds": [20260803, 20260804, 20260805],
+      "held_out_critic_seeds": [20260803, 20260804, 20260805, 20260806, 20260807],
+      "num_envs": 256,
+      "ppo_updates_per_edge": 50,
+      "evaluation_every_updates": 5,
+      "rollout_steps_per_update": 24,
+      "canonical_evaluation_snapshots": 64,
+      "positive_rollout_mode": "controlled_environment",
+      "positive_window_role": "agent_physx_raw_frame",
+      "amp_source_commit": "6901e302499711e2207687e1342348a4078330f8",
+      "amp_loss_and_reward": "exact_repository_BCE_gradient_penalty_softplus_contract",
+      "edge_selection": {
+        "transition_completion_levels": [0.10, 0.50, 0.90],
+        "candidate_updates": [50, 100, 150, 200, 210, 220, 230, 240, 250, 276, 300, 350, 400, 450, 500],
+        "target_must_strictly_pareto_dominate_source": true,
+        "overlap_gate_ref": "thresholds.empirical_effective_overlap_edge",
+        "selection_per_transition": ["maximum_eligible_overlap", "median_eligible_overlap"],
+        "tie_break": "smallest_update_gap_then_lexicographic_edge_id",
+        "direct_final_control": "earliest_confirmed_lower_quality_checkpoint_to_u500",
+        "selection_before_online_updates": true
+      },
+      "same_policy_class_variants": [
+        "frozen_discriminator", "online_discriminator",
+        "constant_reward_ppo", "no_update_replay"
+      ],
+      "reference_free_critic_variants": ["privileged_critic", "no_reference_critic"],
+      "edge_factorial_variants": [
+        "forward_frozen", "forward_online", "reverse_frozen", "reverse_online"
+      ],
+      "controls": ["direct_final_amp", "fixed_checkpoint_schedule", "bc_action_distillation"],
+      "evaluation_contract": [
+        "distance_to_source_and_target", "strict_outcome_panel",
+        "held_out_discriminator_reward", "five_seed_reward_icc",
+        "completion_failure_progress", "actor_observation_contract",
+        "left_initial_overlap_region"
+      ],
+      "full_curriculum_forbidden_until_abort_guard_pass": true
+    },
+    "family_screeners": {
+      "paired_common_coordinate": {
+        "paired_domains": ["K", "T_u500"],
+        "pair_key": ["snapshot_id", "phase", "window_endpoint"],
+        "input": "exact_chronological_10x239_raw_amp_windows",
+        "linear_models": ["CCA", "PLS"],
+        "linear_latent_dim": 32,
+        "contrastive_encoder_hidden_dims": [256, 256],
+        "contrastive_latent_dim": 32,
+        "contrastive_temperature": 0.07,
+        "batch_size": 1024,
+        "epochs_max": 50,
+        "early_stopping_patience": 8,
+        "seeds": [20260803, 20260804, 20260805],
+        "model_selection": "validation_cross_domain_retrieval_test_untouched",
+        "retrieval_target": "same_phase_bin_and_snapshot_segment",
+        "phase_bins": 16,
+        "raw_baseline": "standardized_unprojected_same_physical_window",
+        "forbidden_uses": ["PPO_reward", "posthoc_latent_dimension_selection"]
+      },
+      "frozen_robot_domain_prior": {
+        "training_domains": "successful_teacher_archive_selected_only_by_preregistered_clean_completion_ge_0.90",
+        "raw_human_reference_positive": false,
+        "model": "denoising_MLP",
+        "hidden_dims": [512, 256],
+        "noise_scales_standardized": [0.01, 0.05, 0.10],
+        "seeds": [20260803, 20260804, 20260805, 20260806, 20260807],
+        "batch_size": 1024,
+        "epochs": 20,
+        "optimizer": "AdamW",
+        "learning_rate": 0.0003,
+        "score": "negative_multiscale_denoising_error",
+        "normalizer": "successful_teacher_train_split_only_then_frozen",
+        "held_out_evaluations": [
+          "checkpoint_reward_landscape", "same_state_strict_pairs",
+          "seed_icc", "existing_CEM_exploit_bank", "early_agent_gradient"
+        ],
+        "PPO": "forbidden_offline_screener_only"
+      },
+      "closed_loop_executability": {
+        "teacher_checkpoint_update": 500,
+        "candidate_phase_offsets": [-64, -32, -16, 0, 16, 32, 64],
+        "candidate_time_scales": [0.75, 1.0, 1.25],
+        "segment_horizon_control_steps": 50,
+        "snapshot_count": 64,
+        "environment_randomness": "same_snapshot_shared_NoiseBank_stream_across_candidates",
+        "label_source": "closed_loop_PhysX_outcomes_only",
+        "success_label": "survives_full_segment_and_no_failure_termination_and_no_joint_limit_event_and_no_undesired_contact_event",
+        "separate_reported_labels": [
+          "segment_complete", "failure", "tracking_loss",
+          "joint_limit_event", "undesired_contact_event"
+        ],
+        "model": "two_layer_MLP_binary_classifier",
+        "hidden_dims": [256, 256],
+        "seeds": [20260803, 20260804, 20260805],
+        "optimizer": "AdamW",
+        "learning_rate": 0.0003,
+        "batch_size": 1024,
+        "epochs_max": 50,
+        "early_stopping_patience": 8,
+        "calibration": "temperature_scaling_validation_only",
+        "held_out_axes": ["phase", "segment", "snapshot"],
+        "name_guard": "policy-relative_closed-loop_executability_not_physical_reachability"
+      }
+    }
+  },
+  "fail_closed": true,
+  "status_values": [
+    "PASS",
+    "FAIL",
+    "INVALID_PROTOCOL",
+    "SKIPPED_DEPENDENCY"
+  ],
+  "terminology": {
+    "allowed": "empirical effective overlap",
+    "forbidden": [
+      "support certificate",
+      "support-connected",
+      "reachable graph",
+      "telescoping density ratio"
+    ]
+  },
+  "frozen_research_boundaries": {
+    "permanently_closed": [
+      "left_ankle_mask",
+      "whole_body_feature_group_removal",
+      "oracle_retained_tracking_Q_as_training_label",
+      "factoramp_random_splice",
+      "lower_demo_agent_auc_improves_reward",
+      "new_handcrafted_joint_group_weights",
+      "full_bridgeamp_development"
+    ],
+    "feature_intervention_role": "source-difference diagnosis only; never a candidate method",
+    "task_isolation": {
+      "task_name": "largebox_plane",
+      "motion_name": "sub3_largebox_003_mj.npz",
+      "must_not_share_with": "spinkick_discovery_v1",
+      "shared_checkpoints": false,
+      "shared_trajectory_splits": false,
+      "shared_conclusions": false
+    },
+    "teacher_student_distinction": "fixed-reward teacher is reference-conditioned; reference-free student capability must be measured first",
+    "clean_validation_role": "clean deterministic capability only; not stochastic closed-loop occupancy",
+    "overlap_semantics": "finite-sample, representation-dependent empirical diagnostic; never mathematical support",
+    "algorithm_scope": "AMP and direct AMP improvements only",
+    "execution_guard": "no complete new algorithm and no 500/2000-update new-method training before the suite decision matrix",
+    "deprecated_domain_guard": "A_mix/FCAMP/H4 is quarantined by owner instruction and replaced by the current-lineage T_u200 execution domain in the five-domain diagnostic matrix"
+  },
+  "collector_modes": {
+    "clean_mean": {
+      "action": "policy_mean",
+      "observation_noise": false,
+      "reset_noise": false,
+      "interval_pushes": false,
+      "startup_randomization": "controlled"
+    },
+    "controlled_environment": {
+      "action": "policy_mean",
+      "randomness": "shared_rng_bank_by_snapshot"
+    },
+    "common_action_noise": {
+      "action": "mu_plus_sigma_common_times_shared_epsilon",
+      "minimum_fixed_scales": 3,
+      "checkpoint_learned_std_allowed": false
+    },
+    "native_stochastic": {
+      "action": "checkpoint_native_normal",
+      "allowed_uses": ["noise_scale_fingerprint_diagnosis"],
+      "excluded_uses": [
+        "primary_overlap",
+        "source_classifier",
+        "local_reward_comparison"
+      ]
+    }
+  },
+  "split_contract": {
+    "inner_split_atomic_units": ["trajectory_id", "snapshot_id"],
+    "outer_holdout_axis": "checkpoint_lineage",
+    "outer_holdout_minimum_lineages": 2,
+    "crossed_design_resolution": "checkpoint-by-snapshot is fully crossed, so checkpoint lineage cannot simultaneously be an inner row-level atomic unit; lineage generalization is a separate outer audit",
+    "forbidden_leakage": [
+      "snapshot_branches_across_splits",
+      "trajectory_windows_across_splits",
+      "native_and_replay_rollouts_of_checkpoint_across_splits",
+      "threshold_or_feature_selection_on_test"
+    ]
+  },
+  "thresholds": {
+    "reference_free_bc_green": {
+      "motion_completion_relative_to_teacher_min": 0.80,
+      "failure_rate_increase_max": 0.10,
+      "action_nrmse_max": 0.20,
+      "minimum_passing_seeds": 2,
+      "total_seeds": 3,
+      "history_steps": [1, 4, 8, 16, 32]
+    },
+    "reference_free_red": {
+      "history_32_action_unpredictable": true,
+      "phase_unrecoverable": true,
+      "bc_closed_loop_fails": true
+    },
+    "empirical_effective_overlap_edge": {
+      "source_auc_max": 0.90,
+      "posterior_overlap_tau": 0.10,
+      "posterior_overlap_fraction_min": 0.10,
+      "forward_knn_coverage_min": 0.20,
+      "reverse_knn_coverage_min": 0.20,
+      "forward_ess_over_n_min": 0.10,
+      "reverse_ess_over_n_min": 0.10,
+      "ess_gate_uses": "unclipped_density_ratio",
+      "reward_icc_min": 0.75,
+      "posterior_overlap_report_taus": [0.05, 0.10, 0.20],
+      "ratio_clips": [10, 20, 100]
+    },
+    "reward_validity_green": {
+      "strict_pareto_pairwise_accuracy_min": 0.65,
+      "same_state_branch_pairwise_accuracy_min": 0.65,
+      "seed_icc_min": 0.75,
+      "clearly_failed_branch_in_reward_top_decile": false,
+      "cem_significant_reward_hacking": false,
+      "branch_horizons": [1, 5, 10, 25, 50]
+    },
+    "single_edge_pass": {
+      "minimum_passing_ppo_seeds": 2,
+      "total_ppo_seeds": 3,
+      "target_distance_reduction_min": 0.30,
+      "final_closer_to_target_than_source": true,
+      "failure_rate_increase_max": 0.10,
+      "task_or_progress_drop_max": 0.05,
+      "held_out_critic_direction_consistent": true,
+      "training_critic_score_only_not_sufficient": true,
+      "evaluation_every_ppo_updates": 5
+    },
+    "curriculum_entry": {
+      "minimum_consecutive_preregistered_no_reference_edges": 3,
+      "must_outperform": [
+        "direct_final_amp",
+        "fixed_checkpoint_schedule",
+        "bc_action_distillation"
+      ]
+    },
+    "paired_common_coordinate_viable": {
+      "latent_source_auc_max": 0.65,
+      "cross_domain_retrieval_min": 0.70,
+      "contact_future_prediction_relative_to_raw_min": 0.80,
+      "latent_pairwise_spearman_min": 0.75,
+      "seeds": 3
+    },
+    "frozen_robot_domain_prior_viable": {
+      "teacher_distribution_is_unique_or_statistically_tied_maximum": true,
+      "same_state_strict_pair_accuracy_min": 0.65,
+      "seed_icc_min": 0.80,
+      "cem_significant_reward_exploit": false
+    },
+    "closed_loop_executability_viable": {
+      "positive_fraction_min": 0.15,
+      "negative_fraction_min": 0.15,
+      "held_out_auroc_min": 0.80,
+      "ece_max": 0.08,
+      "same_state_candidate_pair_accuracy_min": 0.70,
+      "seed_direction_consistent": true
+    }
+  },
+  "decision_variables": {
+    "R": "reference-free policy class can represent the teacher",
+    "T": "robot-domain teacher positive produces stable and valid reward",
+    "E": "local AMP edge is causally learnable",
+    "L": "paired common coordinate is viable",
+    "F": "frozen robot-domain prior is viable",
+    "X": "policy-relative closed-loop executability signal is viable"
+  },
+  "decision_matrix": [
+    {
+      "priority": 1,
+      "rule_id": "R+_T+_E+",
+      "when": {"R": "+", "T": "+", "E": "+"},
+      "family": "effective_overlap_guided_local_adversarial_curriculum"
+    },
+    {
+      "priority": 2,
+      "rule_id": "R+_T+_E-_F+",
+      "when": {"R": "+", "T": "+", "E": "-", "F": "+"},
+      "family": "frozen_robot_domain_motion_prior"
+    },
+    {
+      "priority": 3,
+      "rule_id": "memoryless_R-_history_or_phase+",
+      "when": {"R_memoryless": "-", "history_or_phase_recovery": "+"},
+      "family": "learned_latent_context_or_phase_inference_plus_amp"
+    },
+    {
+      "priority": 4,
+      "rule_id": "L+_domain_gap_persists",
+      "when": {"L": "+", "raw_or_teacher_positive_domain_gap": "persists"},
+      "family": "paired_common_coordinate_amp"
+    },
+    {
+      "priority": 5,
+      "rule_id": "X+_executability_dominant",
+      "when": {"X": "+", "failure_cause": "reference_executability_dominant"},
+      "family": "self_grounded_executability_conditioned_amp"
+    },
+    {
+      "priority": 6,
+      "rule_id": "all_negative",
+      "when": {"R": "-", "T": "-", "E": "-", "L": "-", "F": "-", "X": "-"},
+      "family": "identifiability_audit_plus_explicit_robot_grounding"
+    }
+  ],
+  "stages": [
+    {
+      "id": "0_identity_lineage",
+      "name": "Identity, task, and checkpoint audit",
+      "diagnostics": [
+        {"id": "00", "name": "freeze_manifest", "entrypoint": "tools/diag_00_freeze_manifest.py", "dependencies": [], "expected_outputs": ["manifest.json"], "status_artifact": "manifest.json", "required": true, "blocking": true},
+        {"id": "01", "name": "task_identity", "entrypoint": "tools/diag_01_task_identity.py", "dependencies": ["00"], "expected_outputs": ["task_identity.json"], "status_artifact": "task_identity.json", "required": true, "blocking": true},
+        {"id": "02", "name": "checkpoint_inventory", "entrypoint": "tools/diag_02_checkpoint_inventory.py", "dependencies": ["00", "01"], "expected_outputs": ["checkpoint_inventory.csv", "checkpoint_inventory.status.json"], "status_artifact": "checkpoint_inventory.status.json", "required": true, "blocking": true},
+        {"id": "03", "name": "resume_reproducibility", "entrypoint": "tools/diag_03_resume_reproducibility.py", "dependencies": ["02"], "expected_outputs": ["resume_diff.json"], "status_artifact": "resume_diff.json", "required": true, "blocking": true},
+        {"id": "04", "name": "validation_protocol_gap", "entrypoint": "tools/diag_04_validation_protocol_gap.py", "dependencies": ["12"], "expected_outputs": ["protocol_gap.json"], "status_artifact": "protocol_gap.json", "required": true, "blocking": false},
+        {"id": "05", "name": "teacher_learning_curve", "entrypoint": "tools/diag_05_teacher_learning_curve.py", "dependencies": ["02"], "expected_outputs": ["teacher_transition.json", "tables/teacher_learning_curve.csv"], "status_artifact": "teacher_transition.json", "required": true, "blocking": false}
+      ]
+    },
+    {
+      "id": "1_canonical_banks",
+      "name": "Teacher recovery and canonical banks",
+      "diagnostics": [
+        {"id": "10", "name": "dense_teacher_checkpoints", "entrypoint": "tools/diag_10_dense_teacher_checkpoints.py", "dependencies": ["03", "05"], "expected_outputs": ["checkpoints/dense_checkpoint_inventory.csv"], "status_artifact": "checkpoints/dense_checkpoint_inventory.status.json", "required": true, "blocking": true},
+        {"id": "11", "name": "build_snapshot_bank", "entrypoint": "tools/diag_11_build_snapshot_bank.py", "dependencies": ["00", "01"], "expected_outputs": ["snapshot_bank.pt"], "status_artifact": "snapshot_bank.status.json", "required": true, "blocking": true},
+        {"id": "12", "name": "collect_canonical_rollouts", "entrypoint": "tools/diag_12_collect_canonical_rollouts.py", "dependencies": ["10", "11"], "expected_outputs": ["canonical_rollout_index.parquet"], "status_artifact": "canonical_rollout_index.status.json", "required": true, "blocking": true},
+        {"id": "13", "name": "collection_fingerprint_suite", "entrypoint": "tools/diag_13_collection_fingerprint_suite.py", "dependencies": ["12"], "expected_outputs": ["fingerprints.json"], "status_artifact": "fingerprints.json", "required": true, "blocking": false},
+        {"id": "14", "name": "trajectory_split_audit", "entrypoint": "tools/diag_14_trajectory_split_audit.py", "dependencies": ["12"], "expected_outputs": ["split_audit.json"], "status_artifact": "split_audit.json", "required": true, "blocking": true},
+        {"id": "15", "name": "action_path_equivalence", "entrypoint": "tools/diag_15_action_path_equivalence.py", "dependencies": ["12"], "expected_outputs": ["action_equivalence.json"], "status_artifact": "action_equivalence.json", "required": true, "blocking": true}
+      ]
+    },
+    {
+      "id": "2_policy_class",
+      "name": "Reference-free policy class and observability",
+      "diagnostics": [
+        {"id": "20", "name": "observation_partition", "entrypoint": "tools/diag_20_observation_partition.py", "dependencies": ["01"], "expected_outputs": ["observation_spec.json"], "status_artifact": "observation_spec.status.json", "required": true, "blocking": true},
+        {"id": "21", "name": "counterfactual_reference_dependence", "entrypoint": "tools/diag_21_counterfactual_reference_dependence.py", "dependencies": ["12", "20"], "expected_outputs": ["reference_sensitivity.json"], "status_artifact": "reference_sensitivity.json", "required": true, "blocking": false},
+        {"id": "22", "name": "state_aliasing", "entrypoint": "tools/diag_22_state_aliasing.py", "dependencies": ["12", "20"], "expected_outputs": ["aliasing.json"], "status_artifact": "aliasing.json", "required": true, "blocking": false},
+        {"id": "23", "name": "action_and_phase_predictability", "entrypoint": "tools/diag_23_action_and_phase_predictability.py", "dependencies": ["14", "20"], "expected_outputs": ["predictability.json"], "status_artifact": "predictability.json", "required": true, "blocking": false},
+        {"id": "24", "name": "reference_free_bc_probe", "entrypoint": "tools/diag_24_reference_free_bc_probe.py", "dependencies": ["23"], "expected_outputs": ["bc_probe.json", "tables/reference_free_bc.csv", "models/diag24/gru_h32_seed_20260803.pt", "canonical_B_rollout_index.parquet"], "status_artifact": "bc_probe.json", "required": true, "blocking": false},
+        {"id": "25", "name": "open_loop_teacher_replay", "entrypoint": "tools/diag_25_open_loop_teacher_replay.py", "dependencies": ["12"], "expected_outputs": ["open_loop.json"], "status_artifact": "open_loop.json", "required": true, "blocking": false},
+        {"id": "26", "name": "reference_ablation_rollouts", "entrypoint": "tools/diag_26_reference_ablation_rollouts.py", "dependencies": ["12", "20"], "expected_outputs": ["reference_ablation.json"], "status_artifact": "reference_ablation.json", "required": true, "blocking": false},
+        {"id": "27", "name": "policy_class_summary", "entrypoint": "tools/diag_27_policy_class_summary.py", "dependencies": ["21", "22", "23", "24", "25", "26"], "dependency_policy": "recorded_valid", "expected_outputs": ["policy_class_gate.json"], "status_artifact": "policy_class_gate.json", "required": true, "blocking": false}
+      ]
+    },
+    {
+      "id": "3_domain_triangle",
+      "name": "Domain triangle and empirical effective overlap",
+      "diagnostics": [
+        {"id": "30", "name": "build_domain_triangle", "entrypoint": "tools/diag_30_build_domain_triangle.py", "dependencies": ["12", "14", "20", "24"], "dependency_policy": "completed_valid", "expected_outputs": ["domain_triangle_index.json"], "status_artifact": "domain_triangle_index.status.json", "required": true, "blocking": true},
+        {"id": "31", "name": "pairwise_source_matrix", "entrypoint": "tools/diag_31_pairwise_source_matrix.py", "dependencies": ["30"], "expected_outputs": ["tables/source_auc_matrix.csv"], "status_artifact": "pairwise_source_matrix.status.json", "required": true, "blocking": false},
+        {"id": "32", "name": "reference_readback_execution_gap", "entrypoint": "tools/diag_32_reference_readback_execution_gap.py", "dependencies": ["12"], "expected_outputs": ["gap_decomposition.json"], "status_artifact": "gap_decomposition.json", "required": true, "blocking": false},
+        {"id": "33", "name": "causal_feature_decomposition", "entrypoint": "tools/diag_33_causal_feature_decomposition.py", "dependencies": ["30"], "expected_outputs": ["causal_sources.json"], "status_artifact": "causal_sources.json", "required": true, "blocking": false},
+        {"id": "34", "name": "effective_overlap_matrix", "entrypoint": "tools/diag_34_effective_overlap_matrix.py", "dependencies": ["30", "31"], "expected_outputs": ["tables/effective_overlap_forward.csv", "tables/effective_overlap_reverse.csv"], "status_artifact": "effective_overlap_matrix.status.json", "required": true, "blocking": false},
+        {"id": "35", "name": "ratio_and_reward_reliability", "entrypoint": "tools/diag_35_ratio_and_reward_reliability.py", "dependencies": ["34"], "expected_outputs": ["ratio_reliability.json", "tables/reward_icc_matrix.csv", "models/diag35/index.json"], "status_artifact": "ratio_reliability.json", "required": true, "blocking": false},
+        {"id": "36", "name": "teacher_positive_substitution", "entrypoint": "tools/diag_36_teacher_positive_substitution.py", "dependencies": ["35"], "expected_outputs": ["positive_substitution.json"], "status_artifact": "positive_substitution.json", "required": true, "blocking": false},
+        {"id": "37", "name": "overlap_by_phase_contact", "entrypoint": "tools/diag_37_overlap_by_phase_contact.py", "dependencies": ["34"], "expected_outputs": ["conditional_overlap_matrices.json"], "status_artifact": "conditional_overlap_matrices.json", "required": true, "blocking": false},
+        {"id": "38", "name": "domain_triangle_summary", "entrypoint": "tools/diag_38_domain_triangle_summary.py", "dependencies": ["31", "32", "33", "34", "35", "36", "37"], "dependency_policy": "recorded_valid", "expected_outputs": ["domain_triangle_gate.json"], "status_artifact": "domain_triangle_gate.json", "required": true, "blocking": false}
+      ]
+    },
+    {
+      "id": "4_reward_validity",
+      "name": "Independent reward validity",
+      "diagnostics": [
+        {"id": "40", "name": "independent_quality_panel", "entrypoint": "tools/diag_40_independent_quality_panel.py", "dependencies": ["12"], "expected_outputs": ["quality_panel.parquet"], "status_artifact": "quality_panel.status.json", "required": true, "blocking": true},
+        {"id": "41", "name": "reward_vs_outcomes", "entrypoint": "tools/diag_41_reward_vs_outcomes.py", "dependencies": ["35", "36", "40"], "expected_outputs": ["score_outcome.json"], "status_artifact": "score_outcome.json", "required": true, "blocking": false},
+        {"id": "42", "name": "same_state_short_horizon_branching", "entrypoint": "tools/diag_42_same_state_short_horizon_branching.py", "dependencies": ["11", "12", "40"], "expected_outputs": ["branching.json", "tables/branch_pairwise.csv"], "status_artifact": "branching.json", "required": true, "blocking": false},
+        {"id": "43", "name": "local_action_ranking", "entrypoint": "tools/diag_43_local_action_ranking.py", "dependencies": ["42"], "expected_outputs": ["local_rank.json"], "status_artifact": "local_rank.json", "required": true, "blocking": false},
+        {"id": "44", "name": "reward_exploitability", "entrypoint": "tools/diag_44_reward_exploitability.py", "dependencies": ["42"], "expected_outputs": ["exploitability.json"], "status_artifact": "exploitability.json", "required": true, "blocking": false},
+        {"id": "45", "name": "intervention_sensitivity", "entrypoint": "tools/diag_45_intervention_sensitivity.py", "dependencies": ["42"], "expected_outputs": ["intervention.json"], "status_artifact": "intervention.json", "required": true, "blocking": false},
+        {"id": "46", "name": "blind_video_bank", "entrypoint": "tools/diag_46_blind_video_bank.py", "dependencies": ["42"], "expected_outputs": ["videos/blind_pair_manifest.json"], "status_artifact": "videos/blind_pair_manifest.status.json", "required": true, "blocking": false},
+        {"id": "47", "name": "metric_agreement", "entrypoint": "tools/diag_47_metric_agreement.py", "dependencies": ["41", "42", "43", "44", "45", "46"], "dependency_policy": "recorded_valid", "expected_outputs": ["agreement.json", "reward_validity_gate.json"], "status_artifact": "reward_validity_gate.json", "required": true, "blocking": false}
+      ]
+    },
+    {
+      "id": "5_local_edge_causality",
+      "name": "Local edge causal tests",
+      "diagnostics": [
+        {"id": "50", "name": "select_causal_edges", "entrypoint": "tools/diag_50_select_causal_edges.py", "dependencies": ["05", "34", "38", "47"], "dependency_policy": "completed_valid", "expected_outputs": ["edge_manifest.yaml"], "status_artifact": "edge_manifest.status.json", "required": true, "blocking": true},
+        {"id": "51", "name": "local_reward_landscape", "entrypoint": "tools/diag_51_local_reward_landscape.py", "dependencies": ["50"], "expected_outputs": ["landscape.json"], "status_artifact": "landscape.json", "required": true, "blocking": false},
+        {"id": "52", "name": "single_edge_same_policy_class", "entrypoint": "tools/diag_52_single_edge_same_policy_class.py", "dependencies": ["50", "51"], "expected_outputs": ["edge_runs/same_policy_class/summary.json"], "status_artifact": "edge_runs/same_policy_class/summary.json", "required": true, "blocking": false},
+        {"id": "53", "name": "single_edge_reference_free", "entrypoint": "tools/diag_53_single_edge_reference_free.py", "dependencies": ["24", "50", "51"], "dependency_policy": "completed_valid", "expected_outputs": ["edge_runs/reference_free/summary.json"], "status_artifact": "edge_runs/reference_free/summary.json", "required": true, "blocking": false},
+        {"id": "54", "name": "edge_variants", "entrypoint": "tools/diag_54_edge_variants.py", "dependencies": ["52", "53"], "dependency_policy": "completed_valid", "expected_outputs": ["edge_runs/variants/summary.json"], "status_artifact": "edge_runs/variants/summary.json", "required": true, "blocking": false},
+        {"id": "55", "name": "three_consecutive_edges", "entrypoint": "tools/diag_55_three_consecutive_edges.py", "dependencies": ["54"], "dependency_policy": "completed_valid", "expected_outputs": ["edge_runs/three_edge_chain/summary.json"], "status_artifact": "edge_runs/three_edge_chain/summary.json", "required": true, "blocking": false},
+        {"id": "56", "name": "direct_final_and_fixed_schedule", "entrypoint": "tools/diag_56_direct_final_and_fixed_schedule.py", "dependencies": ["50"], "expected_outputs": ["edge_runs/controls/direct_and_schedule.json"], "status_artifact": "edge_runs/controls/direct_and_schedule.json", "required": true, "blocking": false},
+        {"id": "57", "name": "bc_action_distillation_control", "entrypoint": "tools/diag_57_bc_action_distillation_control.py", "dependencies": ["24", "50"], "dependency_policy": "completed_valid", "expected_outputs": ["edge_runs/controls/bc_distillation.json"], "status_artifact": "edge_runs/controls/bc_distillation.json", "required": true, "blocking": false},
+        {"id": "58", "name": "edge_causal_summary", "entrypoint": "tools/diag_58_edge_causal_summary.py", "dependencies": ["52", "53", "54", "55", "56", "57"], "dependency_policy": "recorded_valid", "expected_outputs": ["edge_gate.json", "tables/edge_transfer.csv"], "status_artifact": "edge_gate.json", "required": true, "blocking": false},
+        {"id": "59", "name": "abort_guard", "entrypoint": "tools/diag_59_abort_guard.py", "dependencies": ["58"], "dependency_policy": "recorded_valid", "expected_outputs": ["abort_guard.json"], "status_artifact": "abort_guard.json", "required": true, "blocking": true}
+      ]
+    },
+    {
+      "id": "6_family_screeners",
+      "name": "Offline family screeners and frozen decision",
+      "diagnostics": [
+        {"id": "60", "name": "paired_common_latent_probe", "entrypoint": "tools/diag_60_paired_common_latent_probe.py", "dependencies": ["38", "47"], "dependency_policy": "recorded_valid", "expected_outputs": ["paired_common_latent_probe.json"], "status_artifact": "paired_common_latent_probe.json", "required": true, "blocking": false},
+        {"id": "61", "name": "teacher_energy_prior_probe", "entrypoint": "tools/diag_61_teacher_energy_prior_probe.py", "dependencies": ["38", "47"], "dependency_policy": "recorded_valid", "expected_outputs": ["teacher_energy_prior_probe.json"], "status_artifact": "teacher_energy_prior_probe.json", "required": true, "blocking": false},
+        {"id": "62", "name": "closed_loop_executability_map", "entrypoint": "tools/diag_62_closed_loop_executability_map.py", "dependencies": ["27", "47"], "dependency_policy": "recorded_valid", "expected_outputs": ["closed_loop_executability_map.json"], "status_artifact": "closed_loop_executability_map.json", "required": true, "blocking": false},
+        {"id": "63", "name": "family_decision_matrix", "entrypoint": "tools/diag_63_family_decision_matrix.py", "dependencies": ["27", "38", "47", "58", "60", "61", "62"], "dependency_policy": "recorded_valid", "expected_outputs": ["family_decision_matrix.json"], "status_artifact": "family_decision_matrix.json", "required": true, "blocking": true},
+        {"id": "64", "name": "render_discovery_report", "entrypoint": "tools/diag_64_render_discovery_report.py", "dependencies": ["63"], "dependency_policy": "completed_valid", "expected_outputs": ["diagnostic_results.txt", "discovery_report.md", "source_and_logs.tar.gz"], "status_artifact": "discovery_report.status.json", "required": true, "blocking": true}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "diagnostic_id": "63",
+  "errors": [],
+  "evidence": {
+    "auxiliary_conditions": {
+      "R_memoryless": "UNKNOWN",
+      "failure_cause": "mixed_or_state_dominant",
+      "history_or_phase_recovery": "UNKNOWN",
+      "raw_or_teacher_positive_domain_gap": "UNKNOWN"
+    },
+    "claims_guard": "the selected family, if any, is only the frozen diagnostic decision; this script proposes or implements no new method",
+    "decision": {
+      "matched_rule_id": null,
+      "reason": "no preregistered row matched; unresolved variables: ['R', 'T', 'E', 'L', 'F']",
+      "selected_family": null,
+      "status": "NO_ELIGIBLE_FAMILY"
+    },
+    "decision_matrix": [
+      {
+        "family": "effective_overlap_guided_local_adversarial_curriculum",
+        "priority": 1,
+        "rule_id": "R+_T+_E+",
+        "when": {
+          "E": "+",
+          "R": "+",
+          "T": "+"
+        }
+      },
+      {
+        "family": "frozen_robot_domain_motion_prior",
+        "priority": 2,
+        "rule_id": "R+_T+_E-_F+",
+        "when": {
+          "E": "-",
+          "F": "+",
+          "R": "+",
+          "T": "+"
+        }
+      },
+      {
+        "family": "learned_latent_context_or_phase_inference_plus_amp",
+        "priority": 3,
+        "rule_id": "memoryless_R-_history_or_phase+",
+        "when": {
+          "R_memoryless": "-",
+          "history_or_phase_recovery": "+"
+        }
+      },
+      {
+        "family": "paired_common_coordinate_amp",
+        "priority": 4,
+        "rule_id": "L+_domain_gap_persists",
+        "when": {
+          "L": "+",
+          "raw_or_teacher_positive_domain_gap": "persists"
+        }
+      },
+      {
+        "family": "self_grounded_executability_conditioned_amp",
+        "priority": 5,
+        "rule_id": "X+_executability_dominant",
+        "when": {
+          "X": "+",
+          "failure_cause": "reference_executability_dominant"
+        }
+      },
+      {
+        "family": "identifiability_audit_plus_explicit_robot_grounding",
+        "priority": 6,
+        "rule_id": "all_negative",
+        "when": {
+          "E": "-",
+          "F": "-",
+          "L": "-",
+          "R": "-",
+          "T": "-",
+          "X": "-"
+        }
+      }
+    ],
+    "decision_variables": {
+      "E": {
+        "evidence_diagnostics": [
+          "58"
+        ],
+        "reason": "diag_58 status is SKIPPED_DEPENDENCY",
+        "value": "UNKNOWN"
+      },
+      "F": {
+        "evidence_diagnostics": [
+          "61"
+        ],
+        "reason": "diag_61 status is SKIPPED_DEPENDENCY",
+        "value": "UNKNOWN"
+      },
+      "L": {
+        "evidence_diagnostics": [
+          "60"
+        ],
+        "reason": "diag_60 status is SKIPPED_DEPENDENCY",
+        "value": "UNKNOWN"
+      },
+      "R": {
+        "evidence_diagnostics": [
+          "27"
+        ],
+        "reason": "diag_27 status is SKIPPED_DEPENDENCY",
+        "value": "UNKNOWN"
+      },
+      "T": {
+        "evidence_diagnostics": [
+          "47"
+        ],
+        "reason": "diag_47 status is SKIPPED_DEPENDENCY",
+        "value": "UNKNOWN"
+      },
+      "X": {
+        "evidence_diagnostics": [
+          "62"
+        ],
+        "reason": "real PhysX candidate grid has no preregistered non-trivial success/failure boundary",
+        "value": "-"
+      }
+    },
+    "input_artifact_sha256": {
+      "closed_loop_executability_map.json": "683607ab59dfc445c5de06d9538cafbba48dbdb7c6de8032ab8b6f86534942da",
+      "domain_triangle_gate.json": "51d6ed60fab04eac3af1ecf743cd45c896dabc31cb83e930d97f9ea23194fa3c",
+      "edge_gate.json": "7ae9e76ad8842a20f6ea1cba20b8097c6b14a52691d1a89b60e47244af087b90",
+      "paired_common_latent_probe.json": "cd3fab83750e90aebada91cf4ea99a1c9e2b83f95dce86aabc6bb5869a4c7219",
+      "policy_class_gate.json": "2af06bbb95ca61d5cdcf52a148e79f3a48290385de6266819d32db319225376c",
+      "reward_validity_gate.json": "f49413497a721c833d994acce8165182549895c7e1edca19a9dda2f195a40a98",
+      "teacher_energy_prior_probe.json": "90ea4ffd6a29c2d8a7d4a188fdb1cafda8fb80ff5222e1b1848c8301125386b5"
+    }
+  },
+  "status": "PASS",
+  "summary": "no preregistered family is currently eligible",
+  "warnings": []
+}

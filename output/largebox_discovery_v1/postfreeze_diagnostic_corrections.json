@@ -1,0 +1,103 @@
+{
+  "schema_version": "1.1.0",
+  "status": "PASS",
+  "recorded_at": "2026-08-04T21:47:19+08:00",
+  "scope": "Fail-closed diagnostic implementation corrections after the first formal run. The 16 GB canonical rollout index, SnapshotBank, scientific thresholds, feature definitions, and frozen decision matrix were not changed or recollected. Corrected downstream diagnostics were rerun in real PhysX where required.",
+  "first_attempt": {
+    "status_sha256": "f9a7f06bdc6added06df05f34e02d2c9ac6f52c4372f4450584c57411fe24a70",
+    "preserved_directory": "failed_attempts/pre_fix_20260804",
+    "protocol_gap_sha256": "7ab44668e6f0ea4e112dfe51d4d09683931c2cf0d74866d8a4cc285662adacc9",
+    "fingerprints_sha256": "931bf0754f1bcf2984b219346eb49f043b85c2b690f704ae6066c935753dc873",
+    "action_equivalence_sha256": "8da42fb0ef019fdd5b1adcca00592c9b30e5de40ae07460d7bc342c6944d367f"
+  },
+  "collection_source_snapshot": {
+    "path": "source_snapshot.tar.gz",
+    "sha256": "cce6b4a588b02aa68c8d6ba926dfe6ec7c60cbc57ae7133a04080b9d418631bc"
+  },
+  "corrected_analysis_source_snapshot": {
+    "path": "postfreeze_analysis_source_snapshot.tar.gz",
+    "sha256": "ffa056fa933aae83c205d46d572691131f648bf040cdabbb9b1020926108a95f",
+    "members_sha256": "bb72f0189793e5ba290bde4619d8da2bbdce4afae381f299adc01407d6a23017",
+    "file_count": 185
+  },
+  "corrections": [
+    {
+      "diagnostic_id": "04",
+      "old_source_sha256": "f20a2662c5f4510c43a2bf64e6a00ed5f54f9f7f61c48ad165fad8299dcec062",
+      "new_source_sha256": "e739294be22bd048466457b72a4222d91b716c36ae211cde49774eae1330e0b3",
+      "observed_trigger": "The three collected validation protocols were u500, but the first audit compared them with the stage-0 u200 lineage checkpoint.",
+      "fix": "Resolve collection.validation_protocols.summary_checkpoint_update from the frozen dense inventory and require every protocol to match that exact u500 entity."
+    },
+    {
+      "diagnostic_id": "13",
+      "old_source_sha256": "3e3b05db3ed16136cf98f18a094b04def40141ad8e5183e0de4222f4541efba3",
+      "intermediate_source_sha256": "7fba79a614c4f97c4329b1eb215dc5852de883cdef2541a5c6d8d2bb50c38fab",
+      "new_source_sha256": "851add1609089a0c8712ce8e79996dae3c2de187446478aac18fb87477acd97b",
+      "observed_trigger": "The audit evaluated (sampled-mean)-noise and treated a 4.77e-7 float32 reassociation as a collector mismatch.",
+      "fix": "Reconstruct sampled with the collector's exact mean+noise expression. Preserve the separately measured 4.26e-7 first-clean-branch initial-observation difference as a source fingerprint, while retaining bit-exact NoiseBank checks."
+    },
+    {
+      "diagnostic_id": "15",
+      "old_source_sha256": "c29a9df8e6df8e7e6b8e1babcfd86377bbbed79006a30f3e137c2c3cc9ee8b78",
+      "new_source_sha256": "034af70dead87c65a343ac247ad0b31bcaf503497cfc34ecde53cabf25039ec6",
+      "observed_trigger": "Flattening production [T,64,D] calls into a larger batch changed CUDA GEMM reduction order and created a 1.14e-5 audit-only error.",
+      "fix": "Replay one original [64,D] control-step batch at a time and retain bit-exact equality."
+    },
+    {
+      "diagnostic_id": "21",
+      "old_source_sha256": "fa7907e46ed8b470af2c52a4bebf3788d9f98f4f064e15a3df516e78cf3a0366",
+      "new_source_sha256": "db71b3501647c4ce75686f55b25d2de5c5aa4729c2789e2fd4bf15e63c10db4f",
+      "observed_trigger": "The counterfactual probe accepted the full checkpoint inventory column path but not the dense-inventory column checkpoint_path.",
+      "fix": "Accept and validate both declared inventory schemas; add a regression test for both path columns."
+    },
+    {
+      "diagnostic_id": "25",
+      "old_source_sha256": "00a93a194be32e60d5cd5af5e6be3d7af41bcc4264e8909b6710ea6a76fbc4e1",
+      "new_source_sha256": "68add76b82036fc4f5f7ae2c8cc40d952c0a0fda9d0eb30aee6603317b8c9ec8",
+      "observed_trigger": "The real adapter discarded the underlying DependencyUnavailable message.",
+      "fix": "Persist the concrete exception type and message. The corrected result remains SKIPPED_DEPENDENCY because snapshot-0054 has fewer than the frozen 50 valid canonical steps; it was not relabelled PASS or FAIL."
+    },
+    {
+      "diagnostic_id": "42,62",
+      "old_source_sha256": {
+        "canonical_collection.py": "4e417c0e3caada993d374db6f29685e5eff9eefcf780994951164524094ba0ec",
+        "stage4_branch_collection.py": "9f75494d5a73a7bb96273a64785adee8ec936514b7108afc74834fea1af735a9",
+        "stage4_sim.py": "158d0e64d0967889ca4c348be990d6556ad070814b9b1c86d205b2b9589a38c8",
+        "stage6_sim.py": "bd3e14ee7a9914d4d252c5923fc3ab2401006e5a2c8af59ac7183c7de46305c1"
+      },
+      "new_source_sha256": {
+        "canonical_collection.py": "a9092c64e7f3dbc8c58fb2f4523829b99fb9f5ed2a403602c085c74aac833169",
+        "stage4_branch_collection.py": "f6fa0d3c4528110e40abc9edf1200e19dc3324d637c2d9da623d070019ee4963",
+        "stage4_sim.py": "2532731f018dacdc5cde88961d7cff083829ed3cc973ec91d36dfb331d3b4785",
+        "stage6_sim.py": "c6ace194d0f6fa860a147a00f3fbe26f76dece7fd4f389d312f63de42c45f7f9"
+      },
+      "observed_trigger": "Public state/action were identical at step 0, but without a full simulator reset the first physics step differed by 6.55 mm in body position and the next policy action by 0.4324. The full 50-step raw comparison reached 24.00 because PhysX solver/contact warm state leaked between branches.",
+      "fix": "At every SnapshotBank restore, fully reset PhysX, restore frozen default joints/body COM/material properties, then restore engine state. Compare only the original episode through its first terminal transition; post-terminal continuation is excluded. Preserve exact terminal checks and the original 1e-6 numerical gate. PhysX property setter readback alone permits 1e-6 absolute tolerance because COM round-trips differed by one float32 ULP (1.19e-7).",
+      "verification": "The corrected Stage-4 collector passed its replay gate and proceeded to load_stage3_critics; it then stopped because the preregistered diag35 critic bank is absent. That upstream gap is now preflighted and reported SKIPPED_DEPENDENCY rather than INVALID_PROTOCOL. The independently corrected diag62 completed 1,344 real PhysX branches and returned scientific FAIL/X=-."
+    }
+  ],
+  "preserved_failure_evidence": {
+    "pre_full_reset_replay_audit": "failed_attempts/pre_fix_20260804/stage4_replay_audit_before_full_physx_reset.json",
+    "pre_full_reset_replay_audit_sha256": "213be25572dcd77a67cd91c63b4653a1b9e16ecbae3c48eb02576dab3621a75d",
+    "replay_passed_then_missing_critics": "failed_attempts/pre_fix_20260804/branching_replay_passed_then_missing_diag35_critics.json",
+    "replay_passed_then_missing_critics_sha256": "6330479ce839b4b2fef72c1bd5378a6aa8353d215f930d46a4a14eba9955309a"
+  },
+  "guards": {
+    "canonical_rollout_index_unchanged": true,
+    "snapshot_bank_unchanged": true,
+    "scientific_thresholds_unchanged": true,
+    "feature_definitions_unchanged": true,
+    "decision_matrix_unchanged": true,
+    "A_mix_FCAMP_H4_loaded": false
+  },
+  "corrected_result_validation": {
+    "diag_04": {"status": "PASS", "sha256": "264aeb8a342bfdef8422472694a82475163b65693d439d9ac45e0920e6f0612d"},
+    "diag_13": {"status": "PASS", "sha256": "7a5ea14fb197ea9b6a259aa159920d7f3ea20da40f5af0ba4064fd14b115e34d"},
+    "diag_15": {"status": "PASS", "sha256": "0013b03bd74c2540c06b37b6234345563df743c279844cc93e76bcdc7af3c009"},
+    "diag_21": {"status": "PASS", "sha256": "32411b7d12aa2484297f6902b425d399f20dcabbb721d551d2a928bd9d9178ff"},
+    "diag_25": {"status": "SKIPPED_DEPENDENCY", "sha256": "87b6c42553c75086ebf4bab9067e203a0eb6841dcfc64c379c7ebb7692f0d6cb"},
+    "diag_42": {"status": "SKIPPED_DEPENDENCY", "sha256": "4506634de1f27893f27998b201ce7266cd46f886cfa76602dcf8523bb6708357"},
+    "diag_62": {"status": "FAIL", "decision_variable_X": "-", "sha256": "683607ab59dfc445c5de06d9538cafbba48dbdb7c6de8032ab8b6f86534942da"},
+    "diagnostic_tests": "115 passed"
+  }
+}

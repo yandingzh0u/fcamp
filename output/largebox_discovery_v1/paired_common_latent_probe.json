@@ -1,0 +1,14 @@
+{
+  "diagnostic_id": "60",
+  "errors": [
+    "domain triangle index is missing: /home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/domain_triangle_index.json"
+  ],
+  "evidence": {
+    "A_mix": "legacy_quarantined",
+    "PPO_used": false,
+    "decision_variable_L": "UNKNOWN"
+  },
+  "status": "SKIPPED_DEPENDENCY",
+  "summary": "paired common-coordinate probe lacks its own exact real pair evidence",
+  "warnings": []
+}

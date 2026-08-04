@@ -1,0 +1,236 @@
+{
+  "actor": {
+    "source_function": "build_observation",
+    "source_sha256": "71166cf55b885917be1092945b3764664caf98e0926d267cb382be551358b25c",
+    "stream": "actor",
+    "terms": [
+      {
+        "name": "reference_joint_state",
+        "role": "reference",
+        "source_expression": "reference_joint_state",
+        "start": 0,
+        "stop": 58,
+        "width": 58
+      },
+      {
+        "name": "motion_anchor_pos_b",
+        "role": "reference",
+        "source_expression": "motion_anchor_pos_b",
+        "start": 58,
+        "stop": 61,
+        "width": 3
+      },
+      {
+        "name": "motion_anchor_ori_b",
+        "role": "reference",
+        "source_expression": "motion_anchor_ori_b",
+        "start": 61,
+        "stop": 67,
+        "width": 6
+      },
+      {
+        "name": "anchor_z_err",
+        "role": "reference",
+        "source_expression": "anchor_z_err",
+        "start": 67,
+        "stop": 68,
+        "width": 1
+      },
+      {
+        "name": "termination_z_err",
+        "role": "reference",
+        "source_expression": "termination_z_err",
+        "start": 68,
+        "stop": 72,
+        "width": 4
+      },
+      {
+        "name": "root_lin_vel_b",
+        "role": "proprio",
+        "source_expression": "root_lin_vel_b",
+        "start": 72,
+        "stop": 75,
+        "width": 3
+      },
+      {
+        "name": "foot_contact",
+        "role": "proprio",
+        "source_expression": "foot_contact",
+        "start": 75,
+        "stop": 77,
+        "width": 2
+      },
+      {
+        "name": "termination_contact",
+        "role": "proprio",
+        "source_expression": "termination_contact",
+        "start": 77,
+        "stop": 81,
+        "width": 4
+      },
+      {
+        "name": "base_ang_vel",
+        "role": "proprio",
+        "source_expression": "base_ang_vel",
+        "start": 81,
+        "stop": 84,
+        "width": 3
+      },
+      {
+        "name": "joint_pos_rel",
+        "role": "proprio",
+        "source_expression": "joint_pos_rel",
+        "start": 84,
+        "stop": 113,
+        "width": 29
+      },
+      {
+        "name": "joint_vel_rel",
+        "role": "proprio",
+        "source_expression": "joint_vel_rel",
+        "start": 113,
+        "stop": 142,
+        "width": 29
+      },
+      {
+        "name": "last_action",
+        "role": "proprio",
+        "source_expression": "self.last_action",
+        "start": 142,
+        "stop": 171,
+        "width": 29
+      }
+    ],
+    "total_dim": 171
+  },
+  "actor_partition": {
+    "complete": true,
+    "disjoint": true,
+    "proprio_terms": [
+      "root_lin_vel_b",
+      "foot_contact",
+      "termination_contact",
+      "base_ang_vel",
+      "joint_pos_rel",
+      "joint_vel_rel",
+      "last_action"
+    ],
+    "proprio_width": 99,
+    "reference_terms": [
+      "reference_joint_state",
+      "motion_anchor_pos_b",
+      "motion_anchor_ori_b",
+      "anchor_z_err",
+      "termination_z_err"
+    ],
+    "reference_width": 72
+  },
+  "cardinality": {
+    "action_joint_count": 29,
+    "foot_body_count": 2,
+    "termination_body_count": 4,
+    "termination_contact_body_count": 4,
+    "track_body_count": 14
+  },
+  "cardinality_sources": {
+    "action_joint_count": "/home/y/my_mimic_mixgrpo/fcamp/envs/robots/g1.py:G1_29DOF_ACTION_NAMES",
+    "foot_body_count": "/home/y/my_mimic_mixgrpo/fcamp/envs/spec.py:MIMIC_FOOT_BODY_NAMES",
+    "termination_body_count": "/home/y/my_mimic_mixgrpo/fcamp/envs/spec.py:MIMIC_TERMINATION_BODY_NAMES",
+    "termination_contact_body_count": "same runtime list as MIMIC_TERMINATION_BODY_NAMES in envs/g1_mimic.py",
+    "track_body_count": "/home/y/my_mimic_mixgrpo/fcamp/envs/spec.py:MIMIC_BODY_NAMES"
+  },
+  "critic": {
+    "source_function": "build_critic_observation",
+    "source_sha256": "71166cf55b885917be1092945b3764664caf98e0926d267cb382be551358b25c",
+    "stream": "critic",
+    "terms": [
+      {
+        "name": "reference_joint_state",
+        "role": "reference",
+        "source_expression": "reference_joint_state",
+        "start": 0,
+        "stop": 58,
+        "width": 58
+      },
+      {
+        "name": "motion_anchor_pos_b",
+        "role": "reference",
+        "source_expression": "motion_anchor_pos_b",
+        "start": 58,
+        "stop": 61,
+        "width": 3
+      },
+      {
+        "name": "motion_anchor_ori_b",
+        "role": "reference",
+        "source_expression": "motion_anchor_ori_b",
+        "start": 61,
+        "stop": 67,
+        "width": 6
+      },
+      {
+        "name": "robot_body_pos_b",
+        "role": "proprio",
+        "source_expression": "robot_body_pos_b.reshape(self.num_envs, -1)",
+        "start": 67,
+        "stop": 109,
+        "width": 42
+      },
+      {
+        "name": "robot_body_ori_b",
+        "role": "proprio",
+        "source_expression": "robot_body_ori_b",
+        "start": 109,
+        "stop": 193,
+        "width": 84
+      },
+      {
+        "name": "root_lin_vel_b",
+        "role": "proprio",
+        "source_expression": "self.robot.data.root_lin_vel_b",
+        "start": 193,
+        "stop": 196,
+        "width": 3
+      },
+      {
+        "name": "root_ang_vel_b",
+        "role": "proprio",
+        "source_expression": "self.robot.data.root_ang_vel_b",
+        "start": 196,
+        "stop": 199,
+        "width": 3
+      },
+      {
+        "name": "joint_pos_rel",
+        "role": "proprio",
+        "source_expression": "joint_pos_rel",
+        "start": 199,
+        "stop": 228,
+        "width": 29
+      },
+      {
+        "name": "joint_vel_rel",
+        "role": "proprio",
+        "source_expression": "joint_vel_rel",
+        "start": 228,
+        "stop": 257,
+        "width": 29
+      },
+      {
+        "name": "last_action",
+        "role": "proprio",
+        "source_expression": "self.last_action",
+        "start": 257,
+        "stop": 286,
+        "width": 29
+      }
+    ],
+    "total_dim": 286
+  },
+  "derivation_guard": "term order is parsed from production torch.cat AST; cardinalities are parsed from production source constants; no diagnostic offset is hand-written",
+  "diagnostic_id": "20",
+  "observation_source": "/home/y/my_mimic_mixgrpo/fcamp/envs/observation.py",
+  "observation_source_sha256": "71166cf55b885917be1092945b3764664caf98e0926d267cb382be551358b25c",
+  "schema_version": "1.0.0",
+  "status": "PASS"
+}

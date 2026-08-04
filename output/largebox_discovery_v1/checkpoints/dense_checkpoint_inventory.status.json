@@ -1,0 +1,29 @@
+{
+  "diagnostic_id": "10",
+  "errors": [],
+  "evidence": {
+    "checkpoint_count": 15,
+    "checkpoint_lineage_id": "3def32d7905635d55a53d68fc7cd76369c26530db454a0bfdbe0652f53acab71",
+    "inventory_csv": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/checkpoints/dense_checkpoint_inventory.csv",
+    "required_updates": [
+      50,
+      100,
+      150,
+      200,
+      210,
+      220,
+      230,
+      240,
+      250,
+      276,
+      300,
+      350,
+      400,
+      450,
+      500
+    ]
+  },
+  "status": "PASS",
+  "summary": "all frozen canonical teacher checkpoints exist in one coherent lineage",
+  "warnings": []
+}

@@ -1,0 +1,28 @@
+{
+  "curriculum_entry_authorized": false,
+  "decision_variable_E": "UNKNOWN",
+  "diagnostic_id": "59",
+  "errors": [],
+  "evidence": {
+    "all_three_controls_outperformed": false,
+    "curriculum_entry_authorized": false,
+    "decision_variable_E": "UNKNOWN",
+    "full_curriculum_started_by_guard": false,
+    "guard_pass": false,
+    "minimum_consecutive_no_reference_edges": 3,
+    "missing_evidence_action": "deny authorization and preserve UNKNOWN",
+    "missing_evidence_treated_as_negative_result": false,
+    "required_controls": [
+      "direct_final_amp",
+      "fixed_checkpoint_schedule",
+      "bc_action_distillation"
+    ],
+    "source_edge_gate": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/edge_gate.json",
+    "source_edge_gate_sha256": "7ae9e76ad8842a20f6ea1cba20b8097c6b14a52691d1a89b60e47244af087b90",
+    "unauthorized_full_curriculum_artifacts_found": false
+  },
+  "guard_pass": false,
+  "status": "PASS",
+  "summary": "full curriculum was successfully blocked; evidence is insufficient or negative",
+  "warnings": []
+}

@@ -1,0 +1,14 @@
+{
+  "diagnostic_id": "42",
+  "errors": [
+    "diag_42 requires diag_35 persisted AMP critics; ratio_reliability.json is absent"
+  ],
+  "evidence": {
+    "A_mix": "legacy_quarantined",
+    "executor_seam": "diagnostics.common.stage4_sim.run_same_state_branching_real",
+    "required_bank_schema": "largebox_same_snapshot_branch_bank_v1"
+  },
+  "status": "SKIPPED_DEPENDENCY",
+  "summary": "same-state branching awaits the real Isaac executor/assets",
+  "warnings": []
+}

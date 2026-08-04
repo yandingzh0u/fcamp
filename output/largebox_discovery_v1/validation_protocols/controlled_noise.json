@@ -1,0 +1,14 @@
+{
+  "checkpoint_sha256": "b17d33a6460d453453f960a61840db3397b5756a20f475b5497a222934fb3b85",
+  "checkpoint_update": 500,
+  "common_sigma": 0.25,
+  "metrics": {
+    "failure_frac": 0.078125,
+    "motion_complete_frac": 0.921875,
+    "reference_progress_mean": 0.9772375822067261,
+    "return_mean": 11.361444473266602,
+    "steps_mean": 155.125
+  },
+  "protocol": "controlled_noise",
+  "source_collector_mode": "common_action_noise"
+}

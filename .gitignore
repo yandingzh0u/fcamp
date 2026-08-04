@@ -5,10 +5,18 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Training artifacts are local-only except for the human-readable train logs.
-runs/**
-!runs/**/
-!runs/**/train.log
+# Training and diagnostic artifacts are local-only.
+/runs/
+/output/
+
+# Large model/data artifacts.
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.parquet
+*.tar.gz
+events.out.tfevents.*
 
 .vscode/
 .idea/

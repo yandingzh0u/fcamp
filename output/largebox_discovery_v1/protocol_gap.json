@@ -1,0 +1,82 @@
+{
+  "diagnostic_id": "04",
+  "errors": [],
+  "evidence": {
+    "checkpoint_identity_role": "collection.validation_protocols.summary_checkpoint_update; distinct from the stage-0 primary lineage-audit checkpoint",
+    "deltas_from_clean_mean": {
+      "controlled_noise": {
+        "failure_frac": 0.078125,
+        "motion_complete_frac": -0.078125,
+        "reference_progress_mean": -0.022762417793273926,
+        "return_mean": -2.666001319885254,
+        "steps_mean": -7.375
+      },
+      "training_like": {
+        "failure_frac": 0.078125,
+        "motion_complete_frac": -0.078125,
+        "reference_progress_mean": -0.02435380220413208,
+        "return_mean": -3.6999988555908203,
+        "steps_mean": -7.890625
+      }
+    },
+    "frozen_checkpoint_path": "/home/y/my_mimic_mixgrpo/fcamp/runs/largebox_discovery_dense_u300_u500_s42_20260804/checkpoints/update_0500.pt",
+    "frozen_checkpoint_sha256": "b17d33a6460d453453f960a61840db3397b5756a20f475b5497a222934fb3b85",
+    "frozen_checkpoint_update": 500,
+    "interpretation_guard": "clean deterministic success is capability evidence, never stochastic occupancy evidence",
+    "missing_modes": [],
+    "observed_modes": [
+      "clean_mean",
+      "controlled_noise",
+      "training_like"
+    ],
+    "protocols": {
+      "clean_mean": {
+        "checkpoint_sha256": "b17d33a6460d453453f960a61840db3397b5756a20f475b5497a222934fb3b85",
+        "checkpoint_update": 500,
+        "metrics": {
+          "failure_frac": 0.0,
+          "motion_complete_frac": 1.0,
+          "reference_progress_mean": 1.0,
+          "return_mean": 14.027445793151855,
+          "steps_mean": 162.5
+        },
+        "mode": "clean_mean",
+        "path": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/validation_protocols/clean_mean.json"
+      },
+      "controlled_noise": {
+        "checkpoint_sha256": "b17d33a6460d453453f960a61840db3397b5756a20f475b5497a222934fb3b85",
+        "checkpoint_update": 500,
+        "metrics": {
+          "failure_frac": 0.078125,
+          "motion_complete_frac": 0.921875,
+          "reference_progress_mean": 0.9772375822067261,
+          "return_mean": 11.361444473266602,
+          "steps_mean": 155.125
+        },
+        "mode": "controlled_noise",
+        "path": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/validation_protocols/controlled_noise.json"
+      },
+      "training_like": {
+        "checkpoint_sha256": "b17d33a6460d453453f960a61840db3397b5756a20f475b5497a222934fb3b85",
+        "checkpoint_update": 500,
+        "metrics": {
+          "failure_frac": 0.078125,
+          "motion_complete_frac": 0.921875,
+          "reference_progress_mean": 0.9756461977958679,
+          "return_mean": 10.327446937561035,
+          "steps_mean": 154.609375
+        },
+        "mode": "training_like",
+        "path": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/validation_protocols/training_like.json"
+      }
+    },
+    "required_modes": [
+      "clean_mean",
+      "training_like",
+      "controlled_noise"
+    ]
+  },
+  "status": "PASS",
+  "summary": "all three validation protocols were compared on the frozen checkpoint",
+  "warnings": []
+}

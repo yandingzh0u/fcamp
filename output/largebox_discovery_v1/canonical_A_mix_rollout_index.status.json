@@ -1,0 +1,15 @@
+{
+  "diagnostic_id": "12.A_mix",
+  "errors": [],
+  "evidence": {
+    "approximation_used": false,
+    "canonical_rollout_index": null,
+    "checkpoint_loaded": false,
+    "legacy_quarantined": true,
+    "policy_domain": "A_mix_tracking",
+    "reason": "obsolete FCAMP/H4 excluded by the current protocol"
+  },
+  "status": "SKIPPED_DEPENDENCY",
+  "summary": "obsolete FCAMP/H4 domain is quarantined from the current protocol",
+  "warnings": []
+}

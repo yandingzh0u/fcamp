@@ -1,0 +1,47 @@
+{
+  "diagnostic_id": "62",
+  "errors": [],
+  "evidence": {
+    "A_mix": "legacy_quarantined",
+    "PPO_updates": 0,
+    "decision_variable_X": "-",
+    "event_incidence": {
+      "failure": 0.3541666666666667,
+      "joint_limit_event": 0.53125,
+      "segment_complete": 0.6458333333333334,
+      "success": 0.13392857142857142,
+      "tracking_loss": 0.3541666666666667,
+      "undesired_contact_event": 0.6197916666666666
+    },
+    "explanation": "real PhysX candidate grid has no preregistered non-trivial success/failure boundary",
+    "failure_cause": "mixed_or_state_dominant",
+    "failure_cause_evidence": {
+      "basis": "same-physical-state closed-loop outcome variation only; no reference RMSE",
+      "between_candidate_success_rate_variance": 0.0019199085884353737,
+      "between_snapshot_success_rate_variance": 0.04229556405895691,
+      "failure_cause": "mixed_or_state_dominant",
+      "mixed_outcome_snapshot_fraction": 0.421875
+    },
+    "held_out_models": [],
+    "label_source": "closed_loop_PhysX_outcomes_only",
+    "negative_fraction": 0.8660714285714286,
+    "outcome_bank": "/home/y/my_mimic_mixgrpo/fcamp/output/largebox_discovery_v1/executability_physx_outcomes.npz",
+    "outcome_bank_sha256": "e766ca51b9207ce9eccd6ac6a1891cc8f69f4b85416ce9e74c7c322dc4bbf5b1",
+    "positive_fraction": 0.13392857142857142,
+    "protocol_sha256": "810d70d88ebafbd260955c849173772fa387817d070971527f867862b0a8947e",
+    "real_physx_outcomes": true,
+    "reference_RMSE_used_as_label": false,
+    "sample_count": 1344,
+    "thresholds": {
+      "ece_max": 0.08,
+      "held_out_auroc_min": 0.8,
+      "negative_fraction_min": 0.15,
+      "positive_fraction_min": 0.15,
+      "same_state_candidate_pair_accuracy_min": 0.7,
+      "seed_direction_consistent": true
+    }
+  },
+  "status": "FAIL",
+  "summary": "real PhysX candidate grid has no preregistered non-trivial success/failure boundary",
+  "warnings": []
+}

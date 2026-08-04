@@ -1,0 +1,45 @@
+{
+  "diagnostic_id": "47",
+  "errors": [
+    "diag_41:missing",
+    "diag_42:SKIPPED_DEPENDENCY",
+    "diag_43:missing",
+    "diag_44:missing",
+    "diag_45:missing",
+    "diag_46:missing"
+  ],
+  "evidence": {
+    "A_mix": "legacy_quarantined",
+    "blind_video": {},
+    "cem_exploitability": {},
+    "external_video_preferences": {
+      "claim": "no human/video preference was imputed from physical metrics",
+      "status": "NOT_COLLECTED_OPTIONAL"
+    },
+    "intervention_sensitivity": {},
+    "local_action_ranking": {},
+    "metric_combination": "none; every agreement statistic remains separate",
+    "offline_reward_vs_outcomes": {
+      "reason": "diag_41 unavailable",
+      "status": "UNKNOWN"
+    },
+    "primary_candidate": "T_u500-positive persisted AMP critic",
+    "same_state_branching": {
+      "A_mix": "legacy_quarantined",
+      "executor_seam": "diagnostics.common.stage4_sim.run_same_state_branching_real",
+      "required_bank_schema": "largebox_same_snapshot_branch_bank_v1"
+    },
+    "standard_AMP_control": "K-positive persisted AMP critic",
+    "unavailable_evidence": [
+      "diag_41:missing",
+      "diag_42:SKIPPED_DEPENDENCY",
+      "diag_43:missing",
+      "diag_44:missing",
+      "diag_45:missing",
+      "diag_46:missing"
+    ]
+  },
+  "status": "SKIPPED_DEPENDENCY",
+  "summary": "metric agreement is partial because real Stage-4 evidence is unavailable",
+  "warnings": []
+}

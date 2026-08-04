@@ -1,0 +1,311 @@
+{
+  "diagnostic_id": "22",
+  "errors": [],
+  "evidence": {
+    "action_delta_thresholds": {
+      "adjacent_p50": 0.1179191991686821,
+      "adjacent_p90": 0.22915891408920286,
+      "adjacent_p95": 0.2761806964874267
+    },
+    "by_history": [
+      {
+        "feature_dimension": 99,
+        "heldout_sample_count_before_cap": 1739,
+        "history_steps": 1,
+        "principal": {
+          "action_alias_fraction": 0.2693502012650949,
+          "k": 10.0,
+          "neighbor_action_distance_mean": 0.2355078288494354,
+          "neighbor_contact_mismatch": 0.03990799309948246,
+          "neighbor_phase_delta_mean": 2.559401955146636,
+          "sample_count": 1739.0,
+          "teacher_action_conditional_variance": 0.045310945995012536
+        },
+        "principal_threshold": "adjacent_p95",
+        "sample_count": 1739,
+        "threshold_panels": {
+          "adjacent_p50": {
+            "action_alias_fraction": 0.8388729154686602,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.2355078288494354,
+            "neighbor_contact_mismatch": 0.03990799309948246,
+            "neighbor_phase_delta_mean": 2.559401955146636,
+            "sample_count": 1739.0,
+            "teacher_action_conditional_variance": 0.045310945995012536
+          },
+          "adjacent_p90": {
+            "action_alias_fraction": 0.3805060379528465,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.2355078288494354,
+            "neighbor_contact_mismatch": 0.03990799309948246,
+            "neighbor_phase_delta_mean": 2.559401955146636,
+            "sample_count": 1739.0,
+            "teacher_action_conditional_variance": 0.045310945995012536
+          },
+          "adjacent_p95": {
+            "action_alias_fraction": 0.2693502012650949,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.2355078288494354,
+            "neighbor_contact_mismatch": 0.03990799309948246,
+            "neighbor_phase_delta_mean": 2.559401955146636,
+            "sample_count": 1739.0,
+            "teacher_action_conditional_variance": 0.045310945995012536
+          }
+        }
+      },
+      {
+        "feature_dimension": 198,
+        "heldout_sample_count_before_cap": 1729,
+        "history_steps": 2,
+        "principal": {
+          "action_alias_fraction": 0.26714864083285134,
+          "k": 10.0,
+          "neighbor_action_distance_mean": 0.23534294412417245,
+          "neighbor_contact_mismatch": 0.05471370734528629,
+          "neighbor_phase_delta_mean": 2.5050896471949105,
+          "sample_count": 1729.0,
+          "teacher_action_conditional_variance": 0.04507638871008654
+        },
+        "principal_threshold": "adjacent_p95",
+        "sample_count": 1729,
+        "threshold_panels": {
+          "adjacent_p50": {
+            "action_alias_fraction": 0.8379988432620011,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.23534294412417245,
+            "neighbor_contact_mismatch": 0.05471370734528629,
+            "neighbor_phase_delta_mean": 2.5050896471949105,
+            "sample_count": 1729.0,
+            "teacher_action_conditional_variance": 0.04507638871008654
+          },
+          "adjacent_p90": {
+            "action_alias_fraction": 0.3821862348178138,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.23534294412417245,
+            "neighbor_contact_mismatch": 0.05471370734528629,
+            "neighbor_phase_delta_mean": 2.5050896471949105,
+            "sample_count": 1729.0,
+            "teacher_action_conditional_variance": 0.04507638871008654
+          },
+          "adjacent_p95": {
+            "action_alias_fraction": 0.26714864083285134,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.23534294412417245,
+            "neighbor_contact_mismatch": 0.05471370734528629,
+            "neighbor_phase_delta_mean": 2.5050896471949105,
+            "sample_count": 1729.0,
+            "teacher_action_conditional_variance": 0.04507638871008654
+          }
+        }
+      },
+      {
+        "feature_dimension": 396,
+        "heldout_sample_count_before_cap": 1709,
+        "history_steps": 4,
+        "principal": {
+          "action_alias_fraction": 0.26933879461673493,
+          "k": 10.0,
+          "neighbor_action_distance_mean": 0.2364646811000287,
+          "neighbor_contact_mismatch": 0.06875365710942072,
+          "neighbor_phase_delta_mean": 2.3201872440023403,
+          "sample_count": 1709.0,
+          "teacher_action_conditional_variance": 0.04529211292851968
+        },
+        "principal_threshold": "adjacent_p95",
+        "sample_count": 1709,
+        "threshold_panels": {
+          "adjacent_p50": {
+            "action_alias_fraction": 0.8358689291983616,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.2364646811000287,
+            "neighbor_contact_mismatch": 0.06875365710942072,
+            "neighbor_phase_delta_mean": 2.3201872440023403,
+            "sample_count": 1709.0,
+            "teacher_action_conditional_variance": 0.04529211292851968
+          },
+          "adjacent_p90": {
+            "action_alias_fraction": 0.3845523698069046,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.2364646811000287,
+            "neighbor_contact_mismatch": 0.06875365710942072,
+            "neighbor_phase_delta_mean": 2.3201872440023403,
+            "sample_count": 1709.0,
+            "teacher_action_conditional_variance": 0.04529211292851968
+          },
+          "adjacent_p95": {
+            "action_alias_fraction": 0.26933879461673493,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.2364646811000287,
+            "neighbor_contact_mismatch": 0.06875365710942072,
+            "neighbor_phase_delta_mean": 2.3201872440023403,
+            "sample_count": 1709.0,
+            "teacher_action_conditional_variance": 0.04529211292851968
+          }
+        }
+      },
+      {
+        "feature_dimension": 792,
+        "heldout_sample_count_before_cap": 1669,
+        "history_steps": 8,
+        "principal": {
+          "action_alias_fraction": 0.2677052127022169,
+          "k": 10.0,
+          "neighbor_action_distance_mean": 0.23463374428422776,
+          "neighbor_contact_mismatch": 0.08771719592570401,
+          "neighbor_phase_delta_mean": 2.084541641701618,
+          "sample_count": 1669.0,
+          "teacher_action_conditional_variance": 0.044745846689344816
+        },
+        "principal_threshold": "adjacent_p95",
+        "sample_count": 1669,
+        "threshold_panels": {
+          "adjacent_p50": {
+            "action_alias_fraction": 0.8312162971839425,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.23463374428422776,
+            "neighbor_contact_mismatch": 0.08771719592570401,
+            "neighbor_phase_delta_mean": 2.084541641701618,
+            "sample_count": 1669.0,
+            "teacher_action_conditional_variance": 0.044745846689344816
+          },
+          "adjacent_p90": {
+            "action_alias_fraction": 0.38585979628520073,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.23463374428422776,
+            "neighbor_contact_mismatch": 0.08771719592570401,
+            "neighbor_phase_delta_mean": 2.084541641701618,
+            "sample_count": 1669.0,
+            "teacher_action_conditional_variance": 0.044745846689344816
+          },
+          "adjacent_p95": {
+            "action_alias_fraction": 0.2677052127022169,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.23463374428422776,
+            "neighbor_contact_mismatch": 0.08771719592570401,
+            "neighbor_phase_delta_mean": 2.084541641701618,
+            "sample_count": 1669.0,
+            "teacher_action_conditional_variance": 0.044745846689344816
+          }
+        }
+      },
+      {
+        "feature_dimension": 1584,
+        "heldout_sample_count_before_cap": 1589,
+        "history_steps": 16,
+        "principal": {
+          "action_alias_fraction": 0.252234109502832,
+          "k": 10.0,
+          "neighbor_action_distance_mean": 0.22923385697234053,
+          "neighbor_contact_mismatch": 0.10270610446821901,
+          "neighbor_phase_delta_mean": 1.6336060415355569,
+          "sample_count": 1589.0,
+          "teacher_action_conditional_variance": 0.0433822118654646
+        },
+        "principal_threshold": "adjacent_p95",
+        "sample_count": 1589,
+        "threshold_panels": {
+          "adjacent_p50": {
+            "action_alias_fraction": 0.8270610446821901,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.22923385697234053,
+            "neighbor_contact_mismatch": 0.10270610446821901,
+            "neighbor_phase_delta_mean": 1.6336060415355569,
+            "sample_count": 1589.0,
+            "teacher_action_conditional_variance": 0.0433822118654646
+          },
+          "adjacent_p90": {
+            "action_alias_fraction": 0.3763373190685966,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.22923385697234053,
+            "neighbor_contact_mismatch": 0.10270610446821901,
+            "neighbor_phase_delta_mean": 1.6336060415355569,
+            "sample_count": 1589.0,
+            "teacher_action_conditional_variance": 0.0433822118654646
+          },
+          "adjacent_p95": {
+            "action_alias_fraction": 0.252234109502832,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.22923385697234053,
+            "neighbor_contact_mismatch": 0.10270610446821901,
+            "neighbor_phase_delta_mean": 1.6336060415355569,
+            "sample_count": 1589.0,
+            "teacher_action_conditional_variance": 0.0433822118654646
+          }
+        }
+      },
+      {
+        "feature_dimension": 3168,
+        "heldout_sample_count_before_cap": 1433,
+        "history_steps": 32,
+        "principal": {
+          "action_alias_fraction": 0.24445219818562455,
+          "k": 10.0,
+          "neighbor_action_distance_mean": 0.22734696719931732,
+          "neighbor_contact_mismatch": 0.11304954640614097,
+          "neighbor_phase_delta_mean": 1.1563852058618282,
+          "sample_count": 1433.0,
+          "teacher_action_conditional_variance": 0.043837507305391314
+        },
+        "principal_threshold": "adjacent_p95",
+        "sample_count": 1433,
+        "threshold_panels": {
+          "adjacent_p50": {
+            "action_alias_fraction": 0.8286113049546406,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.22734696719931732,
+            "neighbor_contact_mismatch": 0.11304954640614097,
+            "neighbor_phase_delta_mean": 1.1563852058618282,
+            "sample_count": 1433.0,
+            "teacher_action_conditional_variance": 0.043837507305391314
+          },
+          "adjacent_p90": {
+            "action_alias_fraction": 0.373831123517097,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.22734696719931732,
+            "neighbor_contact_mismatch": 0.11304954640614097,
+            "neighbor_phase_delta_mean": 1.1563852058618282,
+            "sample_count": 1433.0,
+            "teacher_action_conditional_variance": 0.043837507305391314
+          },
+          "adjacent_p95": {
+            "action_alias_fraction": 0.24445219818562455,
+            "k": 10.0,
+            "neighbor_action_distance_mean": 0.22734696719931732,
+            "neighbor_contact_mismatch": 0.11304954640614097,
+            "neighbor_phase_delta_mean": 1.1563852058618282,
+            "sample_count": 1433.0,
+            "teacher_action_conditional_variance": 0.043837507305391314
+          }
+        }
+      }
+    ],
+    "checkpoint_sha256": "b17d33a6460d453453f960a61840db3397b5756a20f475b5497a222934fb3b85",
+    "checkpoint_update": 500,
+    "collector_mode": "clean_mean",
+    "histories": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32
+    ],
+    "k": 10,
+    "phase_period": 324.0,
+    "primary_teacher_quality": {
+      "checkpoint_path": "/home/y/my_mimic_mixgrpo/fcamp/runs/largebox_discovery_dense_u300_u500_s42_20260804/checkpoints/update_0500.pt",
+      "checkpoint_update": 500,
+      "motion_completion": 1.0,
+      "protocol": "clean_mean",
+      "required_motion_completion": 0.9,
+      "role": "capability gate only; never stochastic occupancy evidence",
+      "run_id": "largebox_discovery_dense_u300_u500_s42_20260804",
+      "source_paths": "/home/y/my_mimic_mixgrpo/fcamp/runs/largebox_discovery_dense_u300_u500_s42_20260804/logs/metrics.jsonl;/home/y/my_mimic_mixgrpo/fcamp/runs/largebox_discovery_dense_u300_u500_s42_20260804/logs/train.log"
+    },
+    "split": "complete snapshot/trajectory groups; metrics on test only",
+    "threshold_selection_guard": "the principal delta is the held-in trajectory adjacent-action p95, not a threshold selected on aliasing results"
+  },
+  "status": "PASS",
+  "summary": "held-out no-reference kNN aliasing was measured for histories 1--32",
+  "warnings": []
+}

@@ -1,0 +1,29 @@
+{
+  "diagnostic_id": "47",
+  "errors": [
+    "diag_41:missing",
+    "diag_42:SKIPPED_DEPENDENCY",
+    "diag_43:missing",
+    "diag_44:missing",
+    "diag_45:missing",
+    "diag_46:missing"
+  ],
+  "evidence": {
+    "A_mix": "legacy_quarantined",
+    "decision_reason": "missing or skipped real branch/CEM/intervention/video evidence",
+    "decision_variable_T": "UNKNOWN",
+    "fail_closed": true,
+    "primary_candidate": "T_u500",
+    "unavailable_evidence": [
+      "diag_41:missing",
+      "diag_42:SKIPPED_DEPENDENCY",
+      "diag_43:missing",
+      "diag_44:missing",
+      "diag_45:missing",
+      "diag_46:missing"
+    ]
+  },
+  "status": "SKIPPED_DEPENDENCY",
+  "summary": "reward validity remains UNKNOWN until every frozen real-evidence diagnostic completes",
+  "warnings": []
+}
